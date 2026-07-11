@@ -1,0 +1,24 @@
+{
+  "attachmentFolderPath": "docs/assets",
+  "alwaysUpdateLinks": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "docs/00-inbox",
+  "newLinkFormat": "relative",
+  "useMarkdownLinks": true,
+  "showUnsupportedFiles": false,
+  "userIgnoreFilters": [
+    "node_modules/",
+    ".venv/",
+    ".secrets/",
+    ".sessions/",
+    "backend/.sessions/",
+    "backend/.secrets/",
+    "dist/",
+    "build/",
+    "postgres_data/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/"
+  ]
+}

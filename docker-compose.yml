@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: monitoring
+      POSTGRES_PASSWORD: monitoring
+      POSTGRES_DB: monitoring
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitoring -d monitoring"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  telegram-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.telegram_worker
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  telegram-live-sync:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.telegram_live_sync
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  youtube-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.youtube_worker
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ai-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.ai_worker
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  telegram_sessions:
