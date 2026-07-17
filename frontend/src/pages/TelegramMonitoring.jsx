@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { endpoints } from "../api/client";
+import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
+import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { RecentMentions } from "../components/RecentMentions";
 import { Sidebar } from "../components/Sidebar";
 import { SourceBoard } from "../components/SourceBoard";
 import { SourceForm } from "../components/SourceForm";
 import { StatsBar } from "../components/StatsBar";
+import { translateUiText } from "../i18n";
 
 export function TelegramMonitoring() {
   const [botStatus, setBotStatus] = useState(null);
@@ -15,14 +17,14 @@ export function TelegramMonitoring() {
   const [sources, setSources] = useState([]);
   const [summary, setSummary] = useState(null);
   const [mentions, setMentions] = useState([]);
-  const [selectedBrandId, setSelectedBrandId] = useState("");
+  const [selectedBrandId, setSelectedBrandId] = useState(() => readSelectedBrandId());
   const [accessResult, setAccessResult] = useState(null);
   const [sourceResult, setSourceResult] = useState(null);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("owned");
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const defaultBrandApplied = useRef(false);
+  const [notice, setNotice] = useState("");
   const realtimeRefreshTimer = useRef(null);
   const selectedBrandIdRef = useRef("");
   const lastLoadedBrandId = useRef("");
@@ -62,10 +64,8 @@ export function TelegramMonitoring() {
       setBotStatus(bot);
       setCategories(categoryRows);
       setBrands(brandRows);
-      const defaultBrandId =
-        selectedBrandId || (!defaultBrandApplied.current && brandRows.length ? brandRows[0].id : "");
+      const defaultBrandId = resolveSelectedBrandId(brandRows, selectedBrandId);
       if (defaultBrandId && defaultBrandId !== selectedBrandId) {
-        defaultBrandApplied.current = true;
         setSelectedBrandId(defaultBrandId);
       }
       await loadDashboard(defaultBrandId);
@@ -105,6 +105,7 @@ export function TelegramMonitoring() {
       if (!shouldRefresh(event) || realtimeRefreshTimer.current) return;
       realtimeRefreshTimer.current = window.setTimeout(() => {
         realtimeRefreshTimer.current = null;
+        clearApiCache(["/telegram/", "/dashboard/summary", "/mentions"]);
         loadDashboard(selectedBrandIdRef.current).catch((err) => setError(err.message));
       }, 800);
     }
@@ -199,8 +200,21 @@ export function TelegramMonitoring() {
     await loadDashboard(selectedBrandId);
   }
 
-  async function handleRefresh() {
-    await loadInitial();
+  async function handleDeleteSource(source) {
+    const name = source.title || (source.username ? `@${source.username}` : source.chat_id) || "Telegram source";
+    const confirmed = window.confirm(translateUiText(
+      `“${name}” source butunlay o'chirilsinmi? Unga tegishli barcha post, comment, AI tahlil va alertlar ham o'chadi. Bu amalni ortga qaytarib bo'lmaydi.`,
+    ));
+    if (!confirmed) return;
+    setError("");
+    setNotice("");
+    try {
+      const deleted = await endpoints.deleteSource(source.id);
+      setNotice(`${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`);
+      await loadDashboard(selectedBrandId);
+    } catch (err) {
+      setError(err.message || "Source o'chirishda xatolik yuz berdi.");
+    }
   }
 
   const isInitialLoading = loading && !summary && !sources.length && !mentions.length;
@@ -210,16 +224,14 @@ export function TelegramMonitoring() {
       <Sidebar botStatus={botStatus} />
       <main className="main">
         <PageHeader
-          brands={brands}
-          selectedBrandId={selectedBrandId}
-          onBrandChange={setSelectedBrandId}
-          onRefresh={handleRefresh}
           loading={isInitialLoading}
         />
 
         {error && <div className="errorBanner">{error}</div>}
+        {notice && <div className="loadingBar success">{notice}</div>}
 
         <StatsBar sources={visibleSources} summary={summary} loading={isInitialLoading} />
+        <MonitoringInsights platform="telegram" sources={visibleSources} summary={summary} loading={isInitialLoading} />
 
         <section className="monitoringWorkspace">
           <SourceBoard
@@ -232,6 +244,7 @@ export function TelegramMonitoring() {
             onCheckSource={handleAccessCheck}
             onRefreshSource={handleRefreshSource}
             onBackfillSource={handleBackfillSource}
+            onDeleteSource={handleDeleteSource}
             loading={isInitialLoading}
           />
 

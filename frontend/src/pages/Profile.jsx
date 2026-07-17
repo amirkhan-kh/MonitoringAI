@@ -1,11 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   AlertCircle,
+  Brain,
   CalendarClock,
   CheckCircle2,
   ExternalLink,
+  Facebook,
+  Globe2,
   Hash,
+  Instagram,
   Link2,
+  ListChecks,
   LogOut,
   Pause,
   Play,
@@ -13,14 +19,27 @@ import {
   RefreshCw,
   Save,
   ShieldCheck,
+  Sparkles,
+  Tags,
+  Target,
+  Trash2,
   UserCog,
   X,
 } from "lucide-react";
-import { endpoints } from "../api/client";
+import {
+  endpoints,
+  logout,
+  readAdminSession,
+  readSelectedBrandId,
+  resolveSelectedBrandId,
+  saveAdminSession,
+  saveSelectedBrandId,
+} from "../api/client";
 import { TelegramIcon, YouTubeIcon } from "../components/BrandIcons";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
-import { clearAdminSession, readAdminSession, saveAdminSession } from "./Login";
+import { SmartSelect } from "../components/SmartSelect";
+import { translateUiText } from "../i18n";
 
 const platformTabs = [
   {
@@ -38,11 +57,18 @@ const platformTabs = [
     description: "Rasmiy kanal, video source, hashtag va comment oqimi.",
   },
   {
-    key: "future",
-    label: "Instagram/Facebook",
-    icon: ShieldCheck,
-    tone: "planned",
-    description: "Keyingi social platformalar uchun registry joyi.",
+    key: "instagram",
+    label: "Instagram",
+    icon: Instagram,
+    tone: "instagram",
+    description: "Instagram Business akkaunt, comment va @mention oqimi.",
+  },
+  {
+    key: "facebook",
+    label: "Facebook",
+    icon: Facebook,
+    tone: "facebook",
+    description: "Facebook Page token, comment va reply oqimi.",
   },
 ];
 
@@ -75,6 +101,36 @@ function normalizeHashtag(value) {
 
 function splitHashtags(value) {
   return value.split(/[\s,;]+/).map(normalizeHashtag).filter(Boolean);
+}
+
+function textToList(value) {
+  return String(value || "")
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function listToText(value) {
+  return (value || []).join("\n");
+}
+
+function uniqueCatalogOptions(values) {
+  const rows = new Map();
+  (values || []).forEach((value) => {
+    const option = typeof value === "string" ? { key: value, value, label: value } : value;
+    if (!option?.label) return;
+    const key = String(option.value || option.label).toLocaleLowerCase("uz");
+    if (!rows.has(key)) rows.set(key, option);
+  });
+  return [...rows.values()];
+}
+
+function catalogValue(item) {
+  return item?.value || item?.label || item?.key || "";
+}
+
+function catalogMatches(item, value) {
+  return [item?.value, item?.label, item?.key].some((candidate) => String(candidate || "") === String(value || ""));
 }
 
 function uniqueHashtags(tags) {
@@ -147,13 +203,28 @@ function sourceCategory(source) {
 }
 
 function isOwnedSource(source, brandId) {
-  if (brandId && source.brand_id !== brandId) return false;
+  if (!brandId || source.brand_id !== brandId) return false;
   return sourceCategory(source) === "owned";
 }
 
-function ProfileSummary({ telegramSources, youtubeSources, selectedBrandName }) {
-  const total = telegramSources.length + youtubeSources.length;
-  const active = countActive(telegramSources) + countActive(youtubeSources);
+function metaSourceDisplay(platform, source) {
+  if (platform === "instagram") {
+    return {
+      title: source.username ? `@${source.username}` : source.account_name || source.ig_user_id || "Instagram account",
+      ref: source.ig_user_id,
+      href: source.username ? `https://www.instagram.com/${source.username.replace(/^@/, "")}` : "",
+    };
+  }
+  return {
+    title: source.page_name || source.username || source.page_id || "Facebook Page",
+    ref: source.page_id,
+    href: source.username ? `https://www.facebook.com/${source.username}` : "",
+  };
+}
+
+function ProfileSummary({ telegramSources, youtubeSources, instagramSources, facebookSources, selectedBrandName }) {
+  const total = telegramSources.length + youtubeSources.length + instagramSources.length + facebookSources.length;
+  const active = countActive(telegramSources) + countActive(youtubeSources) + countActive(instagramSources) + countActive(facebookSources);
   const paused = total - active;
   const cards = [
     { label: "Brand", value: selectedBrandName || "Tanlanmagan", icon: UserCog, tone: "profile" },
@@ -180,17 +251,509 @@ function ProfileSummary({ telegramSources, youtubeSources, selectedBrandName }) 
   );
 }
 
+function ActiveBrandSelector({ brands, selectedBrandId, onChange, onCreate }) {
+  return (
+    <section className="panel activeBrandToolbar">
+      <div>
+        <strong>Faol brand</strong>
+        <p>Shu yerda tanlangan brand dashboard va barcha monitoring bo'limlarida avtomatik qo'llanadi.</p>
+      </div>
+      <SmartSelect
+        value={selectedBrandId}
+        options={brands.map((brand) => ({ value: brand.id, label: brand.name }))}
+        onChange={onChange}
+        emptyLabel="Brand mavjud emas"
+        ariaLabel="Faol brandni qidirish va tanlash"
+      />
+      <button className="button secondary" type="button" onClick={onCreate}>
+        <Plus size={16} />
+        <span>Yangi brand</span>
+      </button>
+    </section>
+  );
+}
+
+function BrandIntelligencePanel({ brand, taxonomy, onSave, onCreate, saving }) {
+  const { i18n } = useTranslation();
+  const resolvedLanguage = i18n.resolvedLanguage || i18n.language || "uz";
+  const analysisLanguage = ["uz", "ru", "en"].includes(resolvedLanguage) ? resolvedLanguage : "uz";
+  const categories = taxonomy?.categories || [];
+  const goals = taxonomy?.goals || [];
+  const [form, setForm] = useState(() => buildBrandForm(brand, analysisLanguage));
+  const [selectionTouched, setSelectionTouched] = useState(false);
+  const [suggestion, setSuggestion] = useState({ status: "idle", message: "", model: "" });
+  const suggestionRequestRef = useRef(0);
+  const currentSignatureRef = useRef("");
+
+  useEffect(() => {
+    setForm(buildBrandForm(brand, analysisLanguage));
+    setSelectionTouched(false);
+    setSuggestion({ status: "idle", message: "", model: "" });
+  }, [analysisLanguage, brand]);
+
+  const selectedCategory = categories.find((item) => catalogMatches(item, form.primary_category));
+  const primaryOptions = form.primary_category && !selectedCategory
+    ? [{ value: form.primary_category, label: form.primary_category }, ...categories]
+    : categories;
+  const allChildOptions = useMemo(() => uniqueCatalogOptions(categories.flatMap((category) => category.children || [])), [categories]);
+  const allActivityOptions = useMemo(() => uniqueCatalogOptions(allChildOptions.flatMap((child) => child.activities || [])), [allChildOptions]);
+  const allBusinessModelOptions = useMemo(() => uniqueCatalogOptions(allActivityOptions.flatMap((activity) => activity.business_models || [])), [allActivityOptions]);
+  const allAudienceOptions = useMemo(() => uniqueCatalogOptions(Object.values(taxonomy?.audience_groups || {}).flat()), [taxonomy?.audience_groups]);
+  const childOptions = uniqueCatalogOptions(selectedCategory?.children || []);
+  const selectedChild = allChildOptions.find((item) => catalogMatches(item, form.sub_category));
+  const activityOptions = selectedChild?.activities || [];
+  const selectedActivity = allActivityOptions.find((item) => catalogMatches(item, form.activity));
+  const businessModelOptions = selectedActivity?.business_models || [];
+  const selectedBusinessModel = allBusinessModelOptions.find((item) => catalogMatches(item, form.business_model));
+  const audienceOptions = uniqueCatalogOptions((selectedBusinessModel?.audience_groups || [])
+    .flatMap((groupKey) => taxonomy?.audience_groups?.[groupKey] || []));
+  const selectedGoalKeys = new Set(form.monitoring_goals);
+  const readinessItems = [
+    ["Brand nomi", form.name.trim()],
+    ["Faoliyat tavsifi", form.description.trim()],
+    ["Yo'nalish", form.primary_category],
+    ["Faoliyat modeli", form.activity && form.business_model],
+    ["Alias yoki keyword", textToList(form.aliases).length || textToList(form.keywords).length],
+    ["Mahsulot/xizmat", textToList(form.products).length],
+    ["Auditoriya", form.audience.trim()],
+    ["Bozor", form.region.trim()],
+    ["Monitoring maqsadi", form.monitoring_goals.length],
+  ];
+  const completedReadiness = readinessItems.filter(([, value]) => Boolean(value)).length;
+  const readiness = Math.round((completedReadiness / readinessItems.length) * 100);
+  const missingReadiness = readinessItems.filter(([, value]) => !value).map(([label]) => label);
+  const suggestionReady = Boolean(
+    form.name.trim()
+    && form.primary_category
+    && form.sub_category
+    && form.activity
+    && form.business_model
+    && form.audience_segment
+  );
+  const suggestionSignature = [
+    form.name.trim(),
+    form.website.trim(),
+    form.primary_category,
+    form.sub_category,
+    form.activity,
+    form.business_model,
+    form.audience_segment,
+    form.region.trim(),
+    analysisLanguage,
+  ].join("|");
+  currentSignatureRef.current = suggestionSignature;
+
+  useEffect(() => {
+    if (!selectionTouched || !suggestionReady) return undefined;
+    const timer = window.setTimeout(() => generateSuggestions(suggestionSignature), 850);
+    return () => window.clearTimeout(timer);
+  }, [selectionTouched, suggestionReady, suggestionSignature]);
+
+  async function generateSuggestions(requestSignature = suggestionSignature) {
+    if (!suggestionReady) {
+      setSuggestion({
+        status: "error",
+        message: "Avval yo'nalishdan auditoriya segmentigacha bo'lgan bog'langan tanlovlarni to'ldiring.",
+        model: "",
+      });
+      return;
+    }
+    const requestId = suggestionRequestRef.current + 1;
+    suggestionRequestRef.current = requestId;
+    setSuggestion({ status: "loading", message: "Gemini Pro tanlangan yo'nalishni chuqur tahlil qilmoqda...", model: "" });
+    try {
+      const response = await endpoints.brandProfileSuggestions({
+        name: form.name.trim(),
+        website: form.website.trim() || null,
+        language: analysisLanguage,
+        category_path: [form.primary_category, form.sub_category, form.activity, form.business_model, form.audience_segment].filter(Boolean),
+        business_model: form.business_model,
+        audience_segment: form.audience_segment || null,
+        region: form.region.trim() || null,
+        existing_values: {
+          description: form.description.trim(),
+          audience: form.audience.trim(),
+          aliases: textToList(form.aliases),
+          keywords: textToList(form.keywords),
+          products: textToList(form.products),
+          competitors: textToList(form.competitors),
+          risk_keywords: textToList(form.risk_keywords),
+          positive_keywords: textToList(form.positive_keywords),
+          ignore_terms: textToList(form.ignore_terms),
+          monitor_notes: form.monitor_notes.trim(),
+        },
+      });
+      if (requestId !== suggestionRequestRef.current || requestSignature !== currentSignatureRef.current) return;
+      setForm((current) => ({
+        ...current,
+        description: response.description || "",
+        audience: response.audience || "",
+        aliases: listToText(response.aliases),
+        keywords: listToText(response.keywords),
+        products: listToText(response.products),
+        competitors: listToText(response.competitors),
+        risk_keywords: listToText(response.risk_keywords),
+        positive_keywords: listToText(response.positive_keywords),
+        ignore_terms: listToText(response.ignore_terms),
+        monitor_notes: response.monitor_notes || "",
+      }));
+      setSelectionTouched(false);
+      setSuggestion({
+        status: "success",
+        message: "Maydonlar aqlli tarzda to'ldirildi. Har bir qiymatni qo'lda tahrirlashingiz mumkin.",
+        model: response.model_name || "Gemini Pro",
+      });
+    } catch (error) {
+      if (requestId !== suggestionRequestRef.current) return;
+      setSuggestion({ status: "error", message: error.message, model: "" });
+    }
+  }
+
+  function buildPayload() {
+    const categoryPath = [form.primary_category, form.sub_category, form.activity, form.business_model, form.audience_segment].filter(Boolean);
+    return {
+      name: form.name.trim(),
+      description: form.description.trim() || null,
+      industry: form.activity || form.sub_category || form.primary_category || null,
+      primary_category: form.primary_category || null,
+      category_path: categoryPath,
+      website: form.website.trim() || null,
+      language: analysisLanguage,
+      aliases: textToList(form.aliases),
+      keywords: textToList(form.keywords),
+      products: textToList(form.products),
+      competitors: textToList(form.competitors),
+      ignore_terms: textToList(form.ignore_terms),
+      audience: form.audience.trim() || null,
+      region: form.region.trim() || null,
+      monitoring_goals: form.monitoring_goals,
+      risk_keywords: textToList(form.risk_keywords),
+      positive_keywords: textToList(form.positive_keywords),
+      monitor_notes: form.monitor_notes.trim() || null,
+      profile_config: {
+        ...(brand?.profile_config || {}),
+        onboarding_version: 2,
+        activity: form.activity || null,
+        business_model: form.business_model || null,
+        audience_segment: form.audience_segment || null,
+        own_profile_priority: form.own_profile_priority,
+        competitor_priority: form.competitor_priority,
+        global_watch_priority: form.global_watch_priority,
+      },
+    };
+  }
+
+  function handleCategory(value) {
+    const meta = categories.find((item) => catalogMatches(item, value));
+    setSelectionTouched(true);
+    setForm((current) => ({
+      ...current,
+      primary_category: catalogValue(meta) || value,
+      sub_category: "",
+      activity: "",
+      business_model: "",
+      audience_segment: "",
+    }));
+  }
+
+  function handleDependentSelection(field, value, resets) {
+    setSelectionTouched(true);
+    setSuggestion({ status: "idle", message: "", model: "" });
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+      ...Object.fromEntries(resets.map((key) => [key, ""])),
+    }));
+  }
+
+  function toggleGoal(key) {
+    setForm((current) => {
+      const exists = current.monitoring_goals.includes(key);
+      return {
+        ...current,
+        monitoring_goals: exists
+          ? current.monitoring_goals.filter((item) => item !== key)
+          : [...current.monitoring_goals, key],
+      };
+    });
+  }
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    if (!form.name.trim()) return;
+    if (brand?.id) {
+      onSave(brand.id, buildPayload());
+    } else {
+      onCreate(buildPayload());
+    }
+  }
+
+  return (
+    <section className="panel brandBrainPanel">
+      <div className="sectionHeader compact">
+        <div>
+          <span className="eyebrow">Brand intelligence</span>
+          <h2><Brain size={18} /> Brandni loyihaga tanitish</h2>
+          <p>Bu ma'lumotlar matching, AI relevance gate va deep analysis uchun asos bo'ladi.</p>
+        </div>
+        <div className="profileReadiness" title={missingReadiness.length ? `Yetishmaydi: ${missingReadiness.join(", ")}` : "Profil tayyor"}>
+          <span>Profil tayyorligi</span>
+          <strong>{readiness}%</strong>
+          <i><b style={{ width: `${readiness}%` }} /></i>
+        </div>
+      </div>
+
+      <form className="brandBrainForm" onSubmit={handleSubmit}>
+          <div className="brandBrainGrid">
+            <label className="field">
+              <span>Brand nomi</span>
+              <input className="input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
+              <p className="fieldHint">Monitoringda ishlatiladigan rasmiy va aniq brand nomini kiriting.</p>
+            </label>
+            <label className="field">
+              <span>Website <small className="optionalMark">ixtiyoriy</small></span>
+              <input className="input" value={form.website} onChange={(event) => setForm({ ...form, website: event.target.value })} />
+              <p className="fieldHint">Rasmiy sayt mavjud bo'lsa kiriting; bu maydon majburiy emas.</p>
+            </label>
+            <label className="field">
+              <span>Asosiy yo'nalish</span>
+              <SmartSelect
+                value={form.primary_category}
+                options={primaryOptions}
+                onChange={handleCategory}
+                ariaLabel="Asosiy yo'nalishni qidirish va tanlash"
+              />
+              <p className="fieldHint">Brand faoliyatini eng keng ifodalovchi sohani qidirib tanlang.</p>
+            </label>
+            <label className="field">
+              <span>Ichki yo'nalish</span>
+              <SmartSelect
+                value={form.sub_category}
+                options={childOptions}
+                fallbackOptions={allChildOptions}
+                onChange={(value) => handleDependentSelection("sub_category", value, ["activity", "business_model", "audience_segment"])}
+                disabled={!form.primary_category}
+                ariaLabel="Ichki yo'nalishni qidirish va tanlash"
+              />
+              <p className="fieldHint">Avval asosiy sohaga mos tavsiyalar chiqadi. Keraklisi ko'rinmasa, qidiruvga yozib butun katalogdan tanlang.</p>
+            </label>
+            <label className="field">
+              <span>Faoliyat turi</span>
+              <SmartSelect
+                value={form.activity}
+                options={activityOptions}
+                fallbackOptions={allActivityOptions}
+                onChange={(value) => handleDependentSelection("activity", value, ["business_model", "audience_segment"])}
+                disabled={!form.sub_category}
+                ariaLabel="Faoliyat turini qidirish va tanlash"
+              />
+              <p className="fieldHint">Ichki yo'nalishga mos faoliyatlar tavsiya qilinadi; boshqa variantni qidirib butun katalogdan olish mumkin.</p>
+            </label>
+            <label className="field">
+              <span>Biznes modeli</span>
+              <SmartSelect
+                value={form.business_model}
+                options={businessModelOptions}
+                fallbackOptions={allBusinessModelOptions}
+                onChange={(value) => handleDependentSelection("business_model", value, ["audience_segment"])}
+                disabled={!form.activity}
+                ariaLabel="Biznes modelini qidirish va tanlash"
+              />
+              <p className="fieldHint">Faoliyatga mos biznes modellari tavsiya qilinadi; topilmasa qidiruv barcha modellarni ko'rsatadi.</p>
+            </label>
+            <label className="field">
+              <span>Auditoriya segmenti</span>
+              <SmartSelect
+                value={form.audience_segment}
+                options={audienceOptions}
+                fallbackOptions={allAudienceOptions}
+                onChange={(value) => handleDependentSelection("audience_segment", value, [])}
+                disabled={!form.business_model}
+                ariaLabel="Auditoriya segmentini qidirish va tanlash"
+              />
+              <p className="fieldHint">Biznes modeliga mos segmentlar tavsiya qilinadi; kerakli auditoriyani butun katalogdan ham qidirish mumkin.</p>
+            </label>
+            <label className="field">
+              <span>Tahlil tili</span>
+              <SmartSelect
+                value={analysisLanguage}
+                options={[
+                  { value: "en", label: "Ingliz" },
+                  { value: "ru", label: "Rus" },
+                  { value: "uz", label: "O'zbek" },
+                ]}
+                disabled
+                ariaLabel="Tahlil tilini qidirish va tanlash"
+              />
+              <p className="fieldHint">Gemini aqlli to'ldirish va AI xulosalari interfeysda tanlangan joriy tilda yaratiladi.</p>
+            </label>
+            <label className="field spanTwo">
+              <span>Brand nima qiladi</span>
+              <textarea className="input textarea" rows="3" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
+              <p className="fieldHint">Mahsulot, xizmat va mijozga beriladigan asosiy qiymatni qisqa bayon qiling.</p>
+            </label>
+            <label className="field spanTwo">
+              <span>Auditoriya</span>
+              <textarea className="input textarea" rows="3" value={form.audience} onChange={(event) => setForm({ ...form, audience: event.target.value })} />
+              <p className="fieldHint">Xaridor, foydalanuvchi, qaror qabul qiluvchi va ta'sir qiluvchi guruhlarni tavsiflang.</p>
+            </label>
+            <label className="field">
+              <span>Hudud / bozor</span>
+              <input className="input" value={form.region} onChange={(event) => setForm({ ...form, region: event.target.value })} />
+              <p className="fieldHint">Brand ishlaydigan davlat, shahar yoki bozorlar doirasini kiriting.</p>
+            </label>
+          </div>
+
+          <div className={`aiSuggestionBar ${suggestion.status}`}>
+            <div>
+              <Sparkles size={18} />
+              <span>
+                <strong>Gemini Pro aqlli profil</strong>
+                <small>{suggestion.message || "Bog'langan tanlovlar yakunlangach profil maydonlari avtomatik tayyorlanadi."}</small>
+              </span>
+            </div>
+            <button className="miniButton" type="button" disabled={!suggestionReady || suggestion.status === "loading"} onClick={() => generateSuggestions()}>
+              <RefreshCw size={15} />
+              <span>{suggestion.status === "loading" ? "Tahlil qilmoqda..." : suggestion.status === "success" ? "Qayta to'ldirish" : "Aqlli to'ldirish"}</span>
+            </button>
+            {suggestion.model && <em>{suggestion.model}</em>}
+          </div>
+
+          <div className="priorityPicker">
+            <div>
+              <strong><Target size={15} /> Monitoring ustuvorligi</strong>
+              <span>Source va tahlil oqimida qaysi signal birinchi o'rinda turishini belgilang.</span>
+            </div>
+            <div className="priorityGrid">
+              <label className={form.own_profile_priority ? "priorityOption active" : "priorityOption"}>
+                <input type="checkbox" checked={form.own_profile_priority} onChange={(event) => setForm({ ...form, own_profile_priority: event.target.checked })} />
+                <span><strong>O'z profillari</strong><small>Official post, comment va discussionlar</small></span>
+              </label>
+              <label className={form.competitor_priority ? "priorityOption active" : "priorityOption"}>
+                <input type="checkbox" checked={form.competitor_priority} onChange={(event) => setForm({ ...form, competitor_priority: event.target.checked })} />
+                <span><strong>Raqobatchilar</strong><small>Profil, kanal va kampaniya kuzatuvi</small></span>
+              </label>
+              <label className={form.global_watch_priority ? "priorityOption active" : "priorityOption"}>
+                <input type="checkbox" checked={form.global_watch_priority} onChange={(event) => setForm({ ...form, global_watch_priority: event.target.checked })} />
+                <span><strong>Global mention</strong><small>Media, community va umumiy brand signali</small></span>
+              </label>
+            </div>
+          </div>
+
+          <div className="brandBrainLists">
+            <label className="field">
+              <span><Tags size={14} /> Alias va yozilish variantlari</span>
+              <textarea className="input textarea" rows="5" value={form.aliases} onChange={(event) => setForm({ ...form, aliases: event.target.value })} />
+              <p className="fieldHint">Brand nomining lotin, kirill, qisqartma va keng tarqalgan xato yozilishlarini har qatorda bittadan kiriting.</p>
+            </label>
+            <label className="field">
+              <span><Hash size={14} /> Keyword va kampaniya so'zlari</span>
+              <textarea className="input textarea" rows="5" value={form.keywords} onChange={(event) => setForm({ ...form, keywords: event.target.value })} />
+              <p className="fieldHint">Brend, kampaniya, xarid niyati va mavzuga bog'liq kalit iboralarni kiriting.</p>
+            </label>
+            <label className="field">
+              <span><Target size={14} /> Product/xizmatlar</span>
+              <textarea className="input textarea" rows="5" value={form.products} onChange={(event) => setForm({ ...form, products: event.target.value })} />
+              <p className="fieldHint">Monitoringda alohida aniqlanishi kerak bo'lgan mahsulot va xizmatlarni yozing.</p>
+            </label>
+            <label className="field">
+              <span><Globe2 size={14} /> Raqobatchilar yoki kuzatiladigan profillar</span>
+              <textarea className="input textarea" rows="5" value={form.competitors} onChange={(event) => setForm({ ...form, competitors: event.target.value })} />
+              <p className="fieldHint">Taqqoslash uchun raqobatchi brandlar yoki kuzatiladigan ochiq profil nomlarini kiriting.</p>
+            </label>
+            <label className="field">
+              <span>Risk so'zlari</span>
+              <textarea className="input textarea" rows="5" value={form.risk_keywords} onChange={(event) => setForm({ ...form, risk_keywords: event.target.value })} />
+              <p className="fieldHint">Shikoyat, nosozlik, firibgarlik yoki reputatsion inqirozni bildiruvchi so'zlarni kiriting.</p>
+            </label>
+            <label className="field">
+              <span>Ijobiy signal so'zlari</span>
+              <textarea className="input textarea" rows="5" value={form.positive_keywords} onChange={(event) => setForm({ ...form, positive_keywords: event.target.value })} />
+              <p className="fieldHint">Mamnunlik, tavsiya, sifat va muvaffaqiyatni bildiruvchi signallarni yozing.</p>
+            </label>
+            <label className="field">
+              <span>Tahlildan chiqariladigan so'zlar</span>
+              <textarea className="input textarea" rows="5" value={form.ignore_terms} onChange={(event) => setForm({ ...form, ignore_terms: event.target.value })} />
+              <p className="fieldHint">Brandga aloqasiz omonim, spam va tahlil natijasini buzadigan shovqin so'zlarini kiriting.</p>
+            </label>
+          </div>
+
+          <div className="goalPicker">
+            <div>
+              <strong><ListChecks size={15} /> Monitoring maqsadlari</strong>
+              <span>Tanlangan maqsadlar platformalardagi default source mantiqiga asos bo'ladi.</span>
+            </div>
+            <div className="goalGrid">
+              {goals.map((goal) => (
+                <button
+                  className={selectedGoalKeys.has(goal.key) ? "goalChip active" : "goalChip"}
+                  type="button"
+                  key={goal.key}
+                  onClick={() => toggleGoal(goal.key)}
+                >
+                  {goal.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <label className="field full">
+            <span>AI uchun qo'shimcha qoida</span>
+            <textarea className="input textarea" rows="3" value={form.monitor_notes} onChange={(event) => setForm({ ...form, monitor_notes: event.target.value })} />
+            <p className="fieldHint">AI qaysi kontekst, istisno yoki biznes qoidasiga alohida e'tibor berishini yozing.</p>
+          </label>
+
+          <div className="buttonRow">
+            <button className="button primary" type="submit" disabled={saving || !form.name.trim()}>
+              <Save size={17} />
+              <span>{saving ? "Saqlanmoqda..." : brand?.id ? "Brand intelligence saqlash" : "Brand yaratish"}</span>
+            </button>
+          </div>
+        </form>
+    </section>
+  );
+}
+
+function buildBrandForm(brand, preferredLanguage = "uz") {
+  const config = brand?.profile_config || {};
+  return {
+    name: brand?.name || "",
+    description: brand?.description || "",
+    website: brand?.website || "",
+    primary_category: brand?.primary_category || brand?.industry || "",
+    sub_category: brand?.category_path?.[1] || "",
+    activity: brand?.category_path?.[2] || config.activity || "",
+    business_model: brand?.category_path?.[3] || config.business_model || "",
+    audience_segment: brand?.category_path?.[4] || config.audience_segment || "",
+    language: preferredLanguage,
+    aliases: listToText(brand?.aliases),
+    keywords: listToText(brand?.keywords),
+    products: listToText(brand?.products),
+    competitors: listToText(brand?.competitors),
+    ignore_terms: listToText(brand?.ignore_terms),
+    audience: brand?.audience || "",
+    region: brand?.region || "",
+    monitoring_goals: brand?.monitoring_goals || ["own_profile", "competitor_watch"],
+    risk_keywords: listToText(brand?.risk_keywords),
+    positive_keywords: listToText(brand?.positive_keywords),
+    monitor_notes: brand?.monitor_notes || "",
+    own_profile_priority: config.own_profile_priority ?? true,
+    competitor_priority: config.competitor_priority ?? true,
+    global_watch_priority: config.global_watch_priority ?? false,
+  };
+}
+
 function AdminIdentityPanel({ session, onSave, onLogout }) {
   const [form, setForm] = useState({
-    display_name: session?.display_name || session?.login || "",
-    login: session?.login || "",
+    display_name: session?.display_name || session?.username || "",
+    username: session?.username || "",
     phone: session?.phone || "",
   });
 
   useEffect(() => {
     setForm({
-      display_name: session?.display_name || session?.login || "",
-      login: session?.login || "",
+      display_name: session?.display_name || session?.username || "",
+      username: session?.username || "",
       phone: session?.phone || "",
     });
   }, [session]);
@@ -210,7 +773,7 @@ function AdminIdentityPanel({ session, onSave, onLogout }) {
       <div className="sectionHeader compact">
         <div>
           <h2><UserCog size={18} /> Admin akkaunt</h2>
-          <p>Login egasi va Telegram telefon raqami alohida saqlanadi.</p>
+          <p>Bu bo'lim tizim operatori kimligini va Telegram sessiya egasini aniq ko'rsatadi.</p>
         </div>
         <button className="miniButton" type="button" onClick={onLogout}>
           <LogOut size={15} />
@@ -225,17 +788,18 @@ function AdminIdentityPanel({ session, onSave, onLogout }) {
             className="input"
             value={form.display_name}
             onChange={(event) => setForm((current) => ({ ...current, display_name: event.target.value }))}
-            placeholder="Profil egasi ismi yoki roli yoziladi"
           />
+          <p className="fieldHint">Dashboardda ko'rinadigan mas'ul administratorning ism-familiyasini kiriting.</p>
         </label>
         <label className="field">
           <span>Login</span>
           <input
             className="input"
-            value={form.login}
-            onChange={(event) => setForm((current) => ({ ...current, login: event.target.value }))}
-            placeholder="Admin login nomini kiriting"
+            value={form.username}
+            readOnly
+            aria-readonly="true"
           />
+          <p className="fieldHint">Bu Login sahifasida tizimga kirishda ishlatilgan username. Xavfsizlik sababli bu yerda o'zgartirilmaydi.</p>
         </label>
         <label className="field">
           <span>Telegram telefon</span>
@@ -243,8 +807,9 @@ function AdminIdentityPanel({ session, onSave, onLogout }) {
             className="input"
             value={form.phone}
             onChange={(event) => setForm((current) => ({ ...current, phone: event.target.value }))}
-            placeholder="+998901234567 formatida Telegram raqam kiriting"
+            inputMode="tel"
           />
+          <p className="fieldHint">Telethon sessiyasi ochilgan telefon raqamini xalqaro formatda kiriting, masalan: +998 XX XXX XX XX.</p>
         </label>
         <div className="identityNote">
           <CalendarClock size={16} />
@@ -263,26 +828,93 @@ function PlatformRegistry({
   platform,
   telegramSources,
   youtubeSources,
+  instagramSources,
+  facebookSources,
   onOpenCreate,
   onOpenEdit,
   onOpenReplace,
   onToggle,
   onRefresh,
+  onDelete,
 }) {
   const isTelegram = platform === "telegram";
-  const sources = isTelegram ? telegramSources : youtubeSources;
+  const isYoutube = platform === "youtube";
+  const isMeta = platform === "instagram" || platform === "facebook";
+  const sources = isTelegram
+    ? telegramSources
+    : isYoutube
+    ? youtubeSources
+    : platform === "instagram"
+    ? instagramSources
+    : facebookSources;
   const meta = platformTabs.find((item) => item.key === platform) || platformTabs[0];
   const Icon = meta.icon;
 
-  if (platform === "future") {
+  if (isMeta) {
     return (
-      <article className="panel profileRegistryPanel emptyRegistry">
-        <div className="registryEmptyIcon">
-          <ShieldCheck size={22} />
+      <article className={`panel profileRegistryPanel ${meta.tone}`}>
+        <div className="sectionHeader compact">
+          <div>
+            <h2><Icon size={18} /> {meta.label} official source</h2>
+            <p>{meta.description}</p>
+          </div>
+          <a className="button primary linkButton" href={`/${platform}-monitoring`}>
+            <ExternalLink size={17} />
+            <span>Ulash sahifasi</span>
+          </a>
         </div>
-        <div>
-          <h2>Keyingi platformalar</h2>
-          <p>Instagram, Facebook va boshqa app'lar ham shu source registry modelida ulanadi: brand profile ichida official linklar, platform worker esa alohida access bilan ishlaydi.</p>
+
+        <div className="profileSourceList">
+          {sources.length ? (
+            sources.map((source) => {
+              const display = metaSourceDisplay(platform, source);
+              return (
+                <article className="profileSourceCard" key={`${platform}-${source.id}`}>
+                  <div className="profileSourceMain">
+                    <div className={`profileSourceIcon ${platform}`}>
+                      <Icon size={19} />
+                    </div>
+                    <div>
+                      <strong>{display.title}</strong>
+                      <span>{display.ref || "Platform ID hali aniqlanmagan"}</span>
+                    </div>
+                    <em className={statusClass(source)}>{sourceStatus(source)}</em>
+                  </div>
+
+                  <div className="sourceSignals profileChips">
+                    <span>{source.monitoring_mode === "all_messages" ? "all messages" : "brand matches"}</span>
+                    <span>{source.collect_comments ? "comment" : "comment off"}</span>
+                    <span>{source.collect_mentions ? "mention" : "mention off"}</span>
+                    <span className={source.token_status === "active" ? "accent" : "blue"}>{source.token_status}</span>
+                  </div>
+
+                  {source.notes && <p className="sourceRowNote">{source.notes}</p>}
+
+                  <div className="profileSourceActions">
+                    <a className="miniButton linkButton" href={`/${platform}-monitoring`}>
+                      <ExternalLink size={15} />
+                      <span>Boshqarish</span>
+                    </a>
+                    {display.href && (
+                      <a className="miniButton linkButton" href={display.href} target="_blank" rel="noreferrer">
+                        <ExternalLink size={15} />
+                        <span>Ochish</span>
+                      </a>
+                    )}
+                    <button className="miniButton danger" type="button" onClick={() => onDelete(platform, source)}>
+                      <Trash2 size={15} />
+                      <span>O'chirish</span>
+                    </button>
+                  </div>
+                </article>
+              );
+            })
+          ) : (
+            <div className="empty profileEmpty">
+              <strong>{meta.label} source yo'q</strong>
+              <span>Token va ruxsatlarni shu platformaning monitoring sahifasida ulang.</span>
+            </div>
+          )}
         </div>
       </article>
     );
@@ -312,6 +944,7 @@ function PlatformRegistry({
               onReplace={() => onOpenReplace(platform, source)}
               onToggle={() => onToggle(platform, source)}
               onRefresh={() => onRefresh(platform, source)}
+              onDelete={() => onDelete(platform, source)}
             />
           ))
         ) : (
@@ -325,7 +958,7 @@ function PlatformRegistry({
   );
 }
 
-function ProfileSourceCard({ platform, source, onEdit, onReplace, onToggle, onRefresh }) {
+function ProfileSourceCard({ platform, source, onEdit, onReplace, onToggle, onRefresh, onDelete }) {
   const display = sourceDisplay(platform, source);
   const isTelegram = platform === "telegram";
   const Icon = isTelegram ? TelegramIcon : YouTubeIcon;
@@ -382,6 +1015,10 @@ function ProfileSourceCard({ platform, source, onEdit, onReplace, onToggle, onRe
         <button className="miniButton" type="button" onClick={onToggle}>
           {source.active ? <Pause size={15} /> : <Play size={15} />}
           <span>{source.active ? "Pause" : "Davom"}</span>
+        </button>
+        <button className="miniButton danger" type="button" onClick={onDelete}>
+          <Trash2 size={15} />
+          <span>O'chirish</span>
         </button>
         {href && (
           <a className="miniButton linkButton" href={href} target="_blank" rel="noreferrer">
@@ -474,7 +1111,6 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
                   className="input"
                   value={form.ref}
                   onChange={(event) => setForm((current) => ({ ...current, ref: event.target.value }))}
-                  placeholder={isTelegram ? "@kanal, t.me/link yoki chat ID kiriting" : "YouTube kanal handle/linki yoki video linkini kiriting"}
                   required
                 />
               </label>
@@ -484,7 +1120,6 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
                   className="input"
                   value={form.displayName}
                   onChange={(event) => setForm((current) => ({ ...current, displayName: event.target.value }))}
-                  placeholder="Dashboardda ko'rinadigan ichki nomni yozing"
                 />
               </label>
               <label className="field">
@@ -568,7 +1203,6 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
                       onChange={(event) => setForm((current) => ({ ...current, hashtagInput: event.target.value }))}
                       onKeyDown={handleHashtagKeyDown}
                       onBlur={addHashtags}
-                      placeholder="#brand yoki keyword hashtaglarini kiriting"
                     />
                     <button className="miniButton" type="button" onClick={addHashtags}>
                       <Hash size={15} />
@@ -603,7 +1237,6 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
               rows="3"
               value={form.notes}
               onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))}
-              placeholder="Access, role yoki monitoring maqsadi haqida qisqa izoh yozing"
             />
           </label>
 
@@ -640,9 +1273,12 @@ export function Profile() {
   const [session, setSession] = useState(() => readAdminSession());
   const [botStatus, setBotStatus] = useState(null);
   const [brands, setBrands] = useState([]);
+  const [taxonomy, setTaxonomy] = useState(null);
   const [telegramSources, setTelegramSources] = useState([]);
   const [youtubeSources, setYoutubeSources] = useState([]);
-  const [selectedBrandId, setSelectedBrandId] = useState("");
+  const [instagramSources, setInstagramSources] = useState([]);
+  const [facebookSources, setFacebookSources] = useState([]);
+  const [selectedBrandId, setSelectedBrandId] = useState(() => readSelectedBrandId());
   const [selectedPlatform, setSelectedPlatform] = useState("telegram");
   const [modal, setModal] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -654,17 +1290,32 @@ export function Profile() {
     setLoading(true);
     setError("");
     try {
-      const [bot, brandRows, telegramRows, youtubeRows] = await Promise.all([
+      const requests = await Promise.allSettled([
         endpoints.botStatus(),
         endpoints.brands(),
+        endpoints.brandTaxonomy(),
         endpoints.sources(),
         endpoints.youtubeSources(),
+        endpoints.instagramSources(),
+        endpoints.facebookSources(),
       ]);
-      setBotStatus(bot);
+      const value = (index, fallback) => requests[index].status === "fulfilled" ? requests[index].value : fallback;
+      const brandRows = value(1, []);
+      setBotStatus(value(0, null));
       setBrands(brandRows);
-      setTelegramSources(telegramRows);
-      setYoutubeSources(youtubeRows);
-      setSelectedBrandId((current) => current || (brandRows.length ? brandRows[0].id : ""));
+      setTaxonomy(value(2, null));
+      setTelegramSources(value(3, []));
+      setYoutubeSources(value(4, []));
+      setInstagramSources(value(5, []));
+      setFacebookSources(value(6, []));
+      setSelectedBrandId((current) => resolveSelectedBrandId(brandRows, current));
+      const failed = requests
+        .map((request, index) => request.status === "rejected" ? [index, request.reason?.message] : null)
+        .filter(Boolean);
+      if (failed.length) {
+        const labels = ["Telegram status", "Brandlar", "Taxonomy", "Telegram", "YouTube", "Instagram", "Facebook"];
+        setError(`Qisman yuklandi: ${failed.map(([index]) => labels[index]).join(", ")}. Qolgan bo'limlar ishlashda davom etadi.`);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -693,6 +1344,14 @@ export function Profile() {
     () => youtubeSources.filter((source) => isOwnedSource(source, selectedBrandId)),
     [youtubeSources, selectedBrandId],
   );
+  const officialInstagramSources = useMemo(
+    () => instagramSources.filter((source) => isOwnedSource(source, selectedBrandId)),
+    [instagramSources, selectedBrandId],
+  );
+  const officialFacebookSources = useMemo(
+    () => facebookSources.filter((source) => isOwnedSource(source, selectedBrandId)),
+    [facebookSources, selectedBrandId],
+  );
 
   function handleSaveSession(nextSession) {
     saveAdminSession(nextSession);
@@ -701,8 +1360,50 @@ export function Profile() {
   }
 
   function handleLogout() {
-    clearAdminSession();
-    window.location.href = "/login";
+    logout();
+  }
+
+  function handleBrandChange(brandId) {
+    saveSelectedBrandId(brandId);
+    setSelectedBrandId(brandId);
+    setResult(null);
+  }
+
+  function handleNewBrand() {
+    setSelectedBrandId("");
+    setResult(null);
+  }
+
+  async function handleSaveBrand(brandId, payload) {
+    setSaving(true);
+    setResult(null);
+    try {
+      const updated = await endpoints.updateBrand(brandId, payload);
+      setBrands((current) => current.map((brand) => (brand.id === updated.id ? updated : brand)));
+      saveSelectedBrandId(updated.id);
+      setSelectedBrandId(updated.id);
+      setResult({ ok: true, message: "Brand intelligence saqlandi. Keyingi mentionlar shu kriteriyalar bilan tahlil qilinadi." });
+    } catch (err) {
+      setResult({ ok: false, message: err.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCreateBrand(payload) {
+    setSaving(true);
+    setResult(null);
+    try {
+      const created = await endpoints.createBrand(payload);
+      setBrands((current) => [created, ...current]);
+      saveSelectedBrandId(created.id);
+      setSelectedBrandId(created.id);
+      setResult({ ok: true, message: "Brand yaratildi. Endi official source'larni shu brandga ulash mumkin." });
+    } catch (err) {
+      setResult({ ok: false, message: err.message });
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleToggle(platform, source) {
@@ -728,6 +1429,39 @@ export function Profile() {
       setResult({ ok: false, message: err.message });
     }
     await loadProfile();
+  }
+
+  async function handleDeleteSource(platform, source) {
+    const display = platform === "telegram" || platform === "youtube"
+      ? sourceDisplay(platform, source)
+      : metaSourceDisplay(platform, source);
+    const confirmed = window.confirm(translateUiText(
+      `“${display.title}” source butunlay o'chirilsinmi? Unga tegishli barcha post, comment va AI tahlillar ham o'chadi. Bu amalni ortga qaytarib bo'lmaydi.`,
+    ));
+    if (!confirmed) return;
+
+    const deleteEndpoint = {
+      telegram: endpoints.deleteSource,
+      youtube: endpoints.youtubeDeleteSource,
+      instagram: endpoints.instagramDeleteSource,
+      facebook: endpoints.facebookDeleteSource,
+    }[platform];
+    if (!deleteEndpoint) return;
+
+    setSaving(true);
+    setResult(null);
+    try {
+      const deleted = await deleteEndpoint(source.id);
+      setResult({
+        ok: true,
+        message: `${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil butunlay o'chirildi.`,
+      });
+      await loadProfile();
+    } catch (err) {
+      setResult({ ok: false, message: err.message });
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function saveTelegramSource(payload) {
@@ -833,6 +1567,7 @@ export function Profile() {
     setSaving(true);
     setResult(null);
     try {
+      if (!payload.selectedBrandId) throw new Error("Official source ulashdan oldin brandni tanlang.");
       const message = payload.platform === "telegram"
         ? await saveTelegramSource(payload)
         : await saveYoutubeSource(payload);
@@ -871,10 +1606,6 @@ export function Profile() {
       <Sidebar botStatus={botStatus} activePath="/profile" />
       <main className="main">
         <PageHeader
-          brands={brands}
-          selectedBrandId={selectedBrandId}
-          onBrandChange={setSelectedBrandId}
-          onRefresh={loadProfile}
           eyebrow="Brand source registry"
           title="Profil va official source"
           loading={isInitialLoading}
@@ -887,10 +1618,27 @@ export function Profile() {
           </div>
         )}
 
+        <ActiveBrandSelector
+          brands={brands}
+          selectedBrandId={selectedBrandId}
+          onChange={handleBrandChange}
+          onCreate={handleNewBrand}
+        />
+
         <ProfileSummary
           telegramSources={officialTelegramSources}
           youtubeSources={officialYoutubeSources}
+          instagramSources={officialInstagramSources}
+          facebookSources={officialFacebookSources}
           selectedBrandName={selectedBrand?.name}
+        />
+
+        <BrandIntelligencePanel
+          brand={selectedBrand}
+          taxonomy={taxonomy}
+          onSave={handleSaveBrand}
+          onCreate={handleCreateBrand}
+          saving={saving}
         />
 
         <section className="profileLayout">
@@ -909,6 +1657,14 @@ export function Profile() {
               <span><strong>3</strong> Worker yangi post/commentlarni import qiladi.</span>
               <span><strong>4</strong> Dashboard umumiy va platform kesimida analiz qiladi.</span>
             </div>
+            <div className="platformPlaybooks">
+              {Object.entries(taxonomy?.source_playbooks || {}).map(([platform, steps]) => (
+                <article className="playbookCard" key={platform}>
+                  <strong>{platform}</strong>
+                  {steps.map((step) => <span key={step}>{step}</span>)}
+                </article>
+              ))}
+            </div>
           </article>
         </section>
 
@@ -916,7 +1672,13 @@ export function Profile() {
           <div className="profilePlatformTabs">
             {platformTabs.map((item) => {
               const Icon = item.icon;
-              const count = item.key === "telegram" ? officialTelegramSources.length : item.key === "youtube" ? officialYoutubeSources.length : 0;
+              const count = item.key === "telegram"
+                ? officialTelegramSources.length
+                : item.key === "youtube"
+                ? officialYoutubeSources.length
+                : item.key === "instagram"
+                ? officialInstagramSources.length
+                : officialFacebookSources.length;
               return (
                 <button
                   className={selectedPlatform === item.key ? `active ${item.tone}` : item.tone}
@@ -936,6 +1698,8 @@ export function Profile() {
             platform={selectedPlatform}
             telegramSources={officialTelegramSources}
             youtubeSources={officialYoutubeSources}
+            instagramSources={officialInstagramSources}
+            facebookSources={officialFacebookSources}
             onOpenCreate={(platform) => {
               setResult(null);
               setModal({ mode: "create", platform, source: null });
@@ -950,6 +1714,7 @@ export function Profile() {
             }}
             onToggle={handleToggle}
             onRefresh={handleRefresh}
+            onDelete={handleDeleteSource}
           />
         </section>
 

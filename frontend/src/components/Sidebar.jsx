@@ -1,20 +1,62 @@
-import { Bot, LayoutDashboard, UserCog } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Bot, ChevronsLeft, ChevronsRight, Facebook, Instagram, Languages, LayoutDashboard, LogOut, UserCog } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { clearApiCache, logout } from "../api/client";
 import { TelegramIcon, YouTubeIcon } from "./BrandIcons";
 
+const SIDEBAR_STATE_KEY = "monitoring_sidebar_collapsed";
+
 export function Sidebar({ botStatus, activePath = window.location.pathname }) {
-  const botLabel = botStatus?.ok && botStatus.username ? `@${botStatus.username}` : "Bot ulanmagan";
+  const { t, i18n } = useTranslation();
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_STATE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const language = i18n.resolvedLanguage || i18n.language || "uz";
+  const botLabel = botStatus?.ok && botStatus.username ? `@${botStatus.username}` : t("Bot ulanmagan");
   const navItems = [
-    { href: "/", label: "Umumiy dashboard", icon: LayoutDashboard },
-    { href: "/telegram-monitoring", label: "Telegram monitoring", icon: TelegramIcon },
-    { href: "/youtube-monitoring", label: "YouTube monitoring", icon: YouTubeIcon },
-    { href: "/profile", label: "Profil va source", icon: UserCog },
+    { href: "/", label: t("Umumiy dashboard"), icon: LayoutDashboard },
+    { href: "/telegram-monitoring", label: t("Telegram monitoring"), icon: TelegramIcon },
+    { href: "/youtube-monitoring", label: t("YouTube monitoring"), icon: YouTubeIcon },
+    { href: "/instagram-monitoring", label: t("Instagram monitoring"), icon: Instagram },
+    { href: "/facebook-monitoring", label: t("Facebook monitoring"), icon: Facebook },
+    { href: "/profile", label: t("Profil va source"), icon: UserCog },
   ];
 
+  function changeLanguage(nextLanguage) {
+    clearApiCache();
+    window.localStorage.setItem("monitoring_ui_language", nextLanguage);
+    i18n.changeLanguage(nextLanguage);
+  }
+
+  useEffect(() => {
+    document.documentElement.dataset.sidebar = collapsed ? "collapsed" : "expanded";
+    try {
+      window.localStorage.setItem(SIDEBAR_STATE_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [collapsed]);
+
   return (
-    <aside className="sidebar">
-      <div className="brandMark">
-        <span className="brandPulse" />
-        <span>MonitoringAI</span>
+    <aside className={collapsed ? "sidebar isCollapsed" : "sidebar"}>
+      <div className="sidebarHeader">
+        <div className="brandMark">
+          <span className="brandPulse" />
+          <span className="brandText">MonitoringAI</span>
+        </div>
+        <button
+          className="sidebarToggle"
+          type="button"
+          onClick={() => setCollapsed((value) => !value)}
+          aria-label={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
+          title={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
+        >
+          {collapsed ? <ChevronsRight size={18} /> : <ChevronsLeft size={18} />}
+        </button>
       </div>
 
       <nav className="nav">
@@ -22,7 +64,7 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
           const Icon = item.icon;
           const active = activePath === item.href || (item.href !== "/" && activePath.startsWith(item.href));
           return (
-            <a className={active ? "navItem active" : "navItem"} href={item.href} key={item.href}>
+            <a className={active ? "navItem active" : "navItem"} href={item.href} key={item.href} title={item.label}>
               <Icon size={18} />
               <span>{item.label}</span>
             </a>
@@ -30,16 +72,41 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
         })}
       </nav>
 
+      <div className="languageSwitcher" title={t("Interfeys tili")}>
+        <Languages size={17} />
+        <div>
+          <span className="languageLabel">{t("Til")}</span>
+          <div className="languageOptions">
+            {["uz", "ru", "en"].map((item) => (
+              <button
+                className={language === item ? "active" : ""}
+                type="button"
+                aria-pressed={language === item}
+                key={item}
+                onClick={() => changeLanguage(item)}
+              >
+                {item.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
       <div className="botStatus">
         <div className="botIcon">
           <Bot size={18} />
         </div>
         <div>
-          <span>Monitoring bot</span>
+          <span>{t("Monitoring bot")}</span>
           <strong>{botLabel}</strong>
         </div>
         <em className={botStatus?.ok ? "state ok" : "state bad"}>{botStatus?.ok ? "online" : "offline"}</em>
       </div>
+
+      <button className="navItem logoutItem" type="button" onClick={logout}>
+        <LogOut size={18} />
+        <span>{t("Chiqish")}</span>
+      </button>
     </aside>
   );
 }

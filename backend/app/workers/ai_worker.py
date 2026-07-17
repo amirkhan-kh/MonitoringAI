@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import time
 
-from sqlalchemy.orm import joinedload
-
 from app.config import get_settings
 from app.db import SessionLocal, init_db
-from app.models import Analysis, Mention, YouTubeAnalysis, YouTubeMention
-from app.services.alerts import maybe_send_alert
+from app.models import (
+    Analysis,
+    Brand,
+    FacebookAnalysis,
+    FacebookMention,
+    InstagramAnalysis,
+    InstagramMention,
+    Mention,
+    YouTubeAnalysis,
+    YouTubeMention,
+)
+from app.services.alerts import record_alert
 from app.services.gemini_analysis import (
     ProviderRetryableError,
+    analyze_facebook_mention,
+    analyze_instagram_mention,
     analyze_mention,
     analyze_youtube_mention,
     create_gemini_client,
@@ -18,8 +29,11 @@ from app.services.gemini_analysis import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ai-worker")
-
-MAX_PROVIDER_BACKOFF_SECONDS = 300
+# The SDK logs every HTTP request (incl. throttled 429 retries) at INFO — far too noisy
+# under dynamic-shared-quota backoff. Keep our own analysis logs, quiet the transport.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("google_genai.models").setLevel(logging.WARNING)
+logging.getLogger("google_genai._api_client").setLevel(logging.WARNING)
 
 
 def _short(exc: Exception, limit: int = 200) -> str:
@@ -30,103 +44,221 @@ def _short(exc: Exception, limit: int = 200) -> str:
 def main() -> None:
     settings = get_settings()
     init_db()
-    logger.info("AI worker started model=%s vertex=%s", settings.gemini_model, settings.gemini_use_vertex)
+    logger.info(
+        "AI worker started gate=%s gate_model=%s analysis_model=%s cycle=%ss max/cycle=%s concurrency=%s vertex=%s",
+        settings.gemini_relevance_gate,
+        settings.gemini_gate_model,
+        settings.gemini_analysis_model,
+        settings.ai_cycle_seconds,
+        settings.ai_max_per_cycle,
+        settings.ai_concurrency,
+        settings.gemini_use_vertex,
+    )
 
     client = None
-    provider_backoff = 0
     while True:
         try:
             if client is None:
                 # Lazy + retried: a missing project / bad credentials no longer
-                # crashes the process, it just retries until the operator fixes it.
+                # crashes the process, it just retries on the next cycle.
                 client = create_gemini_client(settings)
-            processed = process_next_batch(settings, client)
-            provider_backoff = 0
-            if processed == 0:
-                time.sleep(settings.gemini_poll_interval_seconds)
+            total = run_cycle(settings, client)
+            logger.info("Cycle complete: processed=%s; next pass in %ss", total, settings.ai_cycle_seconds)
         except ProviderRetryableError as exc:
-            if exc.config_error:
-                # Operator action needed (billing/permission): retry rarely.
-                floor, cap = 30, MAX_PROVIDER_BACKOFF_SECONDS
-                reason = "needs operator action (billing/permission/credentials)"
-            else:
-                # Transient (503 high-demand / 429): clears fast, so retry often
-                # to keep draining the backlog instead of idling for minutes.
-                floor, cap = 5, 45
-                reason = "transient"
-            provider_backoff = min(max(provider_backoff * 2, floor), cap)
-            logger.warning(
-                "AI provider unavailable (%s); backing off %ss: %s",
-                reason,
-                provider_backoff,
-                _short(exc),
-            )
-            time.sleep(provider_backoff)
+            reason = "config (billing/permission/credentials)" if exc.config_error else "transient"
+            logger.warning("AI provider unavailable this cycle (%s): %s", reason, _short(exc))
         except Exception:
-            logger.exception("AI worker loop failed")
+            logger.exception("AI worker cycle failed")
             client = None  # rebuild the client in case it went bad
-            time.sleep(10)
+        # Batched, not continuous: sleep between passes to cap token burn.
+        time.sleep(settings.ai_cycle_seconds)
 
 
-def process_next_batch(settings, client, limit: int = 10) -> int:
+def run_cycle(settings, client) -> int:
+    """Analyze up to ``ai_max_per_cycle`` pending mentions this pass, then return.
+
+    The cap keeps a large backlog from turning the 5-minute cycle back into a
+    continuous grind; a backlog simply drains a chunk per cycle. Steady-state
+    traffic (a few new mentions per cycle) clears in one pass.
+    """
+    total = 0
+    cap = max(1, settings.ai_max_per_cycle)
+    while total < cap:
+        processed, retry_exc = process_next_batch(settings, client)
+        if retry_exc is not None:
+            if total == 0:
+                raise retry_exc  # whole first batch failed → surface to main for logging
+            logger.warning("Provider throttled mid-cycle; ending pass early at %s processed", total)
+            break
+        if processed == 0:
+            break
+        total += processed
+    return total
+
+
+def process_next_batch(settings, client) -> tuple[int, ProviderRetryableError | None]:
+    """Fetch a batch of unanalyzed mentions and analyze them concurrently.
+
+    Returns ``(processed_count, retry_exc)``. ``retry_exc`` is set when one or
+    more mentions hit a retryable provider error so the caller backs off; the
+    mentions that succeeded are already committed and the failed ones are left
+    unpersisted to be retried on a later batch. Analysis is network-bound, so a
+    thread pool drains a backlog ~``ai_concurrency``x faster than a serial loop.
+    """
+    conc = max(1, settings.ai_concurrency)
     with SessionLocal() as session:
-        telegram_limit = max(1, limit // 2)
-        youtube_limit = max(1, limit - telegram_limit)
-        mentions = (
-            session.query(Mention)
+        tg_ids = [
+            row.id
+            for row in session.query(Mention.id)
             .outerjoin(Analysis, Analysis.mention_id == Mention.id)
             .filter(Analysis.id.is_(None))
             .filter(Mention.brand_id.is_not(None))
-            .options(joinedload(Mention.analysis))
             .order_by(Mention.created_at.asc())
-            .limit(telegram_limit)
+            .limit(conc)
             .all()
-        )
-        if len(mentions) < telegram_limit:
-            youtube_limit += telegram_limit - len(mentions)
-        youtube_mentions = (
-            session.query(YouTubeMention)
+        ]
+        yt_ids = [
+            row.id
+            for row in session.query(YouTubeMention.id)
             .outerjoin(YouTubeAnalysis, YouTubeAnalysis.youtube_mention_id == YouTubeMention.id)
             .filter(YouTubeAnalysis.id.is_(None))
             .filter(YouTubeMention.brand_id.is_not(None))
             .order_by(YouTubeMention.created_at.asc())
-            .limit(youtube_limit)
+            .limit(conc)
             .all()
-        )
-        if len(youtube_mentions) < youtube_limit and len(mentions) == telegram_limit:
-            extra_limit = min(limit - len(mentions) - len(youtube_mentions), youtube_limit - len(youtube_mentions))
-            if extra_limit > 0:
-                mentions.extend(
-                    session.query(Mention)
-                    .outerjoin(Analysis, Analysis.mention_id == Mention.id)
-                    .filter(Analysis.id.is_(None))
-                    .filter(Mention.brand_id.is_not(None))
-                    .order_by(Mention.created_at.asc())
-                    .offset(len(mentions))
-                    .limit(extra_limit)
-                    .all()
-                )
-        for mention in mentions:
-            analysis = analyze_mention(session, settings, client, mention)
+        ]
+        ig_ids = [
+            row.id
+            for row in session.query(InstagramMention.id)
+            .outerjoin(InstagramAnalysis, InstagramAnalysis.instagram_mention_id == InstagramMention.id)
+            .filter(InstagramAnalysis.id.is_(None))
+            .filter(InstagramMention.brand_id.is_not(None))
+            .order_by(InstagramMention.created_at.asc())
+            .limit(conc)
+            .all()
+        ]
+        fb_ids = [
+            row.id
+            for row in session.query(FacebookMention.id)
+            .outerjoin(FacebookAnalysis, FacebookAnalysis.facebook_mention_id == FacebookMention.id)
+            .filter(FacebookAnalysis.id.is_(None))
+            .filter(FacebookMention.brand_id.is_not(None))
+            .order_by(FacebookMention.created_at.asc())
+            .limit(conc)
+            .all()
+        ]
+    tasks = (
+        [("telegram", mid) for mid in tg_ids]
+        + [("youtube", mid) for mid in yt_ids]
+        + [("instagram", mid) for mid in ig_ids]
+        + [("facebook", mid) for mid in fb_ids]
+    )
+    if not tasks:
+        return 0, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(conc, len(tasks))) as pool:
+        results = list(pool.map(lambda task: _process_one(settings, client, task[0], task[1]), tasks))
+    retry_errs = [r for r in results if isinstance(r, ProviderRetryableError)]
+    ok = len(results) - len(retry_errs)
+
+    # Only back off when the WHOLE batch failed transiently (provider truly down /
+    # exhausted). A partial failure — e.g. a per-minute 429 on some calls — just means
+    # those mentions retry on the next batch; backing off would needlessly stall the
+    # ones that are succeeding. A config error (billing/permission) always backs off.
+    retry_exc: ProviderRetryableError | None = None
+    config_errs = [r for r in retry_errs if r.config_error]
+    if config_errs:
+        retry_exc = config_errs[0]
+    elif ok == 0 and retry_errs:
+        retry_exc = retry_errs[0]
+    elif retry_errs:
+        # Partial throttle (some 429s, some succeeded): Gemini 2.5 uses dynamic shared
+        # quota, which gives better net throughput when you pace instead of hammering
+        # the shared pool. Short, proportional pause before the next batch.
+        time.sleep(min(5.0, 0.5 * len(retry_errs)))
+    return len(tasks), retry_exc
+
+
+def _brand_name(session, brand_id) -> str | None:
+    if not brand_id:
+        return None
+    brand = session.get(Brand, brand_id)
+    return brand.name if brand else None
+
+
+def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableError | None:
+    """Analyze one mention in its own DB session (safe to run across threads).
+
+    Returns a ``ProviderRetryableError`` to signal the batch should back off,
+    otherwise ``None``. Unexpected per-mention errors are logged and swallowed so
+    one bad mention never sinks the whole batch.
+    """
+    try:
+        with SessionLocal() as session:
+            if kind == "telegram":
+                mention = session.get(Mention, mention_id)
+                if mention is None:
+                    return None
+                analysis = analyze_mention(session, settings, client, mention)
+                if not analysis.error:
+                    record_alert(
+                        session, settings, platform="telegram", brand_id=mention.brand_id,
+                        mention_id=mention.id, brand_name=_brand_name(session, mention.brand_id),
+                        source=mention.chat_title or mention.chat_username or str(mention.chat_id),
+                        author=mention.author_username or mention.author_name,
+                        text=mention.text or mention.caption, permalink=mention.permalink, analysis=analysis,
+                    )
+            elif kind == "instagram":
+                mention = session.get(InstagramMention, mention_id)
+                if mention is None:
+                    return None
+                analysis = analyze_instagram_mention(session, settings, client, mention)
+                if not analysis.error:
+                    record_alert(
+                        session, settings, platform="instagram", brand_id=mention.brand_id,
+                        mention_id=mention.id, brand_name=_brand_name(session, mention.brand_id),
+                        source=mention.author_username, author=mention.author_username,
+                        text=mention.text, permalink=mention.permalink, analysis=analysis,
+                    )
+            elif kind == "facebook":
+                mention = session.get(FacebookMention, mention_id)
+                if mention is None:
+                    return None
+                analysis = analyze_facebook_mention(session, settings, client, mention)
+                if not analysis.error:
+                    record_alert(
+                        session, settings, platform="facebook", brand_id=mention.brand_id,
+                        mention_id=mention.id, brand_name=_brand_name(session, mention.brand_id),
+                        source=mention.post_id, author=mention.author_name,
+                        text=mention.text, permalink=mention.permalink, analysis=analysis,
+                    )
+            else:
+                mention = session.get(YouTubeMention, mention_id)
+                if mention is None:
+                    return None
+                analysis = analyze_youtube_mention(session, settings, client, mention)
+                if not analysis.error:
+                    record_alert(
+                        session, settings, platform="youtube", brand_id=mention.brand_id,
+                        mention_id=mention.id, brand_name=_brand_name(session, mention.brand_id),
+                        source=mention.channel_title, author=mention.author_name,
+                        text=mention.text or mention.title, permalink=mention.permalink, analysis=analysis,
+                    )
             logger.info(
-                "Analyzed telegram mention=%s sentiment=%s risk=%s error=%s",
-                mention.id,
+                "Analyzed %s mention=%s model=%s sentiment=%s risk=%s error=%s",
+                kind,
+                mention_id,
+                analysis.model_name,
                 analysis.sentiment,
                 analysis.risk_score,
                 bool(analysis.error),
             )
-            if not analysis.error:
-                maybe_send_alert(session, settings, mention, analysis)
-        for mention in youtube_mentions:
-            analysis = analyze_youtube_mention(session, settings, client, mention)
-            logger.info(
-                "Analyzed youtube mention=%s sentiment=%s risk=%s error=%s",
-                mention.id,
-                analysis.sentiment,
-                analysis.risk_score,
-                bool(analysis.error),
-            )
-        return len(mentions) + len(youtube_mentions)
+        return None
+    except ProviderRetryableError as exc:
+        return exc
+    except Exception:
+        logger.exception("AI analyze failed kind=%s mention=%s", kind, mention_id)
+        return None
 
 
 if __name__ == "__main__":

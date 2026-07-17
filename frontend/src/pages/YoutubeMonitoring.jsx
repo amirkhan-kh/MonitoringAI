@@ -11,15 +11,18 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  Trash2,
   Users,
   Video,
   X,
 } from "lucide-react";
-import { endpoints } from "../api/client";
+import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
 import { YouTubeIcon } from "../components/BrandIcons";
+import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
 import { StatsBar } from "../components/StatsBar";
+import { formatUiDate, translateUiText } from "../i18n";
 
 const categoryIcons = {
   owned: YouTubeIcon,
@@ -33,21 +36,6 @@ const categoryIcons = {
 };
 
 const categoryOrder = ["owned", "competitor", "keyword", "hashtag", "influencer", "campaign", "risk", "unknown"];
-
-const monthNames = [
-  "yanvar",
-  "fevral",
-  "mart",
-  "aprel",
-  "may",
-  "iyun",
-  "iyul",
-  "avgust",
-  "sentabr",
-  "oktabr",
-  "noyabr",
-  "dekabr",
-];
 
 const sourceKindLabels = {
   channel: "Kanal",
@@ -66,6 +54,20 @@ const mentionTypeLabels = {
   video: "Video",
   comment: "Comment",
   comment_reply: "Comment reply",
+};
+
+const sentimentLabels = {
+  positive: "Ijobiy",
+  negative: "Salbiy",
+  neutral: "Neytral",
+  mixed: "Aralash",
+};
+
+const riskLabels = {
+  low: "Past risk",
+  medium: "O'rta risk",
+  high: "Yuqori risk",
+  critical: "Kritik risk",
 };
 
 function todayInputValue() {
@@ -103,24 +105,19 @@ function mentionText(mention) {
 
 function formatDate(value) {
   if (!value) return "";
-  const date = new Date(value);
-  const day = String(date.getDate()).padStart(2, "0");
-  const month = monthNames[date.getMonth()];
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  return `${day}-${month} ${hour}:${minute}`;
+  return formatUiDate(value, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 function sourceKindLabel(value) {
-  return sourceKindLabels[value] || value || "Turi noma'lum";
+  return translateUiText(sourceKindLabels[value] || value || "Turi noma'lum");
 }
 
 function monitoringModeLabel(value) {
-  return monitoringModeLabels[value] || value || "Qamrov noma'lum";
+  return translateUiText(monitoringModeLabels[value] || value || "Qamrov noma'lum");
 }
 
 function mentionTypeLabel(value) {
-  return mentionTypeLabels[value] || value || "Mention";
+  return translateUiText(mentionTypeLabels[value] || value || "Mention");
 }
 
 function compactNumber(value) {
@@ -193,13 +190,13 @@ export function YoutubeMonitoring() {
   const [sources, setSources] = useState([]);
   const [summary, setSummary] = useState(null);
   const [mentions, setMentions] = useState([]);
-  const [selectedBrandId, setSelectedBrandId] = useState("");
+  const [selectedBrandId, setSelectedBrandId] = useState(() => readSelectedBrandId());
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("owned");
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [sourceResult, setSourceResult] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const defaultBrandApplied = useRef(false);
+  const [notice, setNotice] = useState("");
   const realtimeRefreshTimer = useRef(null);
   const selectedBrandIdRef = useRef("");
   const lastLoadedBrandId = useRef("");
@@ -251,10 +248,8 @@ export function YoutubeMonitoring() {
       setYoutubeStatus(status);
       setCategories(categoryRows);
       setBrands(brandRows);
-      const defaultBrandId =
-        selectedBrandId || (!defaultBrandApplied.current && brandRows.length ? brandRows[0].id : "");
+      const defaultBrandId = resolveSelectedBrandId(brandRows, selectedBrandId);
       if (defaultBrandId && defaultBrandId !== selectedBrandId) {
-        defaultBrandApplied.current = true;
         setSelectedBrandId(defaultBrandId);
       }
       await loadDashboard(defaultBrandId);
@@ -294,12 +289,14 @@ export function YoutubeMonitoring() {
       if (!shouldRefresh(event) || realtimeRefreshTimer.current) return;
       realtimeRefreshTimer.current = window.setTimeout(() => {
         realtimeRefreshTimer.current = null;
+        clearApiCache("/youtube/");
         loadDashboard(selectedBrandIdRef.current).catch((err) => setError(err.message));
       }, 800);
     }
 
     eventSource.addEventListener("youtube_mention", scheduleRefresh);
     eventSource.addEventListener("youtube_source", scheduleRefresh);
+    eventSource.addEventListener("analysis_updated", scheduleRefresh);
 
     return () => {
       eventSource.close();
@@ -353,6 +350,22 @@ export function YoutubeMonitoring() {
     await loadDashboard(selectedBrandId);
   }
 
+  async function handleDeleteSource(source) {
+    const confirmed = window.confirm(translateUiText(
+      `“${sourceTitle(source)}” source butunlay o'chirilsinmi? Unga tegishli barcha video, comment va AI tahlillar ham o'chadi. Bu amalni ortga qaytarib bo'lmaydi.`,
+    ));
+    if (!confirmed) return;
+    setError("");
+    setNotice("");
+    try {
+      const deleted = await endpoints.youtubeDeleteSource(source.id);
+      setNotice(`${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta video/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`);
+      await loadDashboard(selectedBrandId);
+    } catch (err) {
+      setError(err.message || "Source o'chirishda xatolik yuz berdi.");
+    }
+  }
+
   const isInitialLoading = loading && !summary && !sources.length && !mentions.length;
 
   return (
@@ -360,21 +373,25 @@ export function YoutubeMonitoring() {
       <Sidebar botStatus={botStatus} activePath="/youtube-monitoring" />
       <main className="main">
         <PageHeader
-          brands={brands}
-          selectedBrandId={selectedBrandId}
-          onBrandChange={setSelectedBrandId}
-          onRefresh={loadInitial}
           eyebrow="Video source catalog"
           title="YouTube monitoring"
           loading={isInitialLoading}
         />
 
         {error && <div className="errorBanner">{error}</div>}
+        {notice && <div className="loadingBar success">{notice}</div>}
         {youtubeStatus && !youtubeStatus.configured && (
           <div className="loadingBar">YOUTUBE_API_KEY sozlanmagan. Source katalog ishlaydi, avtomatik sync uchun API key kerak.</div>
         )}
 
         <StatsBar items={statItems} loading={isInitialLoading} />
+        <MonitoringInsights
+          platform="youtube"
+          sources={visibleSources}
+          summary={summary}
+          status={youtubeStatus}
+          loading={isInitialLoading}
+        />
 
         <section className="monitoringWorkspace">
           <YoutubeSourceBoard
@@ -385,6 +402,7 @@ export function YoutubeMonitoring() {
             onOpenAdd={() => setIsAddModalOpen(true)}
             onToggleSource={handleToggleSource}
             onSyncSource={handleSyncSource}
+            onDeleteSource={handleDeleteSource}
             loading={isInitialLoading}
           />
           <YoutubeRecentMentions mentions={mentions} loading={isInitialLoading} />
@@ -433,6 +451,7 @@ function YoutubeSourceBoard({
   onOpenAdd,
   onToggleSource,
   onSyncSource,
+  onDeleteSource,
   loading = false,
 }) {
   const orderedCategories = useMemo(
@@ -535,6 +554,7 @@ function YoutubeSourceBoard({
               source={source}
               onToggleSource={onToggleSource}
               onSyncSource={onSyncSource}
+              onDeleteSource={onDeleteSource}
             />
           ))
         ) : (
@@ -545,7 +565,7 @@ function YoutubeSourceBoard({
   );
 }
 
-function YoutubeSourceRow({ source, onToggleSource, onSyncSource }) {
+function YoutubeSourceRow({ source, onToggleSource, onSyncSource, onDeleteSource }) {
   return (
     <article className="sourceRow">
       <div className="sourceIdentity">
@@ -576,6 +596,10 @@ function YoutubeSourceRow({ source, onToggleSource, onSyncSource }) {
         <button className="miniButton" type="button" onClick={() => onToggleSource(source)}>
           {source.active ? <Pause size={15} /> : <Play size={15} />}
           <span>{source.active ? "Pauza" : "Davom"}</span>
+        </button>
+        <button className="miniButton danger" type="button" onClick={() => onDeleteSource(source)} title="Source va unga tegishli barcha video, comment hamda AI tahlillarini o'chiradi">
+          <Trash2 size={15} />
+          <span>O'chirish</span>
         </button>
       </div>
       {(source.notes || source.competitor_name) && <p className="sourceRowNote">{source.notes || source.competitor_name}</p>}
@@ -671,7 +695,6 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
           className="input"
           value={nickname}
           onChange={(event) => setNickname(event.target.value)}
-          placeholder="Dashboardda ko'rinadigan ichki source nomini yozing"
         />
         <p className="fieldHint">Dashboardda ko'rinadigan ichki nom. Filterga yordamchi signal sifatida ham ishlaydi.</p>
       </label>
@@ -682,7 +705,6 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
           className="input"
           value={channelLink}
           onChange={(event) => setChannelLink(event.target.value)}
-          placeholder="YouTube kanal handle/linki, video linki yoki video ID kiriting"
         />
         <p className="fieldHint">Kanal handle/linki, video linki yoki YouTube ID kiriting. Kanal bo'lsa videolar uploads playlist orqali olinadi.</p>
       </label>
@@ -696,7 +718,6 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
             onChange={(event) => setHashtagInput(event.target.value)}
             onKeyDown={handleHashtagKeyDown}
             onBlur={() => addHashtags()}
-            placeholder="Kuzatiladigan hashtaglarni yozing va Enter bosing"
           />
           <button className="miniButton" type="button" onClick={() => addHashtags()}>
             <Plus size={15} />
@@ -739,7 +760,6 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
           rows="3"
           value={notes}
           onChange={(event) => setNotes(event.target.value)}
-          placeholder="Source haqida ichki eslatma yoki monitoring maqsadini yozing"
         />
         <p className="fieldHint">Source haqida ichki eslatma. Monitoring filtrini o'zgartirmaydi.</p>
       </label>
@@ -821,7 +841,9 @@ function YoutubeRecentMentions({ mentions, loading = false }) {
               </div>
               <div className="mentionBody">
                 <strong>{mentionSource(mention)}</strong>
-                <p>{mentionText(mention) || "Matn yo'q"}</p>
+                {mentionText(mention)
+                  ? <p data-i18n-ignore="true">{mentionText(mention)}</p>
+                  : <p>Matn yo'q</p>}
                 {!!mentionMetrics(mention).length && (
                   <div className="mentionMetricRow">
                     {mentionMetrics(mention).map((item) => (
@@ -830,6 +852,29 @@ function YoutubeRecentMentions({ mentions, loading = false }) {
                   </div>
                 )}
                 {!!mention.brand_match_terms?.length && <span className="mentionSignal">Brand signal</span>}
+                {mention.analysis && !mention.analysis.error ? (
+                  <div className="mentionAnalysis">
+                    <div className="mentionBadgeRow">
+                      {mention.analysis.sentiment && (
+                        <span className={`sentimentBadge ${mention.analysis.sentiment}`}>
+                          {sentimentLabels[mention.analysis.sentiment] || mention.analysis.sentiment}
+                          {typeof mention.analysis.sentiment_score === "number"
+                            ? ` · ${mention.analysis.sentiment_score.toFixed(2)}`
+                            : ""}
+                        </span>
+                      )}
+                      {mention.analysis.risk_level && (
+                        <span className={`riskBadge ${mention.analysis.risk_level}`}>
+                          {riskLabels[mention.analysis.risk_level] || mention.analysis.risk_level}
+                        </span>
+                      )}
+                    </div>
+                    {mention.analysis.summary && <p className="mentionSummary">{mention.analysis.summary}</p>}
+                    {mention.analysis.suggested_action && <p className="mentionAction">{mention.analysis.suggested_action}</p>}
+                  </div>
+                ) : (
+                  <span className="mentionPending">AI tahlil kutilmoqda…</span>
+                )}
               </div>
               <span className="mentionMeta">
                 <em title={mention.item_type}>{mentionTypeLabel(mention.item_type)}</em>
@@ -877,7 +922,27 @@ function YoutubeRecentMentions({ mentions, loading = false }) {
                   ))}
                 </div>
               )}
-              <p>{mentionText(selectedMention) || "Bu mentionda matn topilmadi."}</p>
+              {mentionText(selectedMention)
+                ? <p data-i18n-ignore="true">{mentionText(selectedMention)}</p>
+                : <p>Bu mentionda matn topilmadi.</p>}
+              {selectedMention.analysis && !selectedMention.analysis.error && (
+                <div className="mentionAnalysis modalAnalysis">
+                  <div className="mentionBadgeRow">
+                    {selectedMention.analysis.sentiment && (
+                      <span className={`sentimentBadge ${selectedMention.analysis.sentiment}`}>
+                        {sentimentLabels[selectedMention.analysis.sentiment] || selectedMention.analysis.sentiment}
+                      </span>
+                    )}
+                    {selectedMention.analysis.risk_level && (
+                      <span className={`riskBadge ${selectedMention.analysis.risk_level}`}>
+                        {riskLabels[selectedMention.analysis.risk_level] || selectedMention.analysis.risk_level}
+                      </span>
+                    )}
+                  </div>
+                  {selectedMention.analysis.summary && <p className="mentionSummary">{selectedMention.analysis.summary}</p>}
+                  {selectedMention.analysis.suggested_action && <p className="mentionAction">{selectedMention.analysis.suggested_action}</p>}
+                </div>
+              )}
               {selectedMention.permalink && (
                 <a className="button secondary modalLink" href={selectedMention.permalink} target="_blank" rel="noreferrer">
                   YouTube'da ochish

@@ -1,5 +1,6 @@
 import { CheckCircle2, Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 const monitoringModeLabels = {
   all_messages: "Barcha xabarlar",
@@ -21,6 +22,7 @@ export function SourceForm({
   accessResult,
   sourceResult,
 }) {
+  const { t } = useTranslation();
   const [sourceRef, setSourceRef] = useState("");
   const [category, setCategory] = useState(initialCategory);
   const [mode, setMode] = useState("all_messages");
@@ -72,7 +74,7 @@ export function SourceForm({
           <h2>Manzil qo'shish</h2>
           <p>{categoryMeta?.description || "Brand uchun Telegram manba qo'shing."}</p>
         </div>
-        <span className={accessResult?.ok ? "pill ok" : "pill neutral"}>{accessResult ? "checked" : "ready"}</span>
+        <span className={accessResult?.ok ? "pill ok" : "pill neutral"}>{accessResult ? t("checked") : t("ready")}</span>
       </div>
 
       <label className="field">
@@ -81,7 +83,6 @@ export function SourceForm({
           className="input"
           value={sourceRef}
           onChange={(event) => setSourceRef(event.target.value)}
-          placeholder="Kanal, guruh, bot username/linki yoki chat ID kiriting"
           required
         />
         <p className="fieldHint">Username, kanal linki, group/chat ID yoki bot username kiriting.</p>
@@ -102,8 +103,8 @@ export function SourceForm({
         <label className="field">
           <span>Qamrov</span>
           <select className="input select" value={mode} onChange={(event) => setMode(event.target.value)}>
-            <option value="all_messages">{monitoringModeLabels.all_messages}</option>
-            <option value="brand_matches_only">{monitoringModeLabels.brand_matches_only}</option>
+            <option value="all_messages">{t(monitoringModeLabels.all_messages)}</option>
+            <option value="brand_matches_only">{t(monitoringModeLabels.brand_matches_only)}</option>
           </select>
           <p className="fieldHint">Barcha xabarlar yoki faqat brand nomi topilgan xabarlar olinadi.</p>
         </label>
@@ -127,7 +128,6 @@ export function SourceForm({
             className="input"
             value={competitorName}
             onChange={(event) => setCompetitorName(event.target.value)}
-            placeholder="Bu source qaysi raqobatchiga tegishli ekanini yozing"
           />
         </label>
       )}
@@ -139,7 +139,6 @@ export function SourceForm({
           rows="3"
           value={notes}
           onChange={(event) => setNotes(event.target.value)}
-          placeholder="Source haqida ichki eslatma yoki access bo'yicha izoh yozing"
         />
         <p className="fieldHint">Source haqida ichki eslatma. Monitoring filtriga ta'sir qilmaydi.</p>
       </label>

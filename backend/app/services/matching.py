@@ -49,7 +49,7 @@ def _load_brand_terms(session: Session) -> list[_BrandTerms]:
         entries.append(
             _BrandTerms(
                 brand_id=brand.id,
-                terms=tuple(collect_terms([brand.name, *(brand.aliases or []), *(brand.keywords or [])])),
+                terms=tuple(collect_terms(brand_match_candidates(brand))),
                 ignore_terms=tuple(collect_terms(brand.ignore_terms)),
             )
         )
@@ -87,9 +87,9 @@ def match_brand(session: Session, text: str, preferred_brand: Brand | None = Non
     best_id: uuid.UUID | None = None
     best_terms: list[str] = []
     for entry in _get_brand_terms(session):
-        if any(term in normalized for term in entry.ignore_terms):
+        if any(term_matches(normalized, term) for term in entry.ignore_terms):
             continue
-        terms = [term for term in entry.terms if term in normalized]
+        terms = [term for term in entry.terms if term_matches(normalized, term)]
         if len(terms) > len(best_terms):
             best_id = entry.brand_id
             best_terms = terms
@@ -101,8 +101,35 @@ def match_brand(session: Session, text: str, preferred_brand: Brand | None = Non
 
 
 def collect_matched_terms(brand: Brand, normalized_text: str) -> list[str]:
-    candidates = collect_terms([brand.name, *(brand.aliases or []), *(brand.keywords or [])])
-    return [term for term in candidates if term and term in normalized_text]
+    candidates = collect_terms(brand_match_candidates(brand))
+    return [term for term in candidates if term_matches(normalized_text, term)]
+
+
+def collect_ignored_terms(brand: Brand, normalized_text: str) -> list[str]:
+    return [term for term in collect_terms(brand.ignore_terms) if term_matches(normalized_text, term)]
+
+
+def term_matches(normalized_text: str, normalized_term: str) -> bool:
+    if not normalized_text or not normalized_term:
+        return False
+    if normalized_term.startswith(("#", "@")):
+        return re.search(rf"{re.escape(normalized_term)}(?![\w])", normalized_text) is not None
+    return re.search(rf"(?<![\w]){re.escape(normalized_term)}(?![\w])", normalized_text) is not None
+
+
+def brand_match_candidates(brand: Brand) -> list[str]:
+    return [
+        brand.name,
+        brand.industry,
+        brand.primary_category,
+        *(brand.category_path or []),
+        *(brand.aliases or []),
+        *(brand.keywords or []),
+        *(brand.products or []),
+        *(brand.competitors or []),
+        *(brand.risk_keywords or []),
+        *(brand.positive_keywords or []),
+    ]
 
 
 def collect_terms(values: list[str] | None) -> list[str]:

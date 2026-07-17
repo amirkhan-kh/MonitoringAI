@@ -1,20 +1,6 @@
 import { MessageSquareText, X } from "lucide-react";
 import { useState } from "react";
-
-const monthNames = [
-  "yanvar",
-  "fevral",
-  "mart",
-  "aprel",
-  "may",
-  "iyun",
-  "iyul",
-  "avgust",
-  "sentabr",
-  "oktabr",
-  "noyabr",
-  "dekabr",
-];
+import { formatUiDate } from "../i18n";
 
 const sourceTypeLabels = {
   channel_post: "Kanal posti",
@@ -41,6 +27,20 @@ const mediaTypeLabels = {
   MessageMediaVenue: "Manzil",
 };
 
+const sentimentLabels = {
+  positive: "Ijobiy",
+  negative: "Salbiy",
+  neutral: "Neytral",
+  mixed: "Aralash",
+};
+
+const riskLabels = {
+  low: "Past risk",
+  medium: "O'rta risk",
+  high: "Yuqori risk",
+  critical: "Kritik risk",
+};
+
 function sourceLabel(mention) {
   if (mention.chat_username) return `@${mention.chat_username}`;
   return mention.chat_title || String(mention.chat_id);
@@ -52,12 +52,7 @@ function mentionText(mention) {
 
 function formatDate(value) {
   if (!value) return "";
-  const date = new Date(value);
-  const day = String(date.getDate()).padStart(2, "0");
-  const month = monthNames[date.getMonth()];
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  return `${day}-${month} ${hour}:${minute}`;
+  return formatUiDate(value, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 function sourceTypeLabel(value) {
@@ -113,11 +108,36 @@ export function RecentMentions({ mentions, loading = false }) {
               </div>
               <div className="mentionBody">
                 <strong>{sourceLabel(mention)}</strong>
-                <p>{mentionText(mention) || "Matn yo'q"}</p>
+                {mentionText(mention)
+                  ? <p data-i18n-ignore="true">{mentionText(mention)}</p>
+                  : <p>Matn yo'q</p>}
                 <div className="mentionBadgeRow">
                   {mention.media_type && <span>{mediaTypeLabel(mention.media_type)}</span>}
                   {!!mention.brand_match_terms?.length && <span className="warning">Brand signal</span>}
                 </div>
+                {mention.analysis && !mention.analysis.error ? (
+                  <div className="mentionAnalysis">
+                    <div className="mentionBadgeRow">
+                      {mention.analysis.sentiment && (
+                        <span className={`sentimentBadge ${mention.analysis.sentiment}`}>
+                          {sentimentLabels[mention.analysis.sentiment] || mention.analysis.sentiment}
+                          {typeof mention.analysis.sentiment_score === "number"
+                            ? ` · ${mention.analysis.sentiment_score.toFixed(2)}`
+                            : ""}
+                        </span>
+                      )}
+                      {mention.analysis.risk_level && (
+                        <span className={`riskBadge ${mention.analysis.risk_level}`}>
+                          {riskLabels[mention.analysis.risk_level] || mention.analysis.risk_level}
+                        </span>
+                      )}
+                    </div>
+                    {mention.analysis.summary && <p className="mentionSummary">{mention.analysis.summary}</p>}
+                    {mention.analysis.suggested_action && <p className="mentionAction">{mention.analysis.suggested_action}</p>}
+                  </div>
+                ) : (
+                  <span className="mentionPending">AI tahlil kutilmoqda…</span>
+                )}
               </div>
               <span className="mentionMeta">
                 <em title={mention.source_type}>{sourceTypeLabel(mention.source_type)}</em>
@@ -160,7 +180,27 @@ export function RecentMentions({ mentions, loading = false }) {
                   ))}
                 </div>
               )}
-              <p>{mentionText(selectedMention) || "Bu mentionda matn topilmadi."}</p>
+              {mentionText(selectedMention)
+                ? <p data-i18n-ignore="true">{mentionText(selectedMention)}</p>
+                : <p>Bu mentionda matn topilmadi.</p>}
+              {selectedMention.analysis && !selectedMention.analysis.error && (
+                <div className="mentionAnalysis modalAnalysis">
+                  <div className="mentionBadgeRow">
+                    {selectedMention.analysis.sentiment && (
+                      <span className={`sentimentBadge ${selectedMention.analysis.sentiment}`}>
+                        {sentimentLabels[selectedMention.analysis.sentiment] || selectedMention.analysis.sentiment}
+                      </span>
+                    )}
+                    {selectedMention.analysis.risk_level && (
+                      <span className={`riskBadge ${selectedMention.analysis.risk_level}`}>
+                        {riskLabels[selectedMention.analysis.risk_level] || selectedMention.analysis.risk_level}
+                      </span>
+                    )}
+                  </div>
+                  {selectedMention.analysis.summary && <p className="mentionSummary">{selectedMention.analysis.summary}</p>}
+                  {selectedMention.analysis.suggested_action && <p className="mentionAction">{selectedMention.analysis.suggested_action}</p>}
+                </div>
+              )}
             </div>
           </section>
         </div>

@@ -1,9 +1,30 @@
-from app.models.entities import AlertEvent, Analysis, Brand, Mention, TelegramSource, YouTubeAnalysis, YouTubeMention, YouTubeSource
+from app.models.entities import (
+    AlertEvent,
+    Analysis,
+    Brand,
+    FacebookAnalysis,
+    FacebookMention,
+    FacebookSource,
+    InstagramAnalysis,
+    InstagramMention,
+    InstagramSource,
+    Mention,
+    TelegramSource,
+    YouTubeAnalysis,
+    YouTubeMention,
+    YouTubeSource,
+)
 
 __all__ = [
     "AlertEvent",
     "Analysis",
     "Brand",
+    "FacebookAnalysis",
+    "FacebookMention",
+    "FacebookSource",
+    "InstagramAnalysis",
+    "InstagramMention",
+    "InstagramSource",
     "Mention",
     "TelegramSource",
     "YouTubeAnalysis",

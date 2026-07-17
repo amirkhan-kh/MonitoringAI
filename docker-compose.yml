@@ -27,7 +27,7 @@ services:
     volumes:
       - ./backend:/app
       - telegram_sessions:/app/.sessions
-      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,7 +42,7 @@ services:
     volumes:
       - ./backend:/app
       - telegram_sessions:/app/.sessions
-      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,7 +57,7 @@ services:
     volumes:
       - ./backend:/app
       - telegram_sessions:/app/.sessions
-      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -72,7 +72,7 @@ services:
     volumes:
       - ./backend:/app
       - telegram_sessions:/app/.sessions
-      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,7 +87,52 @@ services:
     volumes:
       - ./backend:/app
       - telegram_sessions:/app/.sessions
-      - /Users/amirxon/Desktop/aviora-vertex.json:/app/.secrets/vertex.json:ro
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  instagram-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.instagram_worker
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  facebook-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.facebook_worker
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  alert-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.alert_worker
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
     depends_on:
       postgres:
         condition: service_healthy

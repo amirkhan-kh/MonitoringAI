@@ -1,0 +1,76 @@
+# MonitoringAI — production stack for the shared server (13.140.176.98).
+# Fully isolated from the other projects (teleselloai, legalai):
+#   - project name "monitoringai" -> own network / volumes / container names
+#   - postgres has NO host port (internal only)
+#   - api is bound to 127.0.0.1:18090 only (host nginx reverse-proxies it; not public)
+#   - no source bind mount: code is baked into the image (immutable prod)
+# Deploy from /opt/monitoringai:
+#   docker compose -f docker-compose.prod.yml up -d --build
+name: monitoringai
+
+x-backend: &backend
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - ./secrets/vertex.json:/app/.secrets/vertex.json:ro
+    - telegram_sessions:/app/.sessions
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: monitoring
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: monitoring
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitoring -d monitoring"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    <<: *backend
+    # Uses the Dockerfile CMD (uvicorn, no --reload) — production mode.
+    ports:
+      - "127.0.0.1:18090:8000"
+
+  telegram-worker:
+    <<: *backend
+    command: python -m app.workers.telegram_worker
+
+  telegram-live-sync:
+    <<: *backend
+    command: python -m app.workers.telegram_live_sync
+
+  youtube-worker:
+    <<: *backend
+    command: python -m app.workers.youtube_worker
+
+  ai-worker:
+    <<: *backend
+    command: python -m app.workers.ai_worker
+
+  instagram-worker:
+    <<: *backend
+    command: python -m app.workers.instagram_worker
+
+  facebook-worker:
+    <<: *backend
+    command: python -m app.workers.facebook_worker
+
+  alert-worker:
+    <<: *backend
+    command: python -m app.workers.alert_worker
+
+volumes:
+  postgres_data:
+  telegram_sessions:

@@ -12,6 +12,7 @@ import {
   DownloadCloud,
   Plus,
   Star,
+  Trash2,
   Users,
   Zap,
 } from "lucide-react";
@@ -74,6 +75,7 @@ export function SourceBoard({
   onCheckSource,
   onRefreshSource,
   onBackfillSource,
+  onDeleteSource,
   loading = false,
 }) {
   const orderedCategories = useMemo(
@@ -184,6 +186,7 @@ export function SourceBoard({
               onCheckSource={onCheckSource}
               onRefreshSource={onRefreshSource}
               onBackfillSource={onBackfillSource}
+              onDeleteSource={onDeleteSource}
             />
           ))
         ) : (
@@ -194,7 +197,7 @@ export function SourceBoard({
   );
 }
 
-function SourceRow({ source, onToggleSource, onCheckSource, onRefreshSource, onBackfillSource }) {
+function SourceRow({ source, onToggleSource, onCheckSource, onRefreshSource, onBackfillSource, onDeleteSource }) {
   return (
     <article className="sourceRow">
       <div className="sourceIdentity">
@@ -227,6 +230,10 @@ function SourceRow({ source, onToggleSource, onCheckSource, onRefreshSource, onB
         <button className="miniButton" type="button" onClick={() => onToggleSource(source)} title={source.active ? "Kuzatuvni vaqtincha to'xtatadi" : "Kuzatuvni qayta yoqadi"}>
           {source.active ? <Pause size={15} /> : <Play size={15} />}
           <span>{source.active ? "Pauza" : "Davom"}</span>
+        </button>
+        <button className="miniButton danger" type="button" onClick={() => onDeleteSource(source)} title="Source va unga tegishli barcha post, comment hamda AI tahlillarini o'chiradi">
+          <Trash2 size={15} />
+          <span>O'chirish</span>
         </button>
       </div>
       {(source.notes || source.competitor_name) && (

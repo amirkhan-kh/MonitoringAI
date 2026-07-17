@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import re
 import uuid
 from collections import Counter
@@ -11,23 +12,71 @@ from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import get_settings
-from app.db import get_session, init_db
-from app.models import AlertEvent, Analysis, Brand, Mention, TelegramSource, YouTubeAnalysis, YouTubeMention, YouTubeSource
+from app.brand_taxonomy import build_brand_taxonomy
+from app.db import SessionLocal, get_session, init_db
+from app.localization import (
+    localize_source_categories,
+    localize_strings,
+    localize_taxonomy,
+    request_language,
+)
+from app.models import (
+    AlertEvent,
+    Analysis,
+    Brand,
+    FacebookAnalysis,
+    FacebookMention,
+    FacebookSource,
+    InstagramAnalysis,
+    InstagramMention,
+    InstagramSource,
+    Mention,
+    TelegramSource,
+    YouTubeAnalysis,
+    YouTubeMention,
+    YouTubeSource,
+)
 from app.schemas import (
     AlertEventOut,
     BrandCreate,
     BrandOut,
+    BrandProfileSuggestRequest,
+    BrandProfileSuggestion,
+    BrandUpdate,
     DashboardSummary,
+    LoginRequest,
+    TokenResponse,
+    FacebookAnalysisOut,
+    FacebookManualIngest,
+    FacebookManualIngestResult,
+    FacebookMentionOut,
+    FacebookSourceCreate,
+    FacebookSourceOut,
+    FacebookSourceUpdate,
+    FacebookStatus,
+    FacebookSummary,
+    InstagramAnalysisOut,
+    InstagramManualIngest,
+    InstagramManualIngestResult,
+    InstagramMentionOut,
+    InstagramSourceCreate,
+    InstagramSourceOut,
+    InstagramSourceUpdate,
+    InstagramStatus,
+    InstagramSummary,
+    InstagramSyncResult,
+    InlineAnalysisOut,
     MentionDetailOut,
     MentionOut,
+    SourceDeleteResult,
     TelegramBotStatus,
     TelegramSourceBackfillRequest,
     TelegramSourceBackfillResult,
@@ -53,7 +102,27 @@ from app.schemas import (
     YouTubeStatus,
     YouTubeSummary,
 )
+from app.services.alerts import record_alert
+from app.services.auth import create_token, verify_credentials, verify_token
+from app.services.facebook_api import (
+    FacebookApi,
+    FacebookApiError,
+    detect_page,
+    verify_signature as fb_verify_signature,
+)
+from app.services.facebook_ingestion import ingest_facebook_comment
+from app.services.gemini_analysis import (
+    ProviderRetryableError,
+    analyze_facebook_mention,
+    analyze_instagram_mention,
+    create_gemini_client,
+    suggest_brand_profile,
+)
+from app.services.instagram_api import InstagramApi, InstagramApiError, detect_account, verify_signature
+from app.services.instagram_ingestion import ingest_instagram_comment
+from app.services.instagram_sync import sync_instagram_source
 from app.services.matching import BrandMatch, collect_matched_terms, invalidate_brand_cache, match_brand, normalize_text
+from app.services.source_deletion import SourceNotFoundError, delete_monitored_source
 from app.services.telegram_api import TelegramBotApi
 from app.services.realtime import publish_realtime_event, realtime_event_stream
 from app.services.youtube_api import (
@@ -187,6 +256,103 @@ YOUTUBE_SOURCE_CATEGORIES = [
     },
 ]
 
+BRAND_TAXONOMY = {
+    "categories": [
+        {
+            "key": "retail_fashion",
+            "label": "Kiyim va retail",
+            "children": ["sport kiyimlari", "kundalik kiyim", "poyabzal", "aksessuar", "online do'kon"],
+            "keywords": ["sifat", "razmer", "yetkazib berish", "narx", "original", "chegirma"],
+            "risk_keywords": ["aldadi", "soxta", "kechikdi", "qaytarish", "defekt", "mos kelmadi"],
+        },
+        {
+            "key": "food_hospitality",
+            "label": "Ovqatlanish va servis",
+            "children": ["restoran", "kafe", "delivery", "fast food", "mehmonxona"],
+            "keywords": ["ta'm", "xizmat", "tezlik", "bron", "yetkazish", "tozalik"],
+            "risk_keywords": ["sovuq", "kechikdi", "zaharlanish", "qo'pol", "bekor qilindi", "iflos"],
+        },
+        {
+            "key": "software_saas",
+            "label": "Software va SaaS",
+            "children": ["AI mahsulot", "CRM", "dashboard", "mobile app", "API", "automation"],
+            "keywords": ["demo", "integratsiya", "tezlik", "xato", "support", "narx"],
+            "risk_keywords": ["ishlamayapti", "bug", "login", "to'lov", "ma'lumot yo'qoldi", "sekin"],
+        },
+        {
+            "key": "education",
+            "label": "Ta'lim",
+            "children": ["kurs", "online ta'lim", "til markazi", "universitet", "mentorlik"],
+            "keywords": ["dars", "mentor", "sertifikat", "natija", "narx", "jadval"],
+            "risk_keywords": ["va'da", "pul qaytarish", "sifatsiz", "bekor", "aldadi", "natija yo'q"],
+        },
+        {
+            "key": "health_beauty",
+            "label": "Sog'liq va beauty",
+            "children": ["klinika", "kosmetologiya", "fitness", "dorixona", "salon"],
+            "keywords": ["navbat", "mutaxassis", "natija", "xavfsizlik", "narx", "qabul"],
+            "risk_keywords": ["asorat", "allergiya", "shikoyat", "litsenziya", "qimmat", "natija bermadi"],
+        },
+        {
+            "key": "finance_fintech",
+            "label": "Moliya va fintech",
+            "children": ["bank", "to'lov", "kredit", "investitsiya", "sug'urta"],
+            "keywords": ["komissiya", "limit", "karta", "to'lov", "ilova", "xavfsizlik"],
+            "risk_keywords": ["bloklandi", "pul yechildi", "fraud", "kechikdi", "support javob bermadi"],
+        },
+        {
+            "key": "ecommerce_marketplace",
+            "label": "E-commerce va marketplace",
+            "children": ["marketplace", "shopping app", "seller", "logistika", "ombor"],
+            "keywords": ["buyurtma", "yetkazish", "qaytarish", "ombor", "seller", "aksiya"],
+            "risk_keywords": ["kelmadi", "noto'g'ri tovar", "refund", "support", "cancel", "kechikdi"],
+        },
+        {
+            "key": "media_creator",
+            "label": "Media va creator",
+            "children": ["blog", "news", "podcast", "YouTube kanal", "influencer"],
+            "keywords": ["kontent", "obuna", "ko'rish", "komment", "hamkorlik", "reklama"],
+            "risk_keywords": ["fake news", "plagiat", "tanqid", "cancel", "shikoyat", "toxicity"],
+        },
+    ],
+    "goals": [
+        {"key": "own_profile", "label": "O'z profilimdagi post/commentlarni kuzatish"},
+        {"key": "competitor_watch", "label": "Raqobatchilarni kuzatish"},
+        {"key": "global_brand_watch", "label": "Internet bo'ylab brand zikrlarini topish"},
+        {"key": "crisis_alerts", "label": "Salbiy signal va crisis alert"},
+        {"key": "campaign_tracking", "label": "Kampaniya/hashtag natijasini kuzatish"},
+        {"key": "customer_support", "label": "Support va javob berish uchun mention ajratish"},
+    ],
+    "source_playbooks": {
+        "telegram": [
+            "Kanal yoki guruh linkini kiriting.",
+            "Monitoring botni kanal/guruhga admin qiling.",
+            "Discussion group bo'lsa bot u yerda ham a'zo/admin bo'lishi kerak.",
+            "Backfill tugmasi bilan eski post/commentlarni tortib oling.",
+        ],
+        "youtube": [
+            "Kanal, video, hashtag yoki keyword kiriting.",
+            "YouTube API key sozlangan bo'lsa sync comment/video oqimini tortadi.",
+            "Raqobatchi kanal uchun token kerak emas, public Data API yetarli.",
+            "Dislike soni public API orqali berilmaydi, shuning uchun taxmin qilinmaydi.",
+        ],
+        "instagram": [
+            "O'z profilingiz uchun Instagram Business/Creator + Facebook Page kerak.",
+            "Development rejimda faqat tester/owned oqim ko'rinishi mumkin.",
+            "Real public comment/@mention uchun App Review va kerakli permissionlar talab qilinadi.",
+            "Token yoki webhook ulanmasa, qo'lda demo ingest orqali AI tahlilni tekshirish mumkin.",
+        ],
+        "facebook": [
+            "Facebook Page token yoki Page access kerak.",
+            "Own Page comment/reply oqimi poller/webhook orqali keladi.",
+            "Business portfolio cheklovi bo'lsa avval Meta account/page holatini tuzatish kerak.",
+            "Raqobatchi Page uchun public postlarni cheklangan darajada kuzatish mumkin, admin token talab qilinmaydigan joylar kam.",
+        ],
+    },
+}
+
+BRAND_TAXONOMY = build_brand_taxonomy(BRAND_TAXONOMY)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -194,14 +360,57 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="MonitoringAI", version="0.1.0", lifespan=lifespan)
+# Routes reachable without a token: health check, the login endpoint itself, the API
+# docs, and the Instagram webhook (Meta calls it unauthenticated — it has its own
+# signature/verify-token checks).
+AUTH_PUBLIC_PATHS = {"/health", "/auth/login", "/docs", "/redoc", "/openapi.json"}
+AUTH_PUBLIC_PREFIXES = ("/instagram/webhook",)
+
+
+async def require_auth(request: Request) -> None:
+    settings = get_settings()
+    if not settings.auth_enabled:
+        return
+    path = request.url.path
+    if request.method == "OPTIONS" or path in AUTH_PUBLIC_PATHS or path.startswith(AUTH_PUBLIC_PREFIXES):
+        return
+    # EventSource (SSE) can't set an Authorization header, so /events takes the token
+    # as a query param instead.
+    if path == "/events":
+        token = request.query_params.get("access_token")
+    else:
+        header = request.headers.get("Authorization", "")
+        token = header[7:] if header.startswith("Bearer ") else None
+    if verify_token(settings, token) is None:
+        raise HTTPException(status_code=401, detail="Avtorizatsiya talab qilinadi. Qaytadan kiring.")
+
+
+app = FastAPI(title="MonitoringAI", version="0.1.0", lifespan=lifespan, dependencies=[Depends(require_auth)])
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=get_settings().cors_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def auth_login(payload: LoginRequest) -> TokenResponse:
+    settings = get_settings()
+    if not verify_credentials(settings, payload.username, payload.password):
+        raise HTTPException(status_code=401, detail="Login yoki parol noto'g'ri")
+    token, expires_at = create_token(settings, payload.username)
+    return TokenResponse(access_token=token, username=payload.username, expires_at=expires_at)
+
+
+@app.get("/auth/me")
+def auth_me(request: Request) -> dict[str, object]:
+    settings = get_settings()
+    header = request.headers.get("Authorization", "")
+    token = header[7:] if header.startswith("Bearer ") else None
+    username = verify_token(settings, token)
+    return {"username": username, "auth_enabled": settings.auth_enabled}
 
 DbSession = Annotated[Session, Depends(get_session)]
 LOCAL_TZ = timezone(timedelta(hours=5))
@@ -1087,6 +1296,24 @@ def publish_source_event(session: Session, source: TelegramSource, event_type: s
     )
 
 
+def delete_source_and_notify(platform: str, source_id: uuid.UUID, session: Session) -> dict[str, Any]:
+    try:
+        result = delete_monitored_source(session, platform, source_id)
+    except SourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    publish_realtime_event(
+        session,
+        f"{platform}_source",
+        {
+            "id": source_id,
+            "deleted": True,
+            "mentions_deleted": result["mentions_deleted"],
+            "analyses_deleted": result["analyses_deleted"],
+        },
+    )
+    return result
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -1116,8 +1343,8 @@ def telegram_bot_status() -> TelegramBotStatus:
 
 
 @app.get("/telegram/source-categories", response_model=list[TelegramSourceCategory])
-def telegram_source_categories() -> list[dict[str, str]]:
-    return SOURCE_CATEGORIES
+def telegram_source_categories(request: Request) -> list[dict[str, str]]:
+    return localize_source_categories(SOURCE_CATEGORIES, request_language(request))
 
 
 @app.get("/telegram/backfill/session-status", response_model=TelegramSessionStatus)
@@ -1151,10 +1378,42 @@ async def telegram_backfill_session_status() -> TelegramSessionStatus:
 def create_brand(payload: BrandCreate, session: DbSession) -> Brand:
     brand = Brand(**payload.model_dump())
     session.add(brand)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Bu nomdagi brand allaqachon mavjud") from exc
     session.refresh(brand)
     invalidate_brand_cache()
     return brand
+
+
+@app.get("/brands/taxonomy")
+def brand_taxonomy(request: Request) -> dict[str, Any]:
+    return localize_taxonomy(BRAND_TAXONOMY, request_language(request))
+
+
+@app.get("/brand-taxonomy")
+def brand_taxonomy_stable(request: Request) -> dict[str, Any]:
+    return localize_taxonomy(BRAND_TAXONOMY, request_language(request))
+
+
+@app.post("/brands/profile-suggestions", response_model=BrandProfileSuggestion)
+def brand_profile_suggestions(payload: BrandProfileSuggestRequest, request: Request) -> dict[str, Any]:
+    settings = get_settings()
+    language = request_language(request)
+    try:
+        client = create_gemini_client(settings)
+        context = payload.model_dump()
+        context["language"] = language
+        return suggest_brand_profile(settings, client, context)
+    except Exception as exc:
+        prefix = {
+            "uz": "AI profil tavsiyasi hozir olinmadi",
+            "ru": "Сейчас не удалось получить рекомендации ИИ для профиля",
+            "en": "AI profile suggestions are currently unavailable",
+        }[language]
+        raise HTTPException(status_code=503, detail=f"{prefix}: {exc}") from exc
 
 
 @app.get("/brands", response_model=list[BrandOut])
@@ -1167,6 +1426,23 @@ def get_brand(brand_id: uuid.UUID, session: DbSession) -> Brand:
     brand = session.get(Brand, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
+    return brand
+
+
+@app.patch("/brands/{brand_id}", response_model=BrandOut)
+def update_brand(brand_id: uuid.UUID, payload: BrandUpdate, session: DbSession) -> Brand:
+    brand = session.get(Brand, brand_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(brand, field, value)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Bu nomdagi brand allaqachon mavjud") from exc
+    session.refresh(brand)
+    invalidate_brand_cache()
     return brand
 
 
@@ -1325,6 +1601,11 @@ def update_telegram_source(source_id: uuid.UUID, payload: TelegramSourceUpdate, 
     return source
 
 
+@app.delete("/telegram/sources/{source_id}", response_model=SourceDeleteResult)
+def delete_telegram_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
+    return delete_source_and_notify("telegram", source_id, session)
+
+
 @app.post("/telegram/sources/{source_id}/refresh", response_model=TelegramSourceRefreshResult)
 def refresh_telegram_source(source_id: uuid.UUID, session: DbSession) -> TelegramSourceRefreshResult:
     source = session.get(TelegramSource, source_id)
@@ -1424,7 +1705,7 @@ def backfill_telegram_source(
 
 
 @app.get("/youtube/status", response_model=YouTubeStatus)
-def youtube_status() -> YouTubeStatus:
+def youtube_status(request: Request) -> YouTubeStatus:
     settings = get_settings()
     configured = bool(settings.youtube_api_key)
     return YouTubeStatus(
@@ -1433,16 +1714,19 @@ def youtube_status() -> YouTubeStatus:
         comments_supported=True,
         videos_supported=True,
         transcripts_supported=False,
-        notes=[
-            "YouTube Data API commentThreads orqali public video commentlarini olish mumkin.",
-            "Transcript/audio AI keyingi bosqichda alohida pipeline bo'ladi.",
-        ],
+        notes=localize_strings(
+            [
+                "YouTube Data API commentThreads orqali public video commentlarini olish mumkin.",
+                "Transcript/audio AI keyingi bosqichda alohida pipeline bo'ladi.",
+            ],
+            request_language(request),
+        ),
     )
 
 
 @app.get("/youtube/source-categories", response_model=list[YouTubeSourceCategory])
-def youtube_source_categories() -> list[dict[str, str]]:
-    return YOUTUBE_SOURCE_CATEGORIES
+def youtube_source_categories(request: Request) -> list[dict[str, str]]:
+    return localize_source_categories(YOUTUBE_SOURCE_CATEGORIES, request_language(request))
 
 
 @app.get("/youtube/sources", response_model=list[YouTubeSourceOut])
@@ -1506,6 +1790,11 @@ def update_youtube_source(source_id: uuid.UUID, payload: YouTubeSourceUpdate, se
     return source
 
 
+@app.delete("/youtube/sources/{source_id}", response_model=SourceDeleteResult)
+def delete_youtube_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
+    return delete_source_and_notify("youtube", source_id, session)
+
+
 @app.post("/youtube/sources/{source_id}/sync", response_model=YouTubeSourceSyncResult)
 def sync_youtube_source_endpoint(
     source_id: uuid.UUID,
@@ -1524,8 +1813,8 @@ def list_youtube_mentions(
     session: DbSession,
     brand_id: uuid.UUID | None = None,
     item_type: str | None = None,
-    limit: int | None = Query(default=None, ge=1, le=10000),
-) -> list[YouTubeMention]:
+    limit: int | None = Query(default=100, ge=1, le=10000),
+) -> list[YouTubeMentionOut]:
     latest_time = func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at)
     query = session.query(YouTubeMention).order_by(latest_time.desc(), YouTubeMention.created_at.desc())
     if brand_id:
@@ -1534,25 +1823,51 @@ def list_youtube_mentions(
         query = query.filter(YouTubeMention.item_type == item_type)
     if limit:
         query = query.limit(limit)
-    return query.all()
+    rows = query.all()
+    if not rows:
+        return []
+    analyses = {
+        a.youtube_mention_id: a
+        for a in session.query(YouTubeAnalysis).filter(
+            YouTubeAnalysis.youtube_mention_id.in_([row.id for row in rows])
+        )
+    }
+    out: list[YouTubeMentionOut] = []
+    for mention in rows:
+        item = YouTubeMentionOut.model_validate(mention)
+        analysis = analyses.get(mention.id)
+        if analysis is not None:
+            item.analysis = InlineAnalysisOut.model_validate(analysis)
+        out.append(item)
+    return out
 
 
 @app.get("/youtube/summary", response_model=YouTubeSummary)
 def youtube_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> YouTubeSummary:
     source_query = session.query(YouTubeSource)
     mention_query = session.query(YouTubeMention)
-    risk_query = session.query(YouTubeAnalysis).join(YouTubeMention, YouTubeAnalysis.youtube_mention_id == YouTubeMention.id)
+    analysis_query = (
+        session.query(YouTubeAnalysis)
+        .join(YouTubeMention, YouTubeAnalysis.youtube_mention_id == YouTubeMention.id)
+        .filter(YouTubeAnalysis.error.is_(None))
+    )
     if brand_id:
         source_query = source_query.filter(YouTubeSource.brand_id == brand_id)
         mention_query = mention_query.filter(YouTubeMention.brand_id == brand_id)
-        risk_query = risk_query.filter(YouTubeMention.brand_id == brand_id)
+        analysis_query = analysis_query.filter(YouTubeMention.brand_id == brand_id)
+
+    mentions_total = mention_query.count()
+    analyzed_total = analysis_query.count()
+    analysis_denominator = max(mentions_total, analyzed_total)
 
     return YouTubeSummary(
         sources_total=source_query.count(),
-        mentions_total=mention_query.count(),
+        mentions_total=mentions_total,
         comments_total=mention_query.filter(YouTubeMention.item_type.in_(["comment", "comment_reply"])).count(),
         videos_total=mention_query.filter(YouTubeMention.item_type == "video").count(),
-        high_risk=risk_query.filter(YouTubeAnalysis.error.is_(None), YouTubeAnalysis.risk_level.in_(["high", "critical"])).count(),
+        analyzed_total=analyzed_total,
+        analysis_coverage=round(analyzed_total / analysis_denominator, 3) if analysis_denominator else 0,
+        high_risk=analysis_query.filter(YouTubeAnalysis.risk_level.in_(["high", "critical"])).count(),
         latest_mentions=mention_query.order_by(
             func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at).desc(),
             YouTubeMention.created_at.desc(),
@@ -1640,6 +1955,8 @@ def empty_trend_row(bucket_start: datetime, interval: str) -> dict[str, Any]:
         "end_at": bucket_end,
         "telegram": 0,
         "youtube": 0,
+        "instagram": 0,
+        "facebook": 0,
         "total": 0,
         "comments": 0,
         "engagement": 0,
@@ -1648,6 +1965,10 @@ def empty_trend_row(bucket_start: datetime, interval: str) -> dict[str, Any]:
         "youtube_likes": 0,
         "youtube_views": 0,
         "youtube_video_comments": 0,
+        "instagram_likes": 0,
+        "instagram_replies": 0,
+        "facebook_likes": 0,
+        "facebook_replies": 0,
         "high_risk": 0,
     }
 
@@ -1796,6 +2117,8 @@ def forecast_payload(
         "next_7d_youtube_likes": scaled_next_7d(totals.get("youtube_likes", 0), days),
         "next_7d_youtube_views": scaled_next_7d(totals.get("youtube_views", 0), days),
         "next_7d_telegram_reactions": scaled_next_7d(totals.get("telegram_reactions", 0), days),
+        "next_7d_instagram_likes": scaled_next_7d(totals.get("instagram_likes", 0), days),
+        "next_7d_facebook_likes": scaled_next_7d(totals.get("facebook_likes", 0), days),
         "next_7d_dislikes": None,
         "daily_average": round(daily_average, 1),
         "previous_period_mentions": previous_total,
@@ -1825,6 +2148,8 @@ def dashboard_analytics(
 
     telegram_query = session.query(Mention).filter(func.coalesce(Mention.message_date, Mention.created_at) >= start_at)
     youtube_query = session.query(YouTubeMention).filter(func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at) >= start_at)
+    instagram_query = session.query(InstagramMention).filter(func.coalesce(InstagramMention.published_at, InstagramMention.created_at) >= start_at)
+    facebook_query = session.query(FacebookMention).filter(func.coalesce(FacebookMention.published_at, FacebookMention.created_at) >= start_at)
     previous_telegram_query = session.query(Mention).filter(
         func.coalesce(Mention.message_date, Mention.created_at) >= previous_start,
         func.coalesce(Mention.message_date, Mention.created_at) < start_at,
@@ -1833,31 +2158,118 @@ def dashboard_analytics(
         func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at) >= previous_start,
         func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at) < start_at,
     )
+    previous_instagram_query = session.query(InstagramMention).filter(
+        func.coalesce(InstagramMention.published_at, InstagramMention.created_at) >= previous_start,
+        func.coalesce(InstagramMention.published_at, InstagramMention.created_at) < start_at,
+    )
+    previous_facebook_query = session.query(FacebookMention).filter(
+        func.coalesce(FacebookMention.published_at, FacebookMention.created_at) >= previous_start,
+        func.coalesce(FacebookMention.published_at, FacebookMention.created_at) < start_at,
+    )
     telegram_sources_query = session.query(TelegramSource)
     youtube_sources_query = session.query(YouTubeSource)
+    instagram_sources_query = session.query(InstagramSource)
+    facebook_sources_query = session.query(FacebookSource)
     analysis_query = session.query(Analysis).join(Mention).filter(func.coalesce(Mention.message_date, Mention.created_at) >= start_at)
     youtube_analysis_query = (
         session.query(YouTubeAnalysis)
         .join(YouTubeMention, YouTubeAnalysis.youtube_mention_id == YouTubeMention.id)
         .filter(func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at) >= start_at)
     )
+    instagram_analysis_query = (
+        session.query(InstagramAnalysis)
+        .join(InstagramMention, InstagramAnalysis.instagram_mention_id == InstagramMention.id)
+        .filter(func.coalesce(InstagramMention.published_at, InstagramMention.created_at) >= start_at)
+    )
+    facebook_analysis_query = (
+        session.query(FacebookAnalysis)
+        .join(FacebookMention, FacebookAnalysis.facebook_mention_id == FacebookMention.id)
+        .filter(func.coalesce(FacebookMention.published_at, FacebookMention.created_at) >= start_at)
+    )
 
     if brand_id:
         telegram_query = telegram_query.filter(Mention.brand_id == brand_id)
         youtube_query = youtube_query.filter(YouTubeMention.brand_id == brand_id)
+        instagram_query = instagram_query.filter(InstagramMention.brand_id == brand_id)
+        facebook_query = facebook_query.filter(FacebookMention.brand_id == brand_id)
         previous_telegram_query = previous_telegram_query.filter(Mention.brand_id == brand_id)
         previous_youtube_query = previous_youtube_query.filter(YouTubeMention.brand_id == brand_id)
+        previous_instagram_query = previous_instagram_query.filter(InstagramMention.brand_id == brand_id)
+        previous_facebook_query = previous_facebook_query.filter(FacebookMention.brand_id == brand_id)
         telegram_sources_query = telegram_sources_query.filter(TelegramSource.brand_id == brand_id)
         youtube_sources_query = youtube_sources_query.filter(YouTubeSource.brand_id == brand_id)
+        instagram_sources_query = instagram_sources_query.filter(InstagramSource.brand_id == brand_id)
+        facebook_sources_query = facebook_sources_query.filter(FacebookSource.brand_id == brand_id)
         analysis_query = analysis_query.filter(Mention.brand_id == brand_id)
         youtube_analysis_query = youtube_analysis_query.filter(YouTubeMention.brand_id == brand_id)
+        instagram_analysis_query = instagram_analysis_query.filter(InstagramMention.brand_id == brand_id)
+        facebook_analysis_query = facebook_analysis_query.filter(FacebookMention.brand_id == brand_id)
 
-    telegram_mentions = telegram_query.all()
-    youtube_mentions = youtube_query.all()
-    analyses = analysis_query.all()
-    youtube_analyses = youtube_analysis_query.all()
+    telegram_event_time = func.coalesce(Mention.message_date, Mention.created_at).label("event_time")
+    youtube_event_time = func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at).label("event_time")
+    instagram_event_time = func.coalesce(InstagramMention.published_at, InstagramMention.created_at).label("event_time")
+    facebook_event_time = func.coalesce(FacebookMention.published_at, FacebookMention.created_at).label("event_time")
+
+    telegram_mentions = telegram_query.with_entities(
+        telegram_event_time,
+        Mention.source_type.label("source_type"),
+        Mention.raw.label("raw"),
+    ).all()
+    youtube_mentions = youtube_query.with_entities(
+        youtube_event_time,
+        YouTubeMention.item_type.label("item_type"),
+        YouTubeMention.like_count.label("like_count"),
+        YouTubeMention.view_count.label("view_count"),
+        YouTubeMention.comment_count.label("comment_count"),
+    ).all()
+    instagram_mentions = instagram_query.with_entities(
+        instagram_event_time,
+        InstagramMention.item_type.label("item_type"),
+        InstagramMention.like_count.label("like_count"),
+        InstagramMention.reply_count.label("reply_count"),
+    ).all()
+    facebook_mentions = facebook_query.with_entities(
+        facebook_event_time,
+        FacebookMention.item_type.label("item_type"),
+        FacebookMention.like_count.label("like_count"),
+        FacebookMention.reply_count.label("reply_count"),
+    ).all()
+    analyses = analysis_query.with_entities(
+        Analysis.error.label("error"),
+        Analysis.sentiment.label("sentiment"),
+        Analysis.sentiment_score.label("sentiment_score"),
+        Analysis.risk_level.label("risk_level"),
+        Analysis.risk_score.label("risk_score"),
+        telegram_event_time,
+    ).all()
+    youtube_analyses = youtube_analysis_query.with_entities(
+        YouTubeAnalysis.error.label("error"),
+        YouTubeAnalysis.sentiment.label("sentiment"),
+        YouTubeAnalysis.sentiment_score.label("sentiment_score"),
+        YouTubeAnalysis.risk_level.label("risk_level"),
+        YouTubeAnalysis.risk_score.label("risk_score"),
+        youtube_event_time,
+    ).all()
+    instagram_analyses = instagram_analysis_query.with_entities(
+        InstagramAnalysis.error.label("error"),
+        InstagramAnalysis.sentiment.label("sentiment"),
+        InstagramAnalysis.sentiment_score.label("sentiment_score"),
+        InstagramAnalysis.risk_level.label("risk_level"),
+        InstagramAnalysis.risk_score.label("risk_score"),
+        instagram_event_time,
+    ).all()
+    facebook_analyses = facebook_analysis_query.with_entities(
+        FacebookAnalysis.error.label("error"),
+        FacebookAnalysis.sentiment.label("sentiment"),
+        FacebookAnalysis.sentiment_score.label("sentiment_score"),
+        FacebookAnalysis.risk_level.label("risk_level"),
+        FacebookAnalysis.risk_score.label("risk_score"),
+        facebook_event_time,
+    ).all()
     telegram_sources = telegram_sources_query.all()
     youtube_sources = youtube_sources_query.all()
+    instagram_sources = instagram_sources_query.all()
+    facebook_sources = facebook_sources_query.all()
     selected_brand = session.get(Brand, brand_id) if brand_id else None
 
     trend_map: dict[str, dict[str, Any]] = {}
@@ -1872,7 +2284,7 @@ def dashboard_analytics(
     telegram_view_count = 0
     telegram_reaction_count = 0
     for mention in telegram_mentions:
-        event_time = mention_time(mention.message_date, mention.created_at)
+        event_time = mention_time(mention.event_time, mention.event_time)
         bucket_start = trend_bucket_start(event_time, interval, tz)
         key = bucket_start.isoformat()
         row = trend_map.setdefault(key, empty_trend_row(bucket_start, interval))
@@ -1897,7 +2309,7 @@ def dashboard_analytics(
     youtube_view_count = 0
     youtube_video_comment_count = 0
     for mention in youtube_mentions:
-        event_time = mention_time(mention.published_at, mention.created_at)
+        event_time = mention_time(mention.event_time, mention.event_time)
         bucket_start = trend_bucket_start(event_time, interval, tz)
         key = bucket_start.isoformat()
         row = trend_map.setdefault(key, empty_trend_row(bucket_start, interval))
@@ -1919,40 +2331,94 @@ def dashboard_analytics(
             youtube_comment_mentions += 1
             row["comments"] += 1
 
-    active_sources = sum(1 for source in [*telegram_sources, *youtube_sources] if source.active)
+    instagram_comment_count = 0
+    instagram_direct_mention_count = 0
+    instagram_caption_count = 0
+    instagram_like_count = 0
+    instagram_reply_count = 0
+    for mention in instagram_mentions:
+        event_time = mention_time(mention.event_time, mention.event_time)
+        bucket_start = trend_bucket_start(event_time, interval, tz)
+        key = bucket_start.isoformat()
+        row = trend_map.setdefault(key, empty_trend_row(bucket_start, interval))
+        row["instagram"] += 1
+        row["total"] += 1
+        likes = mention.like_count or 0
+        replies = mention.reply_count or 0
+        instagram_like_count += likes
+        instagram_reply_count += replies
+        row["engagement"] += likes + replies
+        row["instagram_likes"] += likes
+        row["instagram_replies"] += replies
+        if mention.item_type == "comment":
+            instagram_comment_count += 1
+            row["comments"] += 1
+        elif mention.item_type == "mention":
+            instagram_direct_mention_count += 1
+        elif mention.item_type == "caption":
+            instagram_caption_count += 1
+
+    facebook_comment_count = 0
+    facebook_reply_count = 0
+    facebook_post_count = 0
+    facebook_direct_mention_count = 0
+    facebook_like_count = 0
+    facebook_reply_engagement = 0
+    for mention in facebook_mentions:
+        event_time = mention_time(mention.event_time, mention.event_time)
+        bucket_start = trend_bucket_start(event_time, interval, tz)
+        key = bucket_start.isoformat()
+        row = trend_map.setdefault(key, empty_trend_row(bucket_start, interval))
+        row["facebook"] += 1
+        row["total"] += 1
+        likes = mention.like_count or 0
+        replies = mention.reply_count or 0
+        facebook_like_count += likes
+        facebook_reply_engagement += replies
+        row["engagement"] += likes + replies
+        row["facebook_likes"] += likes
+        row["facebook_replies"] += replies
+        if mention.item_type == "comment":
+            facebook_comment_count += 1
+            row["comments"] += 1
+        elif mention.item_type == "reply":
+            facebook_reply_count += 1
+            row["comments"] += 1
+        elif mention.item_type == "post":
+            facebook_post_count += 1
+        elif mention.item_type == "mention":
+            facebook_direct_mention_count += 1
+
+    all_sources = [*telegram_sources, *youtube_sources, *instagram_sources, *facebook_sources]
+    active_sources = sum(1 for source in all_sources if source.active)
     ai_metrics = ai_metric_payload(
         {
             "telegram": len(telegram_mentions),
             "youtube": len(youtube_mentions),
+            "instagram": len(instagram_mentions),
+            "facebook": len(facebook_mentions),
         },
         {
             "telegram": analyses,
             "youtube": youtube_analyses,
+            "instagram": instagram_analyses,
+            "facebook": facebook_analyses,
         },
         active_sources,
     )
     successful_ai_rows = ai_metrics["successful_rows"]
     sentiment_counts = Counter(analysis.sentiment or "unknown" for analysis in successful_ai_rows)
     risk_counts = Counter(analysis.risk_level or "unknown" for analysis in successful_ai_rows)
-    for analysis in successful_analysis_rows(analyses):
-        if analysis.risk_level in {"high", "critical"} and analysis.mention:
-            bucket_start = trend_bucket_start(mention_time(analysis.mention.message_date, analysis.mention.created_at), interval, tz)
+    for analysis in successful_ai_rows:
+        if analysis.risk_level in {"high", "critical"}:
+            bucket_start = trend_bucket_start(mention_time(analysis.event_time, analysis.event_time), interval, tz)
             key = bucket_start.isoformat()
             if key in trend_map:
                 trend_map[key]["high_risk"] += 1
-    youtube_mentions_by_id = {mention.id: mention for mention in youtube_mentions}
-    for analysis in successful_analysis_rows(youtube_analyses):
-        if analysis.risk_level in {"high", "critical"}:
-            mention = youtube_mentions_by_id.get(analysis.youtube_mention_id)
-            if mention:
-                bucket_start = trend_bucket_start(mention_time(mention.published_at, mention.created_at), interval, tz)
-                key = bucket_start.isoformat()
-                if key in trend_map:
-                    trend_map[key]["high_risk"] += 1
 
     trend_rows = sorted(trend_map.values(), key=lambda row: row["start_at"])
-    current_total = len(telegram_mentions) + len(youtube_mentions)
-    previous_total = previous_telegram_query.count() + previous_youtube_query.count()
+    current_total = len(telegram_mentions) + len(youtube_mentions) + len(instagram_mentions) + len(facebook_mentions)
+    previous_total = previous_telegram_query.count() + previous_youtube_query.count() + previous_instagram_query.count() + previous_facebook_query.count()
     analyzed_total = ai_metrics["successful_total"]
     total_ai_coverage = ai_metrics["total_coverage"]
 
@@ -1972,27 +2438,47 @@ def dashboard_analytics(
             "end_at": end_at,
         },
         "sources": {
-            "total": len(telegram_sources) + len(youtube_sources),
+            "total": len(all_sources),
             "active": active_sources,
             "telegram": len(telegram_sources),
             "youtube": len(youtube_sources),
-            "official_total": sum(1 for source in [*telegram_sources, *youtube_sources] if source.source_category == "owned"),
+            "instagram": len(instagram_sources),
+            "facebook": len(facebook_sources),
+            "official_total": sum(1 for source in all_sources if source.source_category == "owned"),
             "official_telegram": sum(1 for source in telegram_sources if source.source_category == "owned"),
             "official_youtube": sum(1 for source in youtube_sources if source.source_category == "owned"),
+            "official_instagram": sum(1 for source in instagram_sources if source.source_category == "owned"),
+            "official_facebook": sum(1 for source in facebook_sources if source.source_category == "owned"),
+            "invalid_meta_tokens": sum(
+                1
+                for source in [*instagram_sources, *facebook_sources]
+                if source.active and source.token_status == "invalid"
+            ),
         },
         "mentions": {
             "total": current_total,
             "telegram": len(telegram_mentions),
             "youtube": len(youtube_mentions),
+            "instagram": len(instagram_mentions),
+            "facebook": len(facebook_mentions),
             "telegram_posts": telegram_post_count,
             "telegram_comments": telegram_comment_count,
             "youtube_videos": youtube_video_count,
             "youtube_comments": youtube_comment_mentions,
+            "instagram_comments": instagram_comment_count,
+            "instagram_direct_mentions": instagram_direct_mention_count,
+            "instagram_captions": instagram_caption_count,
+            "facebook_comments": facebook_comment_count,
+            "facebook_replies": facebook_reply_count,
+            "facebook_posts": facebook_post_count,
+            "facebook_direct_mentions": facebook_direct_mention_count,
             "analyzed": analyzed_total,
             "analysis_coverage": round(total_ai_coverage, 3),
             "processed_analysis_coverage": round(ai_metrics["processed_coverage"], 3),
             "telegram_analysis_coverage": ai_metrics["platforms"]["telegram"]["coverage"],
             "youtube_analysis_coverage": ai_metrics["platforms"]["youtube"]["coverage"],
+            "instagram_analysis_coverage": ai_metrics["platforms"]["instagram"]["coverage"],
+            "facebook_analysis_coverage": ai_metrics["platforms"]["facebook"]["coverage"],
             "ai_failed": ai_metrics["failed_total"],
         },
         "ai": {
@@ -2005,13 +2491,15 @@ def dashboard_analytics(
             "processed_coverage": round(ai_metrics["processed_coverage"], 3),
             "telegram_coverage": ai_metrics["platforms"]["telegram"]["coverage"],
             "youtube_coverage": ai_metrics["platforms"]["youtube"]["coverage"],
+            "instagram_coverage": ai_metrics["platforms"]["instagram"]["coverage"],
+            "facebook_coverage": ai_metrics["platforms"]["facebook"]["coverage"],
             "platforms": ai_metrics["platforms"],
             "platform_balance": round(ai_metrics["platform_balance"], 3),
             "error_rate": round(ai_metrics["error_rate"], 3),
             "reliability": round(ai_metrics["reliability"], 2),
             "avg_sentiment_score": round(ai_metrics["avg_sentiment_score"], 3),
             "avg_risk_score": round(ai_metrics["avg_risk_score"], 3),
-            "note": "Ijobiy/salbiy fikrlar Telegram va YouTube bo'yicha AI muvaffaqiyatli tahlil qilgan mentionlar asosida hisoblanadi.",
+            "note": "Ijobiy/salbiy fikrlar Telegram, YouTube, Instagram va Facebook bo'yicha AI muvaffaqiyatli tahlil qilgan mentionlar asosida hisoblanadi.",
         },
         "engagement": {
             "telegram_views": telegram_view_count,
@@ -2019,6 +2507,10 @@ def dashboard_analytics(
             "youtube_views": youtube_view_count,
             "youtube_likes": youtube_like_count,
             "youtube_comment_count": youtube_video_comment_count,
+            "instagram_likes": instagram_like_count,
+            "instagram_replies": instagram_reply_count,
+            "facebook_likes": facebook_like_count,
+            "facebook_replies": facebook_reply_engagement,
             "youtube_dislikes": None,
             "youtube_dislikes_note": "YouTube public Data API dislike sonini bermaydi.",
         },
@@ -2032,10 +2524,12 @@ def dashboard_analytics(
             active_sources,
             days,
             {
-                "comments": telegram_comment_count + youtube_comment_mentions,
+                "comments": telegram_comment_count + youtube_comment_mentions + instagram_comment_count + facebook_comment_count + facebook_reply_count,
                 "youtube_likes": youtube_like_count,
                 "youtube_views": youtube_view_count,
                 "telegram_reactions": telegram_reaction_count,
+                "instagram_likes": instagram_like_count,
+                "facebook_likes": facebook_like_count,
             },
         ),
     }
@@ -2046,8 +2540,8 @@ def list_mentions(
     session: DbSession,
     brand_id: uuid.UUID | None = None,
     source_type: str | None = None,
-    limit: int | None = Query(default=None, ge=1, le=10000),
-) -> list[Mention]:
+    limit: int | None = Query(default=100, ge=1, le=10000),
+) -> list[MentionOut]:
     latest_time = func.coalesce(Mention.message_date, Mention.created_at)
     query = session.query(Mention).order_by(latest_time.desc(), Mention.created_at.desc())
     if brand_id:
@@ -2056,7 +2550,21 @@ def list_mentions(
         query = query.filter(Mention.source_type == source_type)
     if limit:
         query = query.limit(limit)
-    return query.all()
+    rows = query.all()
+    if not rows:
+        return []
+    analyses = {
+        a.mention_id: a
+        for a in session.query(Analysis).filter(Analysis.mention_id.in_([row.id for row in rows]))
+    }
+    out: list[MentionOut] = []
+    for mention in rows:
+        item = MentionOut.model_validate(mention)
+        analysis = analyses.get(mention.id)
+        if analysis is not None:
+            item.analysis = InlineAnalysisOut.model_validate(analysis)
+        out.append(item)
+    return out
 
 
 @app.get("/mentions/{mention_id}", response_model=MentionDetailOut)
@@ -2076,12 +2584,15 @@ def dashboard_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> 
         analysis_query = analysis_query.filter(Mention.brand_id == brand_id)
 
     mentions_total = mention_query.count()
-    analyses = analysis_query.all()
-    sentiment_counts = Counter(analysis.sentiment or "unknown" for analysis in analyses)
-    risk_counts = Counter(analysis.risk_level or "unknown" for analysis in analyses)
-    top_topics: Counter[str] = Counter()
-    for analysis in analyses:
-        top_topics.update(analysis.topics or [])
+    analyzed_total = analysis_query.count()
+    sentiment_key = func.coalesce(Analysis.sentiment, "unknown")
+    risk_key = func.coalesce(Analysis.risk_level, "unknown")
+    sentiment_counts = dict(
+        analysis_query.with_entities(sentiment_key, func.count(Analysis.id)).group_by(sentiment_key).all()
+    )
+    risk_counts = dict(
+        analysis_query.with_entities(risk_key, func.count(Analysis.id)).group_by(risk_key).all()
+    )
     latest_mentions = mention_query.order_by(
         func.coalesce(Mention.message_date, Mention.created_at).desc(),
         Mention.created_at.desc(),
@@ -2089,10 +2600,10 @@ def dashboard_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> 
 
     return DashboardSummary(
         mentions_total=mentions_total,
-        analyzed_total=len(analyses),
+        analyzed_total=analyzed_total,
         sentiment_counts=dict(sentiment_counts),
         risk_counts=dict(risk_counts),
-        top_topics=dict(top_topics.most_common(20)),
+        top_topics={},
         latest_mentions=latest_mentions,
     )
 
@@ -2114,3 +2625,836 @@ def dashboard_timeseries(
 @app.get("/alerts/events", response_model=list[AlertEventOut])
 def list_alert_events(session: DbSession, limit: int = Query(default=100, le=500)) -> list[AlertEvent]:
     return session.query(AlertEvent).order_by(AlertEvent.created_at.desc()).limit(limit).all()
+
+
+# ============================ Instagram ============================
+# Real-time comments/@mentions arrive as Meta webhooks (the "webhook alternative"
+# like Bitrix24): Meta POSTs a minimal event, we fetch the full object via the
+# Graph API using the connected account's token, then ingest + AI-analyze it.
+
+INSTAGRAM_SOURCE_CATEGORIES = [
+    {"key": "owned", "label": "Rasmiy akkaunt", "description": "Brendning o'z Instagram Business akkaunti."},
+    {"key": "competitor", "label": "Raqobatchi", "description": "Raqobatchi akkaunt (mention/hashtag orqali)."},
+    {"key": "influencer", "label": "Influencer", "description": "Bloger/ekspert akkauntlari."},
+    {"key": "hashtag", "label": "Hashtag", "description": "Kuzatiladigan hashtag oqimi."},
+    {"key": "unknown", "label": "Aniqlanmagan", "description": "Toifasiz."},
+]
+
+
+def _instagram_api_for(source: InstagramSource) -> InstagramApi:
+    settings = get_settings()
+    token = source.access_token or settings.ig_access_token
+    if not token:
+        raise HTTPException(status_code=400, detail="Instagram source has no access token")
+    return InstagramApi(
+        token,
+        graph_version=settings.ig_graph_version,
+        api_base=source.api_base or "graph.facebook.com",
+    )
+
+
+@app.get("/instagram/status", response_model=InstagramStatus)
+def instagram_status(request: Request, session: DbSession) -> InstagramStatus:
+    settings = get_settings()
+    connected = session.query(InstagramSource).filter(InstagramSource.active.is_(True)).count()
+    # Behind nginx the public API lives under /api (nginx strips it before proxying) and
+    # the raw scheme is http — honor X-Forwarded-Proto so the operator sees the exact
+    # public https URL Meta must call. Direct (dev) hits the backend at the root.
+    fwd_scheme = request.headers.get("x-forwarded-proto")
+    host = request.headers.get("x-forwarded-host") or request.url.netloc
+    if fwd_scheme:
+        callback = f"{fwd_scheme}://{host}/api/instagram/webhook"
+    else:
+        callback = f"{request.url.scheme}://{host}/instagram/webhook"
+    return InstagramStatus(
+        configured=bool(settings.ig_app_id and settings.ig_app_secret),
+        enabled=settings.instagram_enabled,
+        graph_version=settings.ig_graph_version,
+        webhook_callback_url=callback,
+        verify_token_set=bool(settings.ig_verify_token),
+        connected_accounts=connected,
+    )
+
+
+@app.get("/instagram/source-categories")
+def instagram_source_categories(request: Request) -> list[dict[str, str]]:
+    return localize_source_categories(INSTAGRAM_SOURCE_CATEGORIES, request_language(request))
+
+
+@app.get("/instagram/sources", response_model=list[InstagramSourceOut])
+def list_instagram_sources(session: DbSession) -> list[InstagramSource]:
+    return session.query(InstagramSource).order_by(InstagramSource.created_at.asc()).all()
+
+
+@app.post("/instagram/sources", response_model=InstagramSourceOut)
+def connect_instagram_source(payload: InstagramSourceCreate, session: DbSession) -> InstagramSource:
+    settings = get_settings()
+    # Auto-detect the account straight from the pasted token (works for page tokens,
+    # user tokens, and Instagram-login tokens) — this both validates the token and
+    # finds the ig_user_id/username, so the client only has to paste one token.
+    try:
+        detected = detect_account(payload.access_token, graph_version=settings.ig_graph_version)
+    except InstagramApiError as exc:
+        raise HTTPException(status_code=400, detail=f"Token ishlamadi — {exc}")
+    ig_user_id = payload.ig_user_id or detected["ig_user_id"]
+    existing = session.query(InstagramSource).filter(InstagramSource.ig_user_id == ig_user_id).one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Bu Instagram akkaunt allaqachon ulangan")
+    provided_username = (payload.username or "").strip().lstrip("@") or None
+    source = InstagramSource(
+        brand_id=payload.brand_id,
+        ig_user_id=ig_user_id,
+        username=provided_username or detected.get("username"),
+        account_name=payload.account_name or detected.get("username"),
+        page_id=payload.page_id or detected.get("page_id"),
+        # Prefer the detected token (a long-lived Page token when we resolved one).
+        access_token=detected.get("access_token") or payload.access_token,
+        api_base=detected["api_base"],
+        token_status="active",
+        status_detail=f"@{detected.get('username')} ({detected['api_base']})",
+        last_checked_at=datetime.now(timezone.utc),
+        source_category=payload.source_category,
+        monitoring_mode=payload.monitoring_mode,
+        collect_comments=payload.collect_comments,
+        collect_mentions=payload.collect_mentions,
+        hashtags=payload.hashtags,
+        notes=payload.notes,
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+@app.post("/instagram/sources/{source_id}/validate", response_model=InstagramSourceOut)
+def validate_instagram_source(source_id: uuid.UUID, session: DbSession) -> InstagramSource:
+    """Re-check a source's token and refresh its status — used by the dashboard's
+    'tekshirish' button and after a token swap."""
+    source = session.get(InstagramSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Instagram source topilmadi")
+    settings = get_settings()
+    try:
+        detected = detect_account(source.access_token or "", graph_version=settings.ig_graph_version)
+        source.token_status = "active"
+        source.api_base = detected["api_base"]
+        source.username = detected.get("username") or source.username
+        source.status_detail = f"@{detected.get('username')} ({detected['api_base']})"
+    except InstagramApiError as exc:
+        source.token_status = "invalid"
+        source.status_detail = str(exc)[:400]
+    source.last_checked_at = datetime.now(timezone.utc)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+@app.post("/instagram/sources/{source_id}/sync", response_model=InstagramSyncResult)
+def sync_instagram_source_now(
+    source_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    session: DbSession,
+) -> InstagramSyncResult:
+    """Fetch owned media, aggregate engagement, comments and replies immediately."""
+    source = session.get(InstagramSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Instagram source topilmadi")
+    try:
+        settings = get_settings()
+        stats = sync_instagram_source(
+            session,
+            settings,
+            source,
+            media_limit=settings.instagram_manual_sync_media_limit,
+        )
+    except InstagramApiError as exc:
+        source.status_detail = str(exc)[:400]
+        source.last_checked_at = datetime.now(timezone.utc)
+        session.commit()
+        raise HTTPException(status_code=400, detail=f"Instagram sync ishlamadi — {exc}")
+    background_tasks.add_task(_analyze_instagram_mentions_now, stats.created_ids)
+    return InstagramSyncResult(**stats.as_response())
+
+
+@app.patch("/instagram/sources/{source_id}", response_model=InstagramSourceOut)
+def update_instagram_source(source_id: uuid.UUID, payload: InstagramSourceUpdate, session: DbSession) -> InstagramSource:
+    source = session.get(InstagramSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Instagram source topilmadi")
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(source, field, value)
+    # A new token -> re-detect + re-validate so a client can swap accounts by just
+    # pasting a fresh token.
+    if updates.get("access_token"):
+        try:
+            detected = detect_account(source.access_token, graph_version=get_settings().ig_graph_version)
+            source.access_token = detected.get("access_token") or source.access_token
+            source.api_base = detected["api_base"]
+            source.ig_user_id = detected["ig_user_id"]
+            source.username = detected.get("username") or source.username
+            source.token_status = "active"
+            source.status_detail = f"@{detected.get('username')} ({detected['api_base']})"
+        except InstagramApiError as exc:
+            source.token_status = "invalid"
+            source.status_detail = str(exc)[:400]
+        source.last_checked_at = datetime.now(timezone.utc)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+@app.delete("/instagram/sources/{source_id}", response_model=SourceDeleteResult)
+def delete_instagram_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
+    return delete_source_and_notify("instagram", source_id, session)
+
+
+@app.get("/instagram/mentions", response_model=list[InstagramMentionOut])
+def list_instagram_mentions(
+    session: DbSession, brand_id: uuid.UUID | None = None, limit: int = Query(default=100, le=500)
+) -> list[InstagramMentionOut]:
+    query = session.query(InstagramMention)
+    if brand_id:
+        query = query.filter(InstagramMention.brand_id == brand_id)
+    rows = query.order_by(InstagramMention.created_at.desc()).limit(limit).all()
+    if not rows:
+        return []
+    # Attach each mention's AI verdict so the feed can show sentiment/risk/summary
+    # inline (one extra query instead of N).
+    analyses = {
+        a.instagram_mention_id: a
+        for a in session.query(InstagramAnalysis).filter(
+            InstagramAnalysis.instagram_mention_id.in_([r.id for r in rows])
+        )
+    }
+    out: list[InstagramMentionOut] = []
+    for mention in rows:
+        item = InstagramMentionOut.model_validate(mention)
+        analysis = analyses.get(mention.id)
+        if analysis is not None:
+            item.analysis = InstagramAnalysisOut.model_validate(analysis)
+        out.append(item)
+    return out
+
+
+@app.post("/instagram/mentions/manual", response_model=InstagramManualIngestResult)
+def instagram_manual_ingest(
+    payload: InstagramManualIngest, background_tasks: BackgroundTasks, session: DbSession
+) -> InstagramManualIngestResult:
+    """Meta'siz demo/qo'lda ingest: brendga tegishli kommentlarni to'g'ridan-to'g'ri
+    AI quvuriga yuboradi. Token/webhook shart emas — Instagram real-time ulanmagan
+    holatda ham to'liq sentiment/risk/summary tahlilini ko'rsatish uchun."""
+    brand = session.get(Brand, payload.brand_id)
+    if brand is None:
+        raise HTTPException(status_code=404, detail="Brand topilmadi")
+
+    items: list[dict[str, Any]] = []
+    for comment in payload.comments or []:
+        if (comment.text or "").strip():
+            items.append(
+                {"text": comment.text.strip(), "author_username": comment.author_username, "item_type": comment.item_type}
+            )
+    for line in (payload.raw_text or "").splitlines():
+        if line.strip():
+            items.append({"text": line.strip(), "author_username": None, "item_type": "comment"})
+    if not items:
+        raise HTTPException(status_code=400, detail="Kamida bitta komment matni kerak")
+
+    now = datetime.now(timezone.utc)
+    created_ids: list[uuid.UUID] = []
+    for item in items:
+        text = item["text"]
+        item_type = item["item_type"] if item["item_type"] in ("comment", "mention", "caption") else "comment"
+        mention = InstagramMention(
+            source_id=None,
+            brand_id=brand.id,
+            external_id=f"manual:{uuid.uuid4()}",
+            item_type=item_type,
+            author_username=item.get("author_username") or "demo_user",
+            text=text,
+            normalized_text=normalize_text(text),
+            permalink=payload.permalink,
+            # A non-empty match term makes screen_and_analyze skip the cheap relevance
+            # gate and run full Pro sentiment/risk — these were hand-picked for the brand.
+            brand_match_terms=[brand.name] if brand.name else ["manual"],
+            raw={"manual": True, "media_caption": payload.media_caption},
+            published_at=now,
+        )
+        session.add(mention)
+        session.commit()
+        session.refresh(mention)
+        created_ids.append(mention.id)
+        publish_realtime_event(
+            session,
+            "instagram_mention",
+            {
+                "id": str(mention.id),
+                "brand_id": str(brand.id),
+                "platform": "instagram",
+                "item_type": mention.item_type,
+                "author_username": mention.author_username,
+                "created_at": mention.created_at.isoformat() if isinstance(mention.created_at, datetime) else None,
+            },
+        )
+
+    # Analyze immediately in the background so the demo shows AI verdicts within
+    # seconds instead of waiting for the 5-minute ai-worker cycle. Any failure just
+    # leaves the mention pending for the worker to pick up — nothing is lost.
+    background_tasks.add_task(_analyze_instagram_mentions_now, created_ids)
+    return InstagramManualIngestResult(created=len(created_ids), mention_ids=created_ids)
+
+
+def _analyze_instagram_mentions_now(mention_ids: list[uuid.UUID]) -> None:
+    if not mention_ids:
+        return
+    settings = get_settings()
+    log = logging.getLogger("instagram-manual")
+    try:
+        client = create_gemini_client(settings)
+    except Exception:
+        log.warning("Gemini client unavailable; ai-worker will analyze the demo comments on its next cycle")
+        return
+    for mention_id in mention_ids:
+        try:
+            with SessionLocal() as session:
+                mention = session.get(InstagramMention, mention_id)
+                if mention is None:
+                    continue
+                already = (
+                    session.query(InstagramAnalysis)
+                    .filter(InstagramAnalysis.instagram_mention_id == mention_id)
+                    .first()
+                )
+                if already is not None:
+                    continue  # ai-worker raced us — leave it
+                analysis = analyze_instagram_mention(session, settings, client, mention)
+                if not analysis.error:
+                    brand = session.get(Brand, mention.brand_id) if mention.brand_id else None
+                    record_alert(
+                        session,
+                        settings,
+                        platform="instagram",
+                        brand_id=mention.brand_id,
+                        mention_id=mention.id,
+                        brand_name=brand.name if brand else None,
+                        source=mention.author_username,
+                        author=mention.author_username,
+                        text=mention.text,
+                        permalink=mention.permalink,
+                        analysis=analysis,
+                    )
+        except ProviderRetryableError as exc:
+            log.warning(
+                "Gemini temporarily unavailable; stopping immediate Instagram analysis and leaving the backlog for ai-worker: %s",
+                exc,
+            )
+            break
+        except Exception:
+            log.exception("manual analyze failed mention=%s", mention_id)
+
+
+@app.get("/instagram/summary", response_model=InstagramSummary)
+def instagram_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> InstagramSummary:
+    source_q = session.query(InstagramSource)
+    mention_q = session.query(InstagramMention)
+    if brand_id:
+        source_q = source_q.filter(InstagramSource.brand_id == brand_id)
+        mention_q = mention_q.filter(InstagramMention.brand_id == brand_id)
+    mentions_total = mention_q.count()
+    posts_total = mention_q.filter(InstagramMention.item_type.in_(["post", "caption"])).count()
+    comments_total = mention_q.filter(InstagramMention.item_type == "comment").count()
+    direct_total = mention_q.filter(InstagramMention.item_type == "mention").count()
+    likes_total = mention_q.with_entities(func.coalesce(func.sum(InstagramMention.like_count), 0)).scalar() or 0
+    post_comments_total = (
+        mention_q.filter(InstagramMention.item_type.in_(["post", "caption"]))
+        .with_entities(func.coalesce(func.sum(InstagramMention.comment_count), 0))
+        .scalar()
+        or 0
+    )
+    analyzed_total = (
+        session.query(InstagramAnalysis)
+        .join(InstagramMention, InstagramMention.id == InstagramAnalysis.instagram_mention_id)
+        .filter(InstagramAnalysis.error.is_(None))
+    )
+    high_risk = analyzed_total.filter(InstagramAnalysis.risk_level.in_(["high", "critical"]))
+    if brand_id:
+        analyzed_total = analyzed_total.filter(InstagramMention.brand_id == brand_id)
+        high_risk = high_risk.filter(InstagramMention.brand_id == brand_id)
+    latest = mention_q.order_by(InstagramMention.created_at.desc()).limit(20).all()
+    return InstagramSummary(
+        sources_total=source_q.count(),
+        mentions_total=mentions_total,
+        posts_total=posts_total,
+        comments_total=comments_total,
+        mentions_direct_total=direct_total,
+        likes_total=int(likes_total),
+        post_comments_total=int(post_comments_total),
+        analyzed_total=analyzed_total.count(),
+        high_risk=high_risk.count(),
+        latest_mentions=latest,
+    )
+
+
+@app.get("/instagram/webhook")
+def instagram_webhook_verify(request: Request) -> PlainTextResponse:
+    """Meta calls this once to verify the callback URL (hub.challenge echo)."""
+    settings = get_settings()
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+    if mode == "subscribe" and token and token == settings.ig_verify_token:
+        return PlainTextResponse(challenge or "")
+    raise HTTPException(status_code=403, detail="Verify token mismatch")
+
+
+@app.post("/instagram/webhook")
+async def instagram_webhook_receive(request: Request) -> dict[str, object]:
+    """Receive Meta webhook events for the connected Instagram accounts."""
+    settings = get_settings()
+    raw = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    # Signature is enforced only when an app secret is configured (dev-friendly).
+    if settings.ig_app_secret and not verify_signature(settings.ig_app_secret, raw, signature):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    try:
+        body = json.loads(raw.decode() or "{}")
+    except json.JSONDecodeError:
+        return {"ok": True, "processed": 0}
+    processed = _process_instagram_webhook(body)
+    return {"ok": True, "processed": processed}
+
+
+def _process_instagram_webhook(body: dict[str, object]) -> int:
+    if body.get("object") != "instagram":
+        return 0
+    processed = 0
+    for entry in body.get("entry", []) or []:
+        ig_user_id = str(entry.get("id") or "")
+        with SessionLocal() as session:
+            source = (
+                session.query(InstagramSource)
+                .filter(InstagramSource.ig_user_id == ig_user_id, InstagramSource.active.is_(True))
+                .one_or_none()
+            )
+            if source is None:
+                continue
+            if not source.webhook_subscribed:
+                source.webhook_subscribed = True
+                session.commit()
+            for change in entry.get("changes", []) or []:
+                field = change.get("field")
+                value = change.get("value") or {}
+                item_type = "mention" if field == "mentions" else "comment"
+                comment = _resolve_instagram_object(source, field, value)
+                if not comment:
+                    continue
+                try:
+                    if ingest_instagram_comment(session, source, comment, item_type=item_type) is not None:
+                        processed += 1
+                except Exception:
+                    logging.getLogger("instagram-webhook").exception("ingest failed id=%s", comment.get("id"))
+    return processed
+
+
+def _resolve_instagram_object(source: InstagramSource, field: str | None, value: dict) -> dict | None:
+    """Webhook values are minimal; fetch the full comment via Graph API when needed."""
+    if value.get("text"):
+        return value  # comment payloads often already carry the text
+    comment_id = value.get("id") or value.get("comment_id")
+    if not comment_id:
+        return None
+    try:
+        api = _instagram_api_for(source)
+        if field == "mentions":
+            data = api.get_mentioned_comment(source.ig_user_id, str(comment_id))
+            mc = data.get("mentioned_comment") or {}
+            if value.get("media_id") and "media" not in mc:
+                mc["media_id"] = value.get("media_id")
+            return mc or None
+        return api.get_comment(str(comment_id))
+    except (InstagramApiError, HTTPException):
+        # Fall back to the minimal payload so the mention is still recorded.
+        return {"id": comment_id, "text": value.get("text"), "media_id": value.get("media_id")}
+
+
+# ============================ Facebook Pages ============================
+# Same Meta Graph API + webhook model as Instagram, keyed on the Facebook Page id.
+# Comments on the Page's posts arrive as ``feed`` webhook events; the Graph API fetches
+# the full object and backfills recent post comments.
+
+FACEBOOK_SOURCE_CATEGORIES = [
+    {"key": "owned", "label": "Rasmiy sahifa", "description": "Brendning o'z Facebook Page'i."},
+    {"key": "competitor", "label": "Raqobatchi", "description": "Raqobatchi sahifa."},
+    {"key": "influencer", "label": "Influencer", "description": "Bloger/ekspert sahifalari."},
+    {"key": "unknown", "label": "Aniqlanmagan", "description": "Toifasiz."},
+]
+
+
+def _facebook_api_for(source: FacebookSource) -> FacebookApi:
+    settings = get_settings()
+    token = source.access_token or settings.fb_access_token
+    if not token:
+        raise HTTPException(status_code=400, detail="Facebook source has no access token")
+    return FacebookApi(
+        token,
+        graph_version=settings.fb_graph_version,
+        api_base=source.api_base or "graph.facebook.com",
+    )
+
+
+@app.get("/facebook/status", response_model=FacebookStatus)
+def facebook_status(request: Request, session: DbSession) -> FacebookStatus:
+    settings = get_settings()
+    connected = session.query(FacebookSource).filter(FacebookSource.active.is_(True)).count()
+    fwd_scheme = request.headers.get("x-forwarded-proto")
+    host = request.headers.get("x-forwarded-host") or request.url.netloc
+    if fwd_scheme:
+        callback = f"{fwd_scheme}://{host}/api/facebook/webhook"
+    else:
+        callback = f"{request.url.scheme}://{host}/facebook/webhook"
+    return FacebookStatus(
+        configured=bool(settings.fb_app_id and settings.fb_app_secret),
+        enabled=settings.facebook_enabled,
+        graph_version=settings.fb_graph_version,
+        webhook_callback_url=callback,
+        verify_token_set=bool(settings.fb_verify_token),
+        connected_pages=connected,
+    )
+
+
+@app.get("/facebook/source-categories")
+def facebook_source_categories(request: Request) -> list[dict[str, str]]:
+    return localize_source_categories(FACEBOOK_SOURCE_CATEGORIES, request_language(request))
+
+
+@app.get("/facebook/sources", response_model=list[FacebookSourceOut])
+def list_facebook_sources(session: DbSession) -> list[FacebookSource]:
+    return session.query(FacebookSource).order_by(FacebookSource.created_at.asc()).all()
+
+
+@app.post("/facebook/sources", response_model=FacebookSourceOut)
+def connect_facebook_source(payload: FacebookSourceCreate, session: DbSession) -> FacebookSource:
+    settings = get_settings()
+    try:
+        detected = detect_page(payload.access_token, graph_version=settings.fb_graph_version)
+    except FacebookApiError as exc:
+        raise HTTPException(status_code=400, detail=f"Token ishlamadi — {exc}")
+    page_id = payload.page_id or detected["page_id"]
+    existing = session.query(FacebookSource).filter(FacebookSource.page_id == page_id).one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Bu Facebook Page allaqachon ulangan")
+    source = FacebookSource(
+        brand_id=payload.brand_id,
+        page_id=page_id,
+        page_name=payload.page_name or detected.get("page_name"),
+        username=payload.username or detected.get("username"),
+        access_token=detected.get("access_token") or payload.access_token,
+        api_base=detected["api_base"],
+        token_status="active",
+        status_detail=f"{detected.get('page_name')} ({detected['api_base']})",
+        last_checked_at=datetime.now(timezone.utc),
+        source_category=payload.source_category,
+        monitoring_mode=payload.monitoring_mode,
+        collect_comments=payload.collect_comments,
+        collect_mentions=payload.collect_mentions,
+        hashtags=payload.hashtags,
+        notes=payload.notes,
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+@app.post("/facebook/sources/{source_id}/validate", response_model=FacebookSourceOut)
+def validate_facebook_source(source_id: uuid.UUID, session: DbSession) -> FacebookSource:
+    source = session.get(FacebookSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Facebook source topilmadi")
+    settings = get_settings()
+    try:
+        detected = detect_page(source.access_token or "", graph_version=settings.fb_graph_version)
+        source.token_status = "active"
+        source.api_base = detected["api_base"]
+        source.page_name = detected.get("page_name") or source.page_name
+        source.status_detail = f"{detected.get('page_name')} ({detected['api_base']})"
+    except FacebookApiError as exc:
+        source.token_status = "invalid"
+        source.status_detail = str(exc)[:400]
+    source.last_checked_at = datetime.now(timezone.utc)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+@app.patch("/facebook/sources/{source_id}", response_model=FacebookSourceOut)
+def update_facebook_source(source_id: uuid.UUID, payload: FacebookSourceUpdate, session: DbSession) -> FacebookSource:
+    source = session.get(FacebookSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Facebook source topilmadi")
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(source, field, value)
+    if updates.get("access_token"):
+        try:
+            detected = detect_page(source.access_token, graph_version=get_settings().fb_graph_version)
+            source.access_token = detected.get("access_token") or source.access_token
+            source.api_base = detected["api_base"]
+            source.page_id = detected["page_id"]
+            source.page_name = detected.get("page_name") or source.page_name
+            source.token_status = "active"
+            source.status_detail = f"{detected.get('page_name')} ({detected['api_base']})"
+        except FacebookApiError as exc:
+            source.token_status = "invalid"
+            source.status_detail = str(exc)[:400]
+        source.last_checked_at = datetime.now(timezone.utc)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+@app.delete("/facebook/sources/{source_id}", response_model=SourceDeleteResult)
+def delete_facebook_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
+    return delete_source_and_notify("facebook", source_id, session)
+
+
+@app.get("/facebook/mentions", response_model=list[FacebookMentionOut])
+def list_facebook_mentions(
+    session: DbSession, brand_id: uuid.UUID | None = None, limit: int = Query(default=100, le=500)
+) -> list[FacebookMentionOut]:
+    query = session.query(FacebookMention)
+    if brand_id:
+        query = query.filter(FacebookMention.brand_id == brand_id)
+    rows = query.order_by(FacebookMention.created_at.desc()).limit(limit).all()
+    if not rows:
+        return []
+    analyses = {
+        a.facebook_mention_id: a
+        for a in session.query(FacebookAnalysis).filter(
+            FacebookAnalysis.facebook_mention_id.in_([r.id for r in rows])
+        )
+    }
+    out: list[FacebookMentionOut] = []
+    for mention in rows:
+        item = FacebookMentionOut.model_validate(mention)
+        analysis = analyses.get(mention.id)
+        if analysis is not None:
+            item.analysis = FacebookAnalysisOut.model_validate(analysis)
+        out.append(item)
+    return out
+
+
+@app.get("/facebook/summary", response_model=FacebookSummary)
+def facebook_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> FacebookSummary:
+    source_q = session.query(FacebookSource)
+    mention_q = session.query(FacebookMention)
+    if brand_id:
+        source_q = source_q.filter(FacebookSource.brand_id == brand_id)
+        mention_q = mention_q.filter(FacebookMention.brand_id == brand_id)
+    mentions_total = mention_q.count()
+    comments_total = mention_q.filter(FacebookMention.item_type.in_(["comment", "reply"])).count()
+    analyzed_total = (
+        session.query(FacebookAnalysis)
+        .join(FacebookMention, FacebookMention.id == FacebookAnalysis.facebook_mention_id)
+        .filter(FacebookAnalysis.error.is_(None))
+    )
+    high_risk = analyzed_total.filter(FacebookAnalysis.risk_level.in_(["high", "critical"]))
+    if brand_id:
+        analyzed_total = analyzed_total.filter(FacebookMention.brand_id == brand_id)
+        high_risk = high_risk.filter(FacebookMention.brand_id == brand_id)
+    latest = mention_q.order_by(FacebookMention.created_at.desc()).limit(20).all()
+    return FacebookSummary(
+        sources_total=source_q.count(),
+        mentions_total=mentions_total,
+        comments_total=comments_total,
+        analyzed_total=analyzed_total.count(),
+        high_risk=high_risk.count(),
+        latest_mentions=latest,
+    )
+
+
+@app.post("/facebook/mentions/manual", response_model=FacebookManualIngestResult)
+def facebook_manual_ingest(
+    payload: FacebookManualIngest, background_tasks: BackgroundTasks, session: DbSession
+) -> FacebookManualIngestResult:
+    """Meta'siz demo/qo'lda ingest for Facebook — same idea as the Instagram one."""
+    brand = session.get(Brand, payload.brand_id)
+    if brand is None:
+        raise HTTPException(status_code=404, detail="Brand topilmadi")
+
+    items: list[dict[str, Any]] = []
+    for comment in payload.comments or []:
+        if (comment.text or "").strip():
+            items.append(
+                {"text": comment.text.strip(), "author_name": comment.author_name, "item_type": comment.item_type}
+            )
+    for line in (payload.raw_text or "").splitlines():
+        if line.strip():
+            items.append({"text": line.strip(), "author_name": None, "item_type": "comment"})
+    if not items:
+        raise HTTPException(status_code=400, detail="Kamida bitta komment matni kerak")
+
+    now = datetime.now(timezone.utc)
+    created_ids: list[uuid.UUID] = []
+    for item in items:
+        text = item["text"]
+        item_type = item["item_type"] if item["item_type"] in ("comment", "reply", "post", "mention") else "comment"
+        mention = FacebookMention(
+            source_id=None,
+            brand_id=brand.id,
+            external_id=f"manual:{uuid.uuid4()}",
+            item_type=item_type,
+            author_name=item.get("author_name") or "demo_user",
+            text=text,
+            normalized_text=normalize_text(text),
+            permalink=payload.permalink,
+            brand_match_terms=[brand.name] if brand.name else ["manual"],
+            raw={"manual": True},
+            published_at=now,
+        )
+        session.add(mention)
+        session.commit()
+        session.refresh(mention)
+        created_ids.append(mention.id)
+        publish_realtime_event(
+            session,
+            "facebook_mention",
+            {
+                "id": str(mention.id),
+                "brand_id": str(brand.id),
+                "platform": "facebook",
+                "item_type": mention.item_type,
+                "author_name": mention.author_name,
+                "created_at": mention.created_at.isoformat() if isinstance(mention.created_at, datetime) else None,
+            },
+        )
+    background_tasks.add_task(_analyze_facebook_mentions_now, created_ids)
+    return FacebookManualIngestResult(created=len(created_ids), mention_ids=created_ids)
+
+
+def _analyze_facebook_mentions_now(mention_ids: list[uuid.UUID]) -> None:
+    if not mention_ids:
+        return
+    settings = get_settings()
+    log = logging.getLogger("facebook-manual")
+    try:
+        client = create_gemini_client(settings)
+    except Exception:
+        log.warning("Gemini client unavailable; ai-worker will analyze the demo comments on its next cycle")
+        return
+    for mention_id in mention_ids:
+        try:
+            with SessionLocal() as session:
+                mention = session.get(FacebookMention, mention_id)
+                if mention is None:
+                    continue
+                already = (
+                    session.query(FacebookAnalysis)
+                    .filter(FacebookAnalysis.facebook_mention_id == mention_id)
+                    .first()
+                )
+                if already is not None:
+                    continue
+                analysis = analyze_facebook_mention(session, settings, client, mention)
+                if not analysis.error:
+                    brand = session.get(Brand, mention.brand_id) if mention.brand_id else None
+                    record_alert(
+                        session,
+                        settings,
+                        platform="facebook",
+                        brand_id=mention.brand_id,
+                        mention_id=mention.id,
+                        brand_name=brand.name if brand else None,
+                        source=mention.post_id,
+                        author=mention.author_name,
+                        text=mention.text,
+                        permalink=mention.permalink,
+                        analysis=analysis,
+                    )
+        except Exception:
+            log.exception("manual analyze failed mention=%s", mention_id)
+
+
+@app.get("/facebook/webhook")
+def facebook_webhook_verify(request: Request) -> PlainTextResponse:
+    """Meta calls this once to verify the callback URL (hub.challenge echo)."""
+    settings = get_settings()
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+    if mode == "subscribe" and token and token == settings.fb_verify_token:
+        return PlainTextResponse(challenge or "")
+    raise HTTPException(status_code=403, detail="Verify token mismatch")
+
+
+@app.post("/facebook/webhook")
+async def facebook_webhook_receive(request: Request) -> dict[str, object]:
+    settings = get_settings()
+    raw = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    if settings.fb_app_secret and not fb_verify_signature(settings.fb_app_secret, raw, signature):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    try:
+        body = json.loads(raw.decode() or "{}")
+    except json.JSONDecodeError:
+        return {"ok": True, "processed": 0}
+    processed = _process_facebook_webhook(body)
+    return {"ok": True, "processed": processed}
+
+
+def _process_facebook_webhook(body: dict[str, object]) -> int:
+    if body.get("object") != "page":
+        return 0
+    processed = 0
+    for entry in body.get("entry", []) or []:
+        page_id = str(entry.get("id") or "")
+        with SessionLocal() as session:
+            source = (
+                session.query(FacebookSource)
+                .filter(FacebookSource.page_id == page_id, FacebookSource.active.is_(True))
+                .one_or_none()
+            )
+            if source is None:
+                continue
+            for change in entry.get("changes", []) or []:
+                if change.get("field") != "feed":
+                    continue
+                value = change.get("value") or {}
+                if value.get("item") != "comment" or value.get("verb") not in ("add", "edited", "edit"):
+                    continue
+                comment = _resolve_facebook_object(source, value)
+                if not comment:
+                    continue
+                try:
+                    if ingest_facebook_comment(session, source, comment, item_type="comment") is not None:
+                        processed += 1
+                except Exception:
+                    logging.getLogger("facebook-webhook").exception("ingest failed id=%s", comment.get("id"))
+    return processed
+
+
+def _resolve_facebook_object(source: FacebookSource, value: dict) -> dict | None:
+    """Feed webhook values usually carry the message already; fetch the full comment
+    via the Graph API when they don't."""
+    comment_id = value.get("comment_id") or value.get("id")
+    if not comment_id:
+        return None
+    if value.get("message"):
+        created = value.get("created_time")
+        if isinstance(created, (int, float)):
+            created = datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
+        return {
+            "id": comment_id,
+            "message": value.get("message"),
+            "from": value.get("from") or {},
+            "post_id": value.get("post_id"),
+            "parent_id": value.get("parent_id"),
+            "created_time": created,
+        }
+    try:
+        api = _facebook_api_for(source)
+        return api.get_comment(str(comment_id))
+    except (FacebookApiError, HTTPException):
+        return {"id": comment_id, "message": value.get("message"), "post_id": value.get("post_id")}

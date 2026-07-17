@@ -1,14 +1,11 @@
-import { RefreshCw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 export function PageHeader({
-  brands,
-  selectedBrandId,
-  onBrandChange,
-  onRefresh,
   eyebrow = "Brand source catalog",
   title = "Telegram monitoring",
   loading = false,
 }) {
+  const { t } = useTranslation();
   return (
     <header className={loading ? "pageHeader isLoading" : "pageHeader"} aria-busy={loading}>
       <div>
@@ -19,31 +16,8 @@ export function PageHeader({
           </>
         ) : (
           <>
-            <p className="eyebrow">{eyebrow}</p>
-            <h1>{title}</h1>
-          </>
-        )}
-      </div>
-      <div className="headerActions">
-        {loading ? (
-          <>
-            <span className="skeletonControl" />
-            <span className="skeletonButton" />
-          </>
-        ) : (
-          <>
-            <select className="input select" value={selectedBrandId} onChange={(event) => onBrandChange(event.target.value)}>
-              <option value="">Barcha brandlar</option>
-              {brands.map((brand) => (
-                <option key={brand.id} value={brand.id}>
-                  {brand.name}
-                </option>
-              ))}
-            </select>
-            <button className="button secondary" type="button" onClick={onRefresh}>
-              <RefreshCw size={17} />
-              <span>Yangilash</span>
-            </button>
+            <p className="eyebrow">{t(eyebrow, { defaultValue: eyebrow })}</p>
+            <h1>{t(title, { defaultValue: title })}</h1>
           </>
         )}
       </div>

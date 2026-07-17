@@ -22,13 +22,22 @@ class Brand(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
     industry: Mapped[str | None] = mapped_column(String(255))
+    primary_category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    category_path: Mapped[list[str]] = mapped_column(JSONB, default=list)
     website: Mapped[str | None] = mapped_column(String(500))
     language: Mapped[str] = mapped_column(String(16), default="uz")
     aliases: Mapped[list[str]] = mapped_column(JSONB, default=list)
     keywords: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    products: Mapped[list[str]] = mapped_column(JSONB, default=list)
     competitors: Mapped[list[str]] = mapped_column(JSONB, default=list)
     ignore_terms: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    audience: Mapped[str | None] = mapped_column(Text, nullable=True)
+    region: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    monitoring_goals: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    risk_keywords: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    positive_keywords: Mapped[list[str]] = mapped_column(JSONB, default=list)
     monitor_notes: Mapped[str | None] = mapped_column(Text)
+    profile_config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -235,3 +244,180 @@ class AlertEvent(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InstagramSource(Base):
+    """A connected Instagram Business/Creator account the brand monitors.
+
+    Unlike YouTube (any public channel), Instagram monitoring is centred on an
+    account you own/manage: its comments and @mentions arrive via Meta webhooks,
+    and the Graph API is called with this account's ``access_token``.
+    """
+
+    __tablename__ = "instagram_sources"
+    __table_args__ = (
+        UniqueConstraint("ig_user_id", name="uq_instagram_sources_ig_user_id"),
+        Index("ix_instagram_sources_brand", "brand_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    brand_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("brands.id"), nullable=True)
+    ig_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    account_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    page_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_category: Mapped[str] = mapped_column(String(64), default="owned")
+    monitoring_mode: Mapped[str] = mapped_column(String(64), default="all_messages")
+    collect_comments: Mapped[bool] = mapped_column(Boolean, default=True)
+    collect_mentions: Mapped[bool] = mapped_column(Boolean, default=True)
+    hashtags: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # token_status: unknown | active | invalid — driven by validation + worker auth errors.
+    token_status: Mapped[str] = mapped_column(String(32), default="unknown")
+    status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_base: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class InstagramMention(Base):
+    __tablename__ = "instagram_mentions"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_instagram_mentions_external_id"),
+        Index("ix_instagram_mentions_brand_created", "brand_id", "created_at"),
+        Index("ix_instagram_mentions_source_created", "source_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("instagram_sources.id"), nullable=True)
+    brand_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("brands.id"), nullable=True)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_type: Mapped[str] = mapped_column(String(32), nullable=False)  # post | comment | mention | caption
+    media_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    author_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    author_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    normalized_text: Mapped[str] = mapped_column(Text, default="")
+    permalink: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    media_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    like_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reply_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    brand_match_terms: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InstagramAnalysis(Base):
+    __tablename__ = "instagram_analyses"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    instagram_mention_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("instagram_mentions.id"), unique=True)
+    model_provider: Mapped[str] = mapped_column(String(64), default="vertex-gemini")
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    language: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sentiment: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sentiment_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    topics: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    risk_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spam_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text)
+    suggested_action: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class FacebookSource(Base):
+    """A connected Facebook Page the brand monitors.
+
+    Mirrors InstagramSource but keyed on the Facebook Page id. Comments on the
+    Page's posts (and visitor posts) arrive via Meta webhooks (``feed`` field) and
+    are backfilled by the poller through the Graph API with this Page's token.
+    """
+
+    __tablename__ = "facebook_sources"
+    __table_args__ = (
+        UniqueConstraint("page_id", name="uq_facebook_sources_page_id"),
+        Index("ix_facebook_sources_brand", "brand_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    brand_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("brands.id"), nullable=True)
+    page_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    page_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_category: Mapped[str] = mapped_column(String(64), default="owned")
+    monitoring_mode: Mapped[str] = mapped_column(String(64), default="all_messages")
+    collect_comments: Mapped[bool] = mapped_column(Boolean, default=True)
+    collect_mentions: Mapped[bool] = mapped_column(Boolean, default=True)
+    hashtags: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    token_status: Mapped[str] = mapped_column(String(32), default="unknown")
+    status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_base: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class FacebookMention(Base):
+    __tablename__ = "facebook_mentions"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_facebook_mentions_external_id"),
+        Index("ix_facebook_mentions_brand_created", "brand_id", "created_at"),
+        Index("ix_facebook_mentions_source_created", "source_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("facebook_sources.id"), nullable=True)
+    brand_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("brands.id"), nullable=True)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_type: Mapped[str] = mapped_column(String(32), nullable=False)  # comment | reply | post | mention
+    post_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    author_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    author_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    normalized_text: Mapped[str] = mapped_column(Text, default="")
+    permalink: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    like_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reply_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    brand_match_terms: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class FacebookAnalysis(Base):
+    __tablename__ = "facebook_analyses"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    facebook_mention_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("facebook_mentions.id"), unique=True)
+    model_provider: Mapped[str] = mapped_column(String(64), default="vertex-gemini")
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    language: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sentiment: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sentiment_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    topics: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    risk_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spam_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text)
+    suggested_action: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

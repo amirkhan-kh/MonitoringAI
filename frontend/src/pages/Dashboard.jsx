@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   BarChart3,
   Brain,
   ExternalLink,
   Eye,
+  Facebook,
   Heart,
+  Instagram,
   MessageSquareText,
   PlusCircle,
   RefreshCw,
@@ -14,7 +16,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
-import { endpoints } from "../api/client";
+import { endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
 import { StatsBar } from "../components/StatsBar";
@@ -38,6 +40,8 @@ const chartSeries = [
   { key: "total", label: "Jami", tone: "total" },
   { key: "telegram", label: "Telegram", tone: "telegram" },
   { key: "youtube", label: "YouTube", tone: "youtube" },
+  { key: "instagram", label: "Instagram", tone: "instagram" },
+  { key: "facebook", label: "Facebook", tone: "facebook" },
 ];
 
 const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Tashkent";
@@ -80,10 +84,16 @@ function changeLabel(value) {
 }
 
 function platformCoverageDetail(ai) {
+  const platformLabels = {
+    telegram: "Telegram",
+    youtube: "YouTube",
+    instagram: "Instagram",
+    facebook: "Facebook",
+  };
   const platforms = ai?.platforms || {};
   const rows = Object.entries(platforms)
     .filter(([, metric]) => (metric?.mentions || 0) > 0)
-    .map(([platform, metric]) => `${platform === "youtube" ? "YouTube" : platform === "telegram" ? "Telegram" : platform}: ${percent(metric.coverage || 0)}`);
+    .map(([platform, metric]) => `${platformLabels[platform] || platform}: ${percent(metric.coverage || 0)}`);
   return rows.length ? rows.join(" · ") : "AI tahlil uchun mention yo'q";
 }
 
@@ -199,6 +209,8 @@ function DashboardLineChart({ rows, period }) {
         <span className="total">Jami <strong>{compactNumber(totals.total)}</strong></span>
         <span className="telegram">Telegram <strong>{compactNumber(totals.telegram)}</strong></span>
         <span className="youtube">YouTube <strong>{compactNumber(totals.youtube)}</strong></span>
+        <span className="instagram">Instagram <strong>{compactNumber(totals.instagram)}</strong></span>
+        <span className="facebook">Facebook <strong>{compactNumber(totals.facebook)}</strong></span>
         <span>Pik davr <strong>{peak.label || "-"}</strong> · {compactNumber(peak.total)}</span>
       </div>
     </div>
@@ -314,13 +326,22 @@ function OfficialSourceSetup({ sources, filter }) {
       status: "Faol",
     },
     {
-      label: "Instagram/Facebook",
-      tone: "planned",
-      icon: Sparkles,
-      official: 0,
-      total: 0,
-      description: "Keyingi registry",
-      status: "Rejada",
+      label: "Instagram",
+      tone: "instagram",
+      icon: Instagram,
+      official: sources.official_instagram || 0,
+      total: sources.instagram || 0,
+      description: "Business akkaunt",
+      status: sources.instagram ? "Ulangan" : "Kutilmoqda",
+    },
+    {
+      label: "Facebook",
+      tone: "facebook",
+      icon: Facebook,
+      official: sources.official_facebook || 0,
+      total: sources.facebook || 0,
+      description: "Facebook Page",
+      status: sources.facebook ? "Ulangan" : "Kutilmoqda",
     },
   ];
 
@@ -356,34 +377,79 @@ function OfficialSourceSetup({ sources, filter }) {
   );
 }
 
+const platformCardConfig = {
+  telegram: {
+    key: "telegram",
+    label: "Telegram",
+    tone: "telegram",
+    Icon: TelegramIcon,
+    href: "/telegram-monitoring",
+    description: "Kanal, group va discussion commentlari oqimi.",
+    metrics: (mentions, engagement, sources) => [
+      { label: "Post", value: mentions.telegram_posts || 0 },
+      { label: "Comment/chat", value: mentions.telegram_comments || 0 },
+      { label: "Reaction", value: engagement.telegram_reactions || 0 },
+      { label: "Official source", value: sources.official_telegram || 0 },
+    ],
+  },
+  youtube: {
+    key: "youtube",
+    label: "YouTube",
+    tone: "youtube",
+    Icon: YouTubeIcon,
+    href: "/youtube-monitoring",
+    description: "Video, comment va hashtag/kodli source oqimi.",
+    metrics: (mentions, engagement, sources) => [
+      { label: "Video", value: mentions.youtube_videos || 0 },
+      { label: "Comment", value: mentions.youtube_comments || 0 },
+      { label: "Like", value: engagement.youtube_likes || 0 },
+      { label: "Official source", value: sources.official_youtube || 0 },
+    ],
+  },
+  instagram: {
+    key: "instagram",
+    label: "Instagram",
+    tone: "instagram",
+    Icon: Instagram,
+    href: "/instagram-monitoring",
+    description: "Business akkaunt comment va @mention oqimi.",
+    metrics: (mentions, engagement, sources) => [
+      { label: "Comment", value: mentions.instagram_comments || 0 },
+      { label: "@Mention", value: mentions.instagram_direct_mentions || 0 },
+      { label: "Like", value: engagement.instagram_likes || 0 },
+      { label: "Official source", value: sources.official_instagram || 0 },
+    ],
+  },
+  facebook: {
+    key: "facebook",
+    label: "Facebook",
+    tone: "facebook",
+    Icon: Facebook,
+    href: "/facebook-monitoring",
+    description: "Page comment, reply va post mention oqimi.",
+    metrics: (mentions, engagement, sources) => [
+      { label: "Comment", value: mentions.facebook_comments || 0 },
+      { label: "Reply", value: mentions.facebook_replies || 0 },
+      { label: "Like", value: engagement.facebook_likes || 0 },
+      { label: "Official source", value: sources.official_facebook || 0 },
+    ],
+  },
+};
+
 function PlatformChartCard({ platform, rows, period, mentions, engagement, sources }) {
-  const isTelegram = platform === "telegram";
-  const series = isTelegram
-    ? { key: "telegram", label: "Telegram", tone: "telegram" }
-    : { key: "youtube", label: "YouTube", tone: "youtube" };
-  const Icon = isTelegram ? TelegramIcon : YouTubeIcon;
-  const metrics = isTelegram
-    ? [
-        { label: "Post", value: mentions.telegram_posts || 0 },
-        { label: "Comment/chat", value: mentions.telegram_comments || 0 },
-        { label: "Reaction", value: engagement.telegram_reactions || 0 },
-        { label: "Official source", value: sources.official_telegram || 0 },
-      ]
-    : [
-        { label: "Video", value: mentions.youtube_videos || 0 },
-        { label: "Comment", value: mentions.youtube_comments || 0 },
-        { label: "Like", value: engagement.youtube_likes || 0 },
-        { label: "Official source", value: sources.official_youtube || 0 },
-      ];
+  const config = platformCardConfig[platform] || platformCardConfig.telegram;
+  const Icon = config.Icon;
+  const series = { key: config.key, label: config.label, tone: config.tone };
+  const metrics = config.metrics(mentions, engagement, sources);
 
   return (
     <article className={`dashboardPanel panel platformPanel ${series.tone}`}>
       <div className="sectionHeader compact">
         <div>
           <h2><Icon size={18} /> {series.label} holati</h2>
-          <p>{series.label} bo'yicha alohida oqim, faollik va rasmiy manbalar.</p>
+          <p>{config.description}</p>
         </div>
-        <a className="miniButton linkButton" href={isTelegram ? "/telegram-monitoring" : "/youtube-monitoring"}>
+        <a className="miniButton linkButton" href={config.href}>
           <PlusCircle size={15} />
           <span>Manba</span>
         </a>
@@ -398,6 +464,61 @@ function PlatformChartCard({ platform, rows, period, mentions, engagement, sourc
         ))}
       </div>
     </article>
+  );
+}
+
+function DashboardOperations({ mentions, sources, ai, forecast }) {
+  const platformCount = ["telegram", "youtube", "instagram", "facebook"].filter((platform) => (mentions[platform] || sources[platform] || 0) > 0).length;
+  const pendingAi = Math.max(0, (mentions.total || 0) - (ai.processed_mentions || 0));
+  const metaReady = (sources.instagram || 0) + (sources.facebook || 0);
+  const tokenIssue = sources.invalid_meta_tokens || 0;
+
+  const rows = [
+    {
+      title: "Coverage nazorati",
+      value: `${platformCount}/4`,
+      text: "Brand signali nechta platformadan kelayotganini ko'rsatadi.",
+      Icon: Activity,
+      tone: "total",
+    },
+    {
+      title: "AI navbati",
+      value: compactNumber(pendingAi),
+      text: pendingAi ? "Tahlil qilinmagan mentionlar bor, worker navbati tekshiriladi." : "Yangi mentionlar AI tahlildan o'tgan.",
+      Icon: Brain,
+      tone: "ai",
+    },
+    {
+      title: "Meta tayyorgarlik",
+      value: tokenIssue ? `${tokenIssue} token` : compactNumber(metaReady),
+      text: tokenIssue
+        ? "Instagram/Facebook tokenlaridan biri yaroqsiz. Avval token yangilanadi."
+        : "Meta source mavjud bo'lsa poller/webhook orqali oqim kuzatiladi.",
+      Icon: ShieldAlert,
+      tone: tokenIssue ? "risk" : "source",
+    },
+    {
+      title: "Action prognoz",
+      value: compactNumber(forecast.next_7d_mentions || 0),
+      text: "Keyingi 7 kunda kelishi mumkin bo'lgan mention hajmi.",
+      Icon: TrendingUp,
+      tone: "source",
+    },
+  ];
+
+  return (
+    <section className="dashboardOpsGrid">
+      {rows.map((item) => (
+        <article className={`opsPanel ${item.tone}`} key={item.title}>
+          <span className="opsIcon"><item.Icon size={18} /></span>
+          <div>
+            <strong>{item.title}</strong>
+            <b>{item.value}</b>
+            <p>{item.text}</p>
+          </div>
+        </article>
+      ))}
+    </section>
   );
 }
 
@@ -428,7 +549,7 @@ function DashboardSkeleton() {
       <article className="dashboardPanel panel sourceSetupPanel isLoading" aria-busy="true">
         <SectionHeaderSkeleton pill />
         <div className="sourceSetupGrid">
-          {Array.from({ length: 3 }).map((_, index) => (
+          {Array.from({ length: 4 }).map((_, index) => (
             <div className="sourceSetupCard skeletonSetupCard" key={`setup-skeleton-${index}`}>
               <span className="skeletonIcon" />
               <span>
@@ -476,7 +597,7 @@ function DashboardSkeleton() {
       </section>
 
       <section className="platformChartGrid">
-        {Array.from({ length: 2 }).map((_, index) => (
+        {Array.from({ length: 4 }).map((_, index) => (
           <article className="dashboardPanel panel platformPanel isLoading" aria-busy="true" key={`platform-chart-skeleton-${index}`}>
             <SectionHeaderSkeleton pill />
             <div className="skeletonChart compact">
@@ -528,26 +649,20 @@ function DashboardSkeleton() {
 export function Dashboard() {
   const [botStatus, setBotStatus] = useState(null);
   const [brands, setBrands] = useState([]);
-  const [selectedBrandId, setSelectedBrandId] = useState("");
+  const [selectedBrandId, setSelectedBrandId] = useState(() => readSelectedBrandId());
   const [periodKey, setPeriodKey] = useState("month");
-  const [telegramSummary, setTelegramSummary] = useState(null);
-  const [youtubeSummary, setYoutubeSummary] = useState(null);
   const [analytics, setAnalytics] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const lastLoadedDashboardKey = useRef("");
   const activePeriod = useMemo(
     () => periodOptions.find((item) => item.key === periodKey) || periodOptions[2],
     [periodKey],
   );
 
   const loadDashboard = useCallback(async (brandId = selectedBrandId, period = activePeriod) => {
-    const [telegramSummaryRow, youtubeSummaryRow, analyticsRow] = await Promise.all([
-      endpoints.dashboardSummary(brandId || ""),
-      endpoints.youtubeSummary(brandId || ""),
-      endpoints.dashboardAnalytics(brandId || "", period.value, period.interval, browserTimezone),
-    ]);
-    setTelegramSummary(telegramSummaryRow);
-    setYoutubeSummary(youtubeSummaryRow);
+    lastLoadedDashboardKey.current = `${brandId || ""}:${period.key}`;
+    const analyticsRow = await endpoints.dashboardAnalytics(brandId || "", period.value, period.interval, browserTimezone);
     setAnalytics(analyticsRow);
   }, [activePeriod, selectedBrandId]);
 
@@ -558,7 +673,7 @@ export function Dashboard() {
       const [bot, brandRows] = await Promise.all([endpoints.botStatus(), endpoints.brands()]);
       setBotStatus(bot);
       setBrands(brandRows);
-      const nextBrandId = selectedBrandId || (brandRows.length ? brandRows[0].id : "");
+      const nextBrandId = resolveSelectedBrandId(brandRows, selectedBrandId);
       if (nextBrandId && nextBrandId !== selectedBrandId) setSelectedBrandId(nextBrandId);
       await loadDashboard(nextBrandId, activePeriod);
     } catch (err) {
@@ -573,6 +688,8 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
+    const dashboardKey = `${selectedBrandId || ""}:${activePeriod.key}`;
+    if (dashboardKey === lastLoadedDashboardKey.current) return;
     loadDashboard(selectedBrandId, activePeriod).catch((err) => setError(err.message));
   }, [selectedBrandId, activePeriod, loadDashboard]);
 
@@ -582,7 +699,7 @@ export function Dashboard() {
   const forecast = analytics?.forecast || {};
   const ai = analytics?.ai || {};
   const filter = analytics?.filter || {};
-  const highRisk = (analytics?.risk?.high || 0) + (analytics?.risk?.critical || 0) + (youtubeSummary?.high_risk || 0);
+  const highRisk = (analytics?.risk?.high || 0) + (analytics?.risk?.critical || 0);
   const TrendIcon = trendIcon(forecast.direction);
   const isInitialLoading = loading && !analytics;
 
@@ -597,8 +714,10 @@ export function Dashboard() {
     () => [
       { label: "Telegram", value: mentions.telegram || 0, icon: TelegramIcon, tone: "telegram" },
       { label: "YouTube", value: mentions.youtube || 0, icon: YouTubeIcon, tone: "youtube" },
+      { label: "Instagram", value: mentions.instagram || 0, icon: Instagram, tone: "instagram" },
+      { label: "Facebook", value: mentions.facebook || 0, icon: Facebook, tone: "facebook" },
     ],
-    [mentions.telegram, mentions.youtube],
+    [mentions.telegram, mentions.youtube, mentions.instagram, mentions.facebook],
   );
 
   const actionRows = useMemo(
@@ -607,6 +726,10 @@ export function Dashboard() {
       { label: "Telegram chat/comment", value: mentions.telegram_comments || 0, tone: "telegram" },
       { label: "YouTube video", value: mentions.youtube_videos || 0, tone: "youtube" },
       { label: "YouTube comment", value: mentions.youtube_comments || 0, tone: "youtube" },
+      { label: "Instagram comment", value: mentions.instagram_comments || 0, tone: "instagram" },
+      { label: "Instagram @mention", value: mentions.instagram_direct_mentions || 0, tone: "instagram" },
+      { label: "Facebook comment", value: mentions.facebook_comments || 0, tone: "facebook" },
+      { label: "Facebook reply", value: mentions.facebook_replies || 0, tone: "facebook" },
     ],
     [mentions],
   );
@@ -628,10 +751,6 @@ export function Dashboard() {
       <Sidebar botStatus={botStatus} activePath="/" />
       <main className="main">
         <PageHeader
-          brands={brands}
-          selectedBrandId={selectedBrandId}
-          onBrandChange={setSelectedBrandId}
-          onRefresh={loadInitial}
           eyebrow="Brand intelligence"
           title="Umumiy dashboard"
           loading={isInitialLoading}
@@ -681,13 +800,14 @@ export function Dashboard() {
         </section>
 
         <OfficialSourceSetup sources={sources} filter={filter} />
+        <DashboardOperations mentions={mentions} sources={sources} ai={ai} forecast={forecast} />
 
         <section className="analyticsHero">
           <article className="dashboardPanel panel">
             <div className="sectionHeader">
               <div>
                 <h2>Brand harakati</h2>
-                <p>Tanlangan brand va davr bo'yicha Telegram va YouTube mention oqimi.</p>
+                <p>Tanlangan brand va davr bo'yicha barcha platformalardagi mention oqimi.</p>
               </div>
               <span className="pill neutral">{activePeriod.label} · {intervalLabels[analytics?.period?.interval || activePeriod.interval]}</span>
             </div>
@@ -735,17 +855,43 @@ export function Dashboard() {
             engagement={engagement}
             sources={sources}
           />
+          <PlatformChartCard
+            platform="instagram"
+            rows={analytics?.trend || []}
+            period={analytics?.period || activePeriod}
+            mentions={mentions}
+            engagement={engagement}
+            sources={sources}
+          />
+          <PlatformChartCard
+            platform="facebook"
+            rows={analytics?.trend || []}
+            period={analytics?.period || activePeriod}
+            mentions={mentions}
+            engagement={engagement}
+            sources={sources}
+          />
         </section>
 
         <section className="dashboardGrid">
           <article className="dashboardPanel panel">
             <div className="sectionHeader">
               <div>
-                <h2>Platformalar</h2>
-                <p>Qaysi platformadan qancha signal kelmoqda.</p>
+                <h2>Engagement</h2>
+                <p>Like, view, reaction va comment signalari hamda prognoz.</p>
               </div>
             </div>
-            <ProgressRows rows={platformRows} />
+            <div className="metricGrid">
+              <div className="youtube"><Heart size={17} /><strong>{compactNumber(engagement.youtube_likes)}</strong><span>YouTube like</span></div>
+              <div className="youtube"><Eye size={17} /><strong>{compactNumber(engagement.youtube_views)}</strong><span>YouTube view</span></div>
+              <div className="telegram"><Activity size={17} /><strong>{compactNumber(engagement.telegram_reactions)}</strong><span>Telegram reaction</span></div>
+              <div className="total"><MessageSquareText size={17} /><strong>{compactNumber(engagement.youtube_comment_count)}</strong><span>Video comment count</span></div>
+              <div className="instagram"><Heart size={17} /><strong>{compactNumber(engagement.instagram_likes)}</strong><span>Instagram like</span></div>
+              <div className="facebook"><MessageSquareText size={17} /><strong>{compactNumber(engagement.facebook_replies)}</strong><span>Facebook reply</span></div>
+              <div className="youtube"><Heart size={17} /><strong>{compactNumber(forecast.next_7d_youtube_likes)}</strong><span>7 kun like prognoz</span></div>
+              <div className="youtube"><Eye size={17} /><strong>{compactNumber(forecast.next_7d_youtube_views)}</strong><span>7 kun view prognoz</span></div>
+            </div>
+            <p className="mutedNote">{engagement.youtube_dislikes_note}</p>
           </article>
 
           <article className="dashboardPanel panel">
@@ -761,19 +907,11 @@ export function Dashboard() {
           <article className="dashboardPanel panel">
             <div className="sectionHeader">
               <div>
-                <h2>Engagement</h2>
-                <p>Like, view, reaction va comment signalari hamda prognoz.</p>
+                <h2>Platformalar</h2>
+                <p>Qaysi platformadan qancha signal kelmoqda.</p>
               </div>
             </div>
-            <div className="metricGrid">
-              <div className="youtube"><Heart size={17} /><strong>{compactNumber(engagement.youtube_likes)}</strong><span>YouTube like</span></div>
-              <div className="youtube"><Eye size={17} /><strong>{compactNumber(engagement.youtube_views)}</strong><span>YouTube view</span></div>
-              <div className="telegram"><Activity size={17} /><strong>{compactNumber(engagement.telegram_reactions)}</strong><span>Telegram reaction</span></div>
-              <div className="total"><MessageSquareText size={17} /><strong>{compactNumber(engagement.youtube_comment_count)}</strong><span>Video comment count</span></div>
-              <div className="youtube"><Heart size={17} /><strong>{compactNumber(forecast.next_7d_youtube_likes)}</strong><span>7 kun like prognoz</span></div>
-              <div className="youtube"><Eye size={17} /><strong>{compactNumber(forecast.next_7d_youtube_views)}</strong><span>7 kun view prognoz</span></div>
-            </div>
-            <p className="mutedNote">{engagement.youtube_dislikes_note}</p>
+            <ProgressRows rows={platformRows} />
           </article>
 
           <article className="dashboardPanel panel">
@@ -809,8 +947,8 @@ export function Dashboard() {
               <Distribution rows={riskRows} type="risk" />
               <div className="aiPlan">
                 <Sparkles size={20} />
-                <strong>Vertex AI keyingi qatlam</strong>
-                <p>Hozir dashboard raqamli trend asosida prognoz beradi. Keyingi bosqichda Gemini har bir salbiy/ijobiy signal sababini, brandga ta'sirini va tavsiya qilinadigan javobni chiqaradi.</p>
+                <strong>AI action layer</strong>
+                <p>Dashboard mention hajmi, sentiment, risk va AI qamrovini birlashtirib ustuvor signalni ko'rsatadi. Salbiy yoki yuqori riskli xabarlar birinchi navbatda javobga chiqariladi.</p>
               </div>
             </div>
           </article>
