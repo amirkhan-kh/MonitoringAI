@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -236,6 +236,13 @@ class TelegramSourceCategory(BaseModel):
 class TelegramSourceOut(BaseModel):
     id: uuid.UUID
     brand_id: uuid.UUID | None
+    bot_connection_id: uuid.UUID | None
+    parent_source_id: uuid.UUID | None
+    source_role: str
+    connector_managed: bool
+    bot_access_status: str
+    telethon_access_status: str
+    access_checked_at: datetime | None
     source_kind: str
     source_category: str
     monitoring_mode: str
@@ -256,9 +263,68 @@ class TelegramSourceOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TelegramSetupRequest(BaseModel):
+    bot_link: str | None = None
+    bot_token: SecretStr | None = None
+    bot_mode: Literal["reference", "polling"] = "reference"
+    channel_ref: int | str | None = None
+    discussion_ref: int | str | None = None
+    monitor_from: date | None = None
+    collect_posts: bool = True
+    collect_comments: bool = True
+
+    @model_validator(mode="after")
+    def require_connector_input(self) -> "TelegramSetupRequest":
+        token = self.bot_token.get_secret_value().strip() if self.bot_token else ""
+        values = (self.bot_link, token, self.channel_ref, self.discussion_ref)
+        if not any(value is not None and str(value).strip() for value in values):
+            raise ValueError("bot_link, bot_token, channel_ref yoki discussion_ref dan kamida bittasi kerak")
+        return self
+
+
+class TelegramBotConnectionOut(BaseModel):
+    id: uuid.UUID
+    brand_id: uuid.UUID
+    bot_id: int | None = None
+    bot_username: str | None = None
+    bot_link: str | None = None
+    mode: str
+    status: str
+    status_detail: str | None = None
+    token_configured: bool = False
+    last_update_id: int | None = None
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class TelegramCapabilities(BaseModel):
+    bot_reference: bool = False
+    bot_polling: bool = False
+    channel_monitoring: bool = False
+    discussion_monitoring: bool = False
+    history_backfill: bool = False
+
+
+class TelegramSetupResponse(BaseModel):
+    brand_id: uuid.UUID
+    connection: TelegramBotConnectionOut | None = None
+    sources: list[TelegramSourceOut] = Field(default_factory=list)
+    capabilities: TelegramCapabilities = Field(default_factory=TelegramCapabilities)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TelegramConnectionDeleteResult(BaseModel):
+    ok: bool = True
+    brand_id: uuid.UUID
+    connection_deleted: bool
+    sources_detached: int = 0
+
+
 class YouTubeSourceImport(BaseModel):
-    brand_id: uuid.UUID | None = None
+    brand_id: uuid.UUID
     raw_text: str
+    official_channel_only: bool = False
     default_source_category: str = "keyword"
     default_monitoring_mode: str = "brand_matches_only"
     default_monitor_from: date | None = None
@@ -295,6 +361,8 @@ class YouTubeSourceSyncResult(BaseModel):
     comments_seen: int = 0
     imported: int = 0
     error: str | None = None
+    rate_limited: bool = False
+    retry_after_seconds: int | None = None
 
 
 class YouTubeSourceImportResult(BaseModel):

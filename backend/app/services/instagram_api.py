@@ -18,9 +18,37 @@ import httpx
 
 
 class InstagramApiError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = error_code
+
+
+def _meta_error_code(response: httpx.Response) -> int | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    raw_code = error.get("code") if isinstance(error, dict) else None
+    try:
+        return int(raw_code) if raw_code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _http_error(response: httpx.Response, *, operation: str) -> InstagramApiError:
+    error_code = _meta_error_code(response)
+    message = f"Instagram Graph API {operation} failed (HTTP {response.status_code})"
+    if error_code is not None:
+        message += f" (Meta code {error_code})"
+    return InstagramApiError(message, status_code=response.status_code, error_code=error_code)
 
 
 class InstagramApi:
@@ -37,17 +65,23 @@ class InstagramApi:
         self._timeout = timeout
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        query = {"access_token": self.access_token, **(params or {})}
+        query = dict(params or {})
+        query.pop("access_token", None)
         try:
-            response = httpx.get(f"{self.base_url}/{path.lstrip('/')}", params=query, timeout=self._timeout)
-        except httpx.HTTPError as exc:
-            raise InstagramApiError(f"Instagram Graph API request failed: {exc}") from exc
-        if response.status_code >= 400:
-            raise InstagramApiError(
-                f"Instagram Graph API {response.status_code}: {response.text[:300]}",
-                status_code=response.status_code,
+            response = httpx.get(
+                f"{self.base_url}/{path.lstrip('/')}",
+                params=query,
+                headers={"Authorization": f"Bearer {self.access_token}"},
+                timeout=self._timeout,
             )
-        return response.json()
+        except httpx.HTTPError:
+            raise InstagramApiError("Instagram Graph API request failed (network error)") from None
+        if response.status_code >= 400:
+            raise _http_error(response, operation="request")
+        try:
+            return response.json()
+        except ValueError:
+            raise InstagramApiError("Instagram Graph API returned an invalid response") from None
 
     # --- fetch full objects referenced by a webhook ---
     def get_comment(self, comment_id: str) -> dict[str, Any]:
@@ -136,19 +170,32 @@ def detect_account(access_token: str, *, graph_version: str = "v21.0") -> dict[s
 
     def _try(url: str, params: dict) -> dict[str, Any] | None:
         try:
-            r = httpx.get(url, params=params, timeout=20.0)
-        except httpx.HTTPError as exc:
-            errors.append(str(exc)[:120])
+            r = httpx.get(
+                url,
+                params=params,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=20.0,
+            )
+        except httpx.HTTPError:
+            errors.append("tarmoq xatosi")
             return None
         if r.status_code >= 400:
-            errors.append(f"{r.status_code}: {r.text[:120]}")
+            error_code = _meta_error_code(r)
+            detail = f"HTTP {r.status_code}"
+            if error_code is not None:
+                detail += f" (Meta code {error_code})"
+            errors.append(detail)
             return None
-        return r.json()
+        try:
+            return r.json()
+        except ValueError:
+            errors.append("yaroqsiz API javobi")
+            return None
 
     # 1) Instagram-login token
     data = _try(
         f"https://graph.instagram.com/{graph_version}/me",
-        {"access_token": access_token, "fields": "user_id,username"},
+        {"fields": "user_id,username"},
     )
     if data:
         uid = str(data.get("user_id") or data.get("id") or "")
@@ -163,7 +210,7 @@ def detect_account(access_token: str, *, graph_version: str = "v21.0") -> dict[s
     fb = f"https://graph.facebook.com/{graph_version}"
 
     # 2) Page token
-    data = _try(f"{fb}/me", {"access_token": access_token, "fields": "id,name,instagram_business_account{id,username}"})
+    data = _try(f"{fb}/me", {"fields": "id,name,instagram_business_account{id,username}"})
     if data:
         iba = data.get("instagram_business_account") or {}
         if iba.get("id"):
@@ -178,7 +225,7 @@ def detect_account(access_token: str, *, graph_version: str = "v21.0") -> dict[s
     # 3) User token -> pick a managed page that has an IG business account
     data = _try(
         f"{fb}/me/accounts",
-        {"access_token": access_token, "fields": "name,access_token,instagram_business_account{id,username}", "limit": 50},
+        {"fields": "name,access_token,instagram_business_account{id,username}", "limit": 50},
     )
     if data:
         for page in data.get("data", []) or []:
@@ -206,7 +253,21 @@ def exchange_long_lived_token(app_id: str, app_secret: str, short_token: str, *,
         "client_secret": app_secret,
         "fb_exchange_token": short_token,
     }
-    response = httpx.get(f"https://graph.facebook.com/{graph_version}/oauth/access_token", params=params, timeout=20.0)
+    try:
+        response = httpx.post(
+            f"https://graph.facebook.com/{graph_version}/oauth/access_token",
+            data=params,
+            timeout=20.0,
+        )
+    except httpx.HTTPError:
+        raise InstagramApiError("Token exchange failed (network error)") from None
     if response.status_code >= 400:
-        raise InstagramApiError(f"Token exchange {response.status_code}: {response.text[:300]}", status_code=response.status_code)
-    return response.json()
+        error_code = _meta_error_code(response)
+        message = f"Token exchange failed (HTTP {response.status_code})"
+        if error_code is not None:
+            message += f" (Meta code {error_code})"
+        raise InstagramApiError(message, status_code=response.status_code, error_code=error_code)
+    try:
+        return response.json()
+    except ValueError:
+        raise InstagramApiError("Token exchange returned an invalid response") from None

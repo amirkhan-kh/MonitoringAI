@@ -47,6 +47,10 @@ services:
     <<: *backend
     command: python -m app.workers.telegram_worker
 
+  telegram-connector-worker:
+    <<: *backend
+    command: python -m app.workers.telegram_connector_worker
+
   telegram-live-sync:
     <<: *backend
     command: python -m app.workers.telegram_live_sync

@@ -47,6 +47,21 @@ services:
       postgres:
         condition: service_healthy
 
+  telegram-connector-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.telegram_connector_worker
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - telegram_sessions:/app/.sessions
+      - ./backend/.secrets/vertex.json:/app/.secrets/vertex.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   telegram-live-sync:
     build:
       context: ./backend

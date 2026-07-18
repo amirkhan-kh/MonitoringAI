@@ -39,7 +39,13 @@ import { TelegramIcon, YouTubeIcon } from "../components/BrandIcons";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
 import { SmartSelect } from "../components/SmartSelect";
+import { TelegramConnectionForm } from "../components/TelegramConnectionForm";
 import { translateUiText } from "../i18n";
+import {
+  canonicalOfficialChannelSourceRef,
+  officialChannelFieldsFromSource,
+  officialChannelRef,
+} from "../youtubeChannelRef";
 
 const platformTabs = [
   {
@@ -194,6 +200,31 @@ function statusClass(source) {
   return source?.active ? "state ok" : "state neutral";
 }
 
+function profileSourceState(platform, source, telegramConnection, youtubeStatus) {
+  if (!source?.active) return { label: "Pause", className: "state neutral" };
+  if (platform === "telegram") {
+    if (!source.connector_managed) return { label: "Yoqilgan", className: "state warn" };
+    const capability = source.source_role === "discussion"
+      ? telegramConnection?.capabilities?.discussion_monitoring
+      : telegramConnection?.capabilities?.channel_monitoring;
+    if (capability || source.telethon_access_status === "ready") {
+      return { label: "Monitoring", className: "state ok" };
+    }
+    return {
+      label: source.chat_id == null ? "Catalog" : "Access kutilmoqda",
+      className: "state warn",
+    };
+  }
+  if (platform === "youtube") {
+    if (!youtubeStatus?.configured) return { label: "API kutilmoqda", className: "state warn" };
+    if (source.source_kind === "channel" && (!source.channel_id || !source.uploads_playlist_id)) {
+      return { label: "Kanal resolve kutilmoqda", className: "state warn" };
+    }
+    return { label: "Monitoring", className: "state ok" };
+  }
+  return { label: sourceStatus(source), className: statusClass(source) };
+}
+
 function countActive(items) {
   return items.filter((item) => item.active).length;
 }
@@ -229,7 +260,7 @@ function ProfileSummary({ telegramSources, youtubeSources, instagramSources, fac
   const cards = [
     { label: "Brand", value: selectedBrandName || "Tanlanmagan", icon: UserCog, tone: "profile" },
     { label: "Official source", value: total, icon: ShieldCheck, tone: "total" },
-    { label: "Active", value: active, icon: CheckCircle2, tone: "source" },
+    { label: "Yoqilgan", value: active, icon: CheckCircle2, tone: "source" },
     { label: "Pause", value: paused, icon: Pause, tone: "risk" },
   ];
 
@@ -827,7 +858,9 @@ function AdminIdentityPanel({ session, onSave, onLogout }) {
 function PlatformRegistry({
   platform,
   telegramSources,
+  telegramConnection,
   youtubeSources,
+  youtubeStatus,
   instagramSources,
   facebookSources,
   onOpenCreate,
@@ -940,6 +973,8 @@ function PlatformRegistry({
               key={`${platform}-${source.id}`}
               platform={platform}
               source={source}
+              telegramConnection={telegramConnection}
+              youtubeStatus={youtubeStatus}
               onEdit={() => onOpenEdit(platform, source)}
               onReplace={() => onOpenReplace(platform, source)}
               onToggle={() => onToggle(platform, source)}
@@ -958,8 +993,19 @@ function PlatformRegistry({
   );
 }
 
-function ProfileSourceCard({ platform, source, onEdit, onReplace, onToggle, onRefresh, onDelete }) {
+function ProfileSourceCard({
+  platform,
+  source,
+  telegramConnection,
+  youtubeStatus,
+  onEdit,
+  onReplace,
+  onToggle,
+  onRefresh,
+  onDelete,
+}) {
   const display = sourceDisplay(platform, source);
+  const monitoringState = profileSourceState(platform, source, telegramConnection, youtubeStatus);
   const isTelegram = platform === "telegram";
   const Icon = isTelegram ? TelegramIcon : YouTubeIcon;
   const chips = isTelegram
@@ -989,7 +1035,7 @@ function ProfileSourceCard({ platform, source, onEdit, onReplace, onToggle, onRe
           <strong>{display.title}</strong>
           <span>{display.ref || "Platform ID hali resolve qilinmagan"}</span>
         </div>
-        <em className={statusClass(source)}>{sourceStatus(source)}</em>
+        <em className={monitoringState.className}>{monitoringState.label}</em>
       </div>
 
       <div className="sourceSignals profileChips">
@@ -1031,13 +1077,31 @@ function ProfileSourceCard({ platform, source, onEdit, onReplace, onToggle, onRe
   );
 }
 
-function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, onSave, saving, result }) {
+function SourceEditorModal({
+  mode,
+  platform,
+  source,
+  selectedBrandId,
+  selectedBrandName,
+  telegramInitialConnection,
+  youtubeStatus,
+  onClose,
+  onSave,
+  saving,
+  result,
+}) {
   const isTelegram = platform === "telegram";
   const isReplace = mode === "replace";
   const isEdit = mode === "edit";
   const display = sourceDisplay(platform, source);
+  const initialYoutubeFields = isEdit
+    ? officialChannelFieldsFromSource(source)
+    : { channelUrl: "", handle: "", channelId: "" };
   const [form, setForm] = useState(() => ({
-    ref: isTelegram ? telegramRef(source) : youtubeRef(source),
+    ref: isTelegram ? telegramRef(source) : "",
+    youtubeChannelUrl: initialYoutubeFields.channelUrl,
+    youtubeHandle: initialYoutubeFields.handle,
+    youtubeChannelId: initialYoutubeFields.channelId,
     displayName: isTelegram ? source?.competitor_name || source?.title || "" : source?.nickname || source?.channel_title || "",
     notes: source?.notes || "",
     monitorFrom: dateInputValue(source?.monitor_from),
@@ -1049,10 +1113,30 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
     hashtags: uniqueHashtags(source?.hashtags || []),
     hashtagInput: "",
   }));
+  const [formError, setFormError] = useState("");
 
   const title = isEdit ? "Official source tahrirlash" : isReplace ? "Official source almashtirish" : "Official source qo'shish";
-  const sourceLabel = isTelegram ? "Telegram link yoki ID" : "YouTube kanal/video linki";
-  const refChanged = form.ref.trim() && form.ref.trim() !== display.ref;
+  const parsedYoutubeRef = officialChannelRef({
+    channelUrl: form.youtubeChannelUrl,
+    handle: form.youtubeHandle,
+    channelId: form.youtubeChannelId,
+  });
+  const refChanged = isTelegram
+    ? Boolean(form.ref.trim() && form.ref.trim() !== display.ref)
+    : Boolean(
+      !parsedYoutubeRef.error
+      && parsedYoutubeRef.canonicalRef !== canonicalOfficialChannelSourceRef(source),
+    );
+
+  function updateYoutubeField(field, value) {
+    setFormError("");
+    setForm((current) => ({
+      ...current,
+      youtubeChannelUrl: field === "url" ? value : "",
+      youtubeHandle: field === "handle" ? value : "",
+      youtubeChannelId: field === "id" ? value : "",
+    }));
+  }
 
   function addHashtags() {
     const next = uniqueHashtags([...form.hashtags, ...splitHashtags(form.hashtagInput)]);
@@ -1069,13 +1153,22 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
 
   function handleSubmit(event) {
     event.preventDefault();
-    if (!form.ref.trim()) return;
+    let ref = form.ref.trim();
+    if (isTelegram) {
+      if (!ref) return;
+    } else {
+      if (parsedYoutubeRef.error) {
+        setFormError(parsedYoutubeRef.error);
+        return;
+      }
+      ref = parsedYoutubeRef.ref;
+    }
     onSave({
       mode,
       platform,
       source,
       selectedBrandId,
-      ref: form.ref.trim(),
+      ref,
       refChanged,
       displayName: form.displayName.trim(),
       notes: form.notes.trim(),
@@ -1084,9 +1177,44 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
       collectPosts: form.collectPosts,
       collectComments: form.collectComments,
       collectVideos: form.collectVideos,
-      collectTranscripts: form.collectTranscripts,
+      collectTranscripts: isTelegram ? form.collectTranscripts : false,
       hashtags: uniqueHashtags([...form.hashtags, ...splitHashtags(form.hashtagInput)]),
     });
+  }
+
+  if (isTelegram && (mode === "create" || source?.connector_managed)) {
+    return (
+      <div className="modalOverlay" role="presentation" onMouseDown={onClose}>
+        <section className="modalPanel" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="modalHeader">
+            <div>
+              <h2>Telegram ulanishini qo'shish</h2>
+              <p>Bot, rasmiy kanal va discussion groupni brandga mustaqil ulang.</p>
+            </div>
+            <button className="iconButton" type="button" aria-label="Yopish" onClick={onClose}>
+              <X size={18} />
+            </button>
+          </div>
+          <div className="profileModalContent">
+            <TelegramConnectionForm
+              selectedBrandId={selectedBrandId}
+              selectedBrandName={selectedBrandName}
+              initialConnection={telegramInitialConnection}
+              result={result}
+              saving={saving}
+              submitLabel="Telegram ulanishini qo'shish"
+              onSubmit={(telegramSetup) => onSave({
+                mode,
+                platform,
+                source,
+                selectedBrandId,
+                telegramSetup,
+              })}
+            />
+          </div>
+        </section>
+      </div>
+    );
   }
 
   return (
@@ -1103,17 +1231,78 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
         </div>
 
         <form className="profileModalContent" onSubmit={handleSubmit}>
+          {!isTelegram && (
+            <div className="statusPanel youtubeConnectionStatus">
+              <div className="statusTitle">
+                <YouTubeIcon size={18} />
+                <strong>Rasmiy YouTube kanal ulanishi</strong>
+              </div>
+              <div className="statusGrid">
+                <span>Tanlangan brand</span>
+                <strong>{selectedBrandName || "Brand tanlanmagan"}</strong>
+                <span>YouTube API</span>
+                <strong>{youtubeStatus ? (youtubeStatus.configured ? "Tayyor" : "Sozlanmagan") : "Tekshirilmoqda"}</strong>
+                <span>Source turi</span>
+                <strong>Owned · kanal</strong>
+              </div>
+              {!selectedBrandId && <p className="statusWarning">Official kanal ulashdan oldin brandni tanlang.</p>}
+              {youtubeStatus && !youtubeStatus.configured && (
+                <p className="statusWarning">Kanal katalogga saqlanadi, ammo API key sozlanmaguncha resolve va sync ishlamaydi.</p>
+              )}
+              {isEdit && source?.source_kind !== "channel" && (
+                <p className="statusWarning">Bu eski source kanal emas. Uni official kanalga almashtirish uchun yangi kanal manzilini kiriting.</p>
+              )}
+            </div>
+          )}
+
+          {formError && <div className="errorBanner compact">{formError}</div>}
+
           <div className="profileModalGrid">
             <div className="profileModalColumn">
-              <label className="field">
-                <span>{sourceLabel}</span>
-                <input
-                  className="input"
-                  value={form.ref}
-                  onChange={(event) => setForm((current) => ({ ...current, ref: event.target.value }))}
-                  required
-                />
-              </label>
+              {isTelegram ? (
+                <label className="field">
+                  <span>Telegram link yoki ID</span>
+                  <input
+                    className="input"
+                    value={form.ref}
+                    onChange={(event) => setForm((current) => ({ ...current, ref: event.target.value }))}
+                    required
+                  />
+                </label>
+              ) : (
+                <>
+                  <label className="field">
+                    <span>Kanal URL</span>
+                    <input
+                      className="input"
+                      value={form.youtubeChannelUrl}
+                      onChange={(event) => updateYoutubeField("url", event.target.value)}
+                      placeholder="https://youtube.com/@brand"
+                    />
+                    <p className="fieldHint">Public /@handle, /channel/UC... yoki legacy /user/... link.</p>
+                  </label>
+                  <label className="field">
+                    <span>@handle</span>
+                    <input
+                      className="input"
+                      value={form.youtubeHandle}
+                      onChange={(event) => updateYoutubeField("handle", event.target.value)}
+                      placeholder="@brand"
+                    />
+                    <p className="fieldHint">Kanal URL o'rniga rasmiy handle qiymatini kiriting.</p>
+                  </label>
+                  <label className="field">
+                    <span>Channel ID</span>
+                    <input
+                      className="input"
+                      value={form.youtubeChannelId}
+                      onChange={(event) => updateYoutubeField("id", event.target.value)}
+                      placeholder="UC..."
+                    />
+                    <p className="fieldHint">UC bilan boshlanadigan 24 belgili channel ID.</p>
+                  </label>
+                </>
+              )}
               <label className="field">
                 <span>Ko'rinadigan nom</span>
                 <input
@@ -1180,14 +1369,6 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
                         onChange={(event) => setForm((current) => ({ ...current, collectComments: event.target.checked }))}
                       />
                       <span>Commentlarni olish</span>
-                    </label>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={form.collectTranscripts}
-                        onChange={(event) => setForm((current) => ({ ...current, collectTranscripts: event.target.checked }))}
-                      />
-                      <span>Transcript belgilash</span>
                     </label>
                   </>
                 )}
@@ -1258,7 +1439,7 @@ function SourceEditorModal({ mode, platform, source, selectedBrandId, onClose, o
             <button className="button secondary" type="button" onClick={onClose}>
               Bekor qilish
             </button>
-            <button className="button primary" type="submit" disabled={saving}>
+            <button className="button primary" type="submit" disabled={saving || (!isTelegram && !selectedBrandId)}>
               <Save size={17} />
               <span>{saving ? "Saqlanmoqda..." : "Saqlash"}</span>
             </button>
@@ -1275,7 +1456,9 @@ export function Profile() {
   const [brands, setBrands] = useState([]);
   const [taxonomy, setTaxonomy] = useState(null);
   const [telegramSources, setTelegramSources] = useState([]);
+  const [telegramConnection, setTelegramConnection] = useState(null);
   const [youtubeSources, setYoutubeSources] = useState([]);
+  const [youtubeStatus, setYoutubeStatus] = useState(null);
   const [instagramSources, setInstagramSources] = useState([]);
   const [facebookSources, setFacebookSources] = useState([]);
   const [selectedBrandId, setSelectedBrandId] = useState(() => readSelectedBrandId());
@@ -1298,6 +1481,7 @@ export function Profile() {
         endpoints.youtubeSources(),
         endpoints.instagramSources(),
         endpoints.facebookSources(),
+        endpoints.youtubeStatus(),
       ]);
       const value = (index, fallback) => requests[index].status === "fulfilled" ? requests[index].value : fallback;
       const brandRows = value(1, []);
@@ -1308,12 +1492,13 @@ export function Profile() {
       setYoutubeSources(value(4, []));
       setInstagramSources(value(5, []));
       setFacebookSources(value(6, []));
+      setYoutubeStatus(value(7, null));
       setSelectedBrandId((current) => resolveSelectedBrandId(brandRows, current));
       const failed = requests
         .map((request, index) => request.status === "rejected" ? [index, request.reason?.message] : null)
         .filter(Boolean);
       if (failed.length) {
-        const labels = ["Telegram status", "Brandlar", "Taxonomy", "Telegram", "YouTube", "Instagram", "Facebook"];
+        const labels = ["Telegram status", "Brandlar", "Taxonomy", "Telegram", "YouTube", "Instagram", "Facebook", "YouTube API status"];
         setError(`Qisman yuklandi: ${failed.map(([index]) => labels[index]).join(", ")}. Qolgan bo'limlar ishlashda davom etadi.`);
       }
     } catch (err) {
@@ -1326,6 +1511,25 @@ export function Profile() {
   useEffect(() => {
     loadProfile();
   }, [loadProfile]);
+
+  useEffect(() => {
+    if (!selectedBrandId) {
+      setTelegramConnection(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setTelegramConnection(null);
+    endpoints.telegramConnection(selectedBrandId)
+      .then((connection) => {
+        if (!cancelled) setTelegramConnection(connection);
+      })
+      .catch(() => {
+        if (!cancelled) setTelegramConnection(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedBrandId]);
 
   useEffect(() => {
     function handleKeyDown(event) {
@@ -1341,8 +1545,18 @@ export function Profile() {
     [telegramSources, selectedBrandId],
   );
   const officialYoutubeSources = useMemo(
-    () => youtubeSources.filter((source) => isOwnedSource(source, selectedBrandId)),
+    () => youtubeSources.filter(
+      (source) => isOwnedSource(source, selectedBrandId) && source.source_kind === "channel",
+    ),
     [youtubeSources, selectedBrandId],
+  );
+  const telegramConnectorConnection = useMemo(
+    () => ({
+      sources: telegramSources.filter(
+        (source) => source.brand_id === selectedBrandId && source.connector_managed,
+      ),
+    }),
+    [telegramSources, selectedBrandId],
   );
   const officialInstagramSources = useMemo(
     () => instagramSources.filter((source) => isOwnedSource(source, selectedBrandId)),
@@ -1366,12 +1580,23 @@ export function Profile() {
   function handleBrandChange(brandId) {
     saveSelectedBrandId(brandId);
     setSelectedBrandId(brandId);
+    setTelegramConnection(null);
     setResult(null);
   }
 
   function handleNewBrand() {
     setSelectedBrandId("");
     setResult(null);
+  }
+
+  async function reloadTelegramConnection(brandId = selectedBrandId) {
+    if (!brandId) {
+      setTelegramConnection(null);
+      return null;
+    }
+    const connection = await endpoints.telegramConnection(brandId);
+    if (brandId === selectedBrandId) setTelegramConnection(connection);
+    return connection;
   }
 
   async function handleSaveBrand(brandId, payload) {
@@ -1413,6 +1638,7 @@ export function Profile() {
       await endpoints.youtubeUpdateSource(source.id, { active: !source.active });
     }
     await loadProfile();
+    if (platform === "telegram") await reloadTelegramConnection(source.brand_id || selectedBrandId);
   }
 
   async function handleRefresh(platform, source) {
@@ -1429,6 +1655,7 @@ export function Profile() {
       setResult({ ok: false, message: err.message });
     }
     await loadProfile();
+    if (platform === "telegram") await reloadTelegramConnection(source.brand_id || selectedBrandId);
   }
 
   async function handleDeleteSource(platform, source) {
@@ -1457,6 +1684,7 @@ export function Profile() {
         message: `${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil butunlay o'chirildi.`,
       });
       await loadProfile();
+      if (platform === "telegram") await reloadTelegramConnection(source.brand_id || selectedBrandId);
     } catch (err) {
       setResult({ ok: false, message: err.message });
     } finally {
@@ -1533,6 +1761,7 @@ export function Profile() {
     const rows = csvLine([payload.ref, "owned", "all_messages", payload.displayName, payload.notes, payload.monitorFrom, payload.hashtags.join(" ")]);
     const importResult = await endpoints.youtubeImportSources({
       brand_id: payload.selectedBrandId || null,
+      official_channel_only: true,
       raw_text: rows,
       default_source_category: "owned",
       default_monitoring_mode: "all_messages",
@@ -1547,11 +1776,13 @@ export function Profile() {
       const failed = importResult.find((row) => row.error);
       throw new Error(failed?.error || "YouTube source import qilinmadi.");
     }
+    let syncWarning = "";
     if (imported?.id) {
       try {
-        await endpoints.youtubeSyncSource(imported.id, { max_pages: 1, comments_per_video: 100 });
-      } catch {
-        // Source registry update should not be blocked by sync quota/access errors.
+        const sync = await endpoints.youtubeSyncSource(imported.id, { max_pages: 1, comments_per_video: 100 });
+        if (sync.ok === false) syncWarning = sync.error || "YouTube sync ishlamadi.";
+      } catch (err) {
+        syncWarning = err.message || "YouTube sync ishlamadi.";
       }
     }
     if (payload.source?.id && payload.source.id !== imported?.id) {
@@ -1560,7 +1791,8 @@ export function Profile() {
         notes: payload.source.notes || "Replaced from profile source registry.",
       });
     }
-    return payload.source?.id ? "YouTube official source almashtirildi." : "YouTube official source qo'shildi.";
+    const message = payload.source?.id ? "YouTube official source almashtirildi." : "YouTube official source qo'shildi.";
+    return syncWarning ? `${message} Source saqlandi, lekin sync ogohlantirishi: ${syncWarning}` : message;
   }
 
   async function handleSaveSource(payload) {
@@ -1568,14 +1800,31 @@ export function Profile() {
     setResult(null);
     try {
       if (!payload.selectedBrandId) throw new Error("Official source ulashdan oldin brandni tanlang.");
+      if (payload.platform === "telegram" && payload.telegramSetup) {
+        const response = await endpoints.telegramSetup(payload.selectedBrandId, payload.telegramSetup);
+        setTelegramConnection(response);
+        const success = {
+          ...response,
+          ok: true,
+          message: "Telegram bot, kanal va discussion sozlamalari saqlandi.",
+        };
+        setResult(success);
+        await loadProfile();
+        return success;
+      }
+
       const message = payload.platform === "telegram"
         ? await saveTelegramSource(payload)
         : await saveYoutubeSource(payload);
-      setResult({ ok: true, message });
+      const success = { ok: true, message };
+      setResult(success);
       setModal(null);
       await loadProfile();
+      return success;
     } catch (err) {
-      setResult({ ok: false, message: err.message });
+      const failure = { ok: false, message: err.message };
+      setResult(failure);
+      return failure;
     } finally {
       setSaving(false);
     }
@@ -1697,7 +1946,9 @@ export function Profile() {
           <PlatformRegistry
             platform={selectedPlatform}
             telegramSources={officialTelegramSources}
+            telegramConnection={telegramConnection}
             youtubeSources={officialYoutubeSources}
+            youtubeStatus={youtubeStatus}
             instagramSources={officialInstagramSources}
             facebookSources={officialFacebookSources}
             onOpenCreate={(platform) => {
@@ -1724,6 +1975,9 @@ export function Profile() {
             platform={modal.platform}
             source={modal.source}
             selectedBrandId={selectedBrandId}
+            selectedBrandName={selectedBrand?.name || ""}
+            telegramInitialConnection={telegramConnection || telegramConnectorConnection}
+            youtubeStatus={youtubeStatus}
             onClose={() => setModal(null)}
             onSave={handleSaveSource}
             saving={saving}

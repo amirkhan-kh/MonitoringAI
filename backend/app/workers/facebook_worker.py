@@ -49,10 +49,10 @@ def main() -> None:
 
 
 def _is_auth_error(exc: FacebookApiError) -> bool:
-    if exc.status_code in (401, 190):
+    if exc.status_code == 401 or exc.error_code == 190:
         return True
     msg = str(exc).lower()
-    return exc.status_code == 400 and any(k in msg for k in ("oauth", "token", "session", "code\": 190", "code':190"))
+    return exc.status_code == 400 and any(k in msg for k in ("oauth", "token", "session"))
 
 
 def _poll_source(settings, source_id) -> None:

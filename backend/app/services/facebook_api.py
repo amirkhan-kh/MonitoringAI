@@ -17,9 +17,37 @@ import httpx
 
 
 class FacebookApiError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = error_code
+
+
+def _meta_error_code(response: httpx.Response) -> int | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    raw_code = error.get("code") if isinstance(error, dict) else None
+    try:
+        return int(raw_code) if raw_code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _http_error(response: httpx.Response, *, operation: str) -> FacebookApiError:
+    error_code = _meta_error_code(response)
+    message = f"Facebook Graph API {operation} failed (HTTP {response.status_code})"
+    if error_code is not None:
+        message += f" (Meta code {error_code})"
+    return FacebookApiError(message, status_code=response.status_code, error_code=error_code)
 
 
 # Facebook comment field set (differs from Instagram: ``message`` not ``text``,
@@ -42,17 +70,23 @@ class FacebookApi:
         self._timeout = timeout
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        query = {"access_token": self.access_token, **(params or {})}
+        query = dict(params or {})
+        query.pop("access_token", None)
         try:
-            response = httpx.get(f"{self.base_url}/{path.lstrip('/')}", params=query, timeout=self._timeout)
-        except httpx.HTTPError as exc:
-            raise FacebookApiError(f"Facebook Graph API request failed: {exc}") from exc
-        if response.status_code >= 400:
-            raise FacebookApiError(
-                f"Facebook Graph API {response.status_code}: {response.text[:300]}",
-                status_code=response.status_code,
+            response = httpx.get(
+                f"{self.base_url}/{path.lstrip('/')}",
+                params=query,
+                headers={"Authorization": f"Bearer {self.access_token}"},
+                timeout=self._timeout,
             )
-        return response.json()
+        except httpx.HTTPError:
+            raise FacebookApiError("Facebook Graph API request failed (network error)") from None
+        if response.status_code >= 400:
+            raise _http_error(response, operation="request")
+        try:
+            return response.json()
+        except ValueError:
+            raise FacebookApiError("Facebook Graph API returned an invalid response") from None
 
     # --- fetch full objects referenced by a webhook ---
     def get_comment(self, comment_id: str) -> dict[str, Any]:
@@ -103,19 +137,32 @@ def detect_page(access_token: str, *, graph_version: str = "v21.0") -> dict[str,
 
     def _try(url: str, params: dict) -> dict[str, Any] | None:
         try:
-            r = httpx.get(url, params=params, timeout=20.0)
-        except httpx.HTTPError as exc:
-            errors.append(str(exc)[:120])
+            r = httpx.get(
+                url,
+                params=params,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=20.0,
+            )
+        except httpx.HTTPError:
+            errors.append("tarmoq xatosi")
             return None
         if r.status_code >= 400:
-            errors.append(f"{r.status_code}: {r.text[:120]}")
+            error_code = _meta_error_code(r)
+            detail = f"HTTP {r.status_code}"
+            if error_code is not None:
+                detail += f" (Meta code {error_code})"
+            errors.append(detail)
             return None
-        return r.json()
+        try:
+            return r.json()
+        except ValueError:
+            errors.append("yaroqsiz API javobi")
+            return None
 
     # 1) User token -> managed pages (with their own page tokens)
     data = _try(
         f"{fb}/me/accounts",
-        {"access_token": access_token, "fields": "id,name,username,access_token,category", "limit": 50},
+        {"fields": "id,name,username,access_token,category", "limit": 50},
     )
     if data:
         pages = data.get("data", []) or []
@@ -130,7 +177,7 @@ def detect_page(access_token: str, *, graph_version: str = "v21.0") -> dict[str,
             }
 
     # 2) Page token -> the page itself (pages carry a ``category``)
-    data = _try(f"{fb}/me", {"access_token": access_token, "fields": "id,name,username,category"})
+    data = _try(f"{fb}/me", {"fields": "id,name,username,category"})
     if data and data.get("id") and data.get("category"):
         return {
             "page_id": str(data["id"]),

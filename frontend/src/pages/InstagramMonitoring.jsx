@@ -18,7 +18,7 @@ import {
   Webhook,
   MessageCircle,
 } from "lucide-react";
-import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
+import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId, saveSelectedBrandId } from "../api/client";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
@@ -85,6 +85,11 @@ export function InstagramMonitoring() {
     brandRef.current = selectedBrandId;
   }, [selectedBrandId]);
 
+  const visibleSources = useMemo(
+    () => selectedBrandId ? sources.filter((source) => source.brand_id === selectedBrandId) : [],
+    [sources, selectedBrandId],
+  );
+
   const loadData = useCallback(async (brandId) => {
     const active = (brandId ?? brandRef.current) || "";
     try {
@@ -135,7 +140,7 @@ export function InstagramMonitoring() {
 
   // Realtime: reload (debounced) when an Instagram mention / analysis event arrives.
   useEffect(() => {
-    const source = new EventSource(endpoints.eventsUrl());
+    const source = endpoints.eventsStream();
     const onEvent = (event) => {
       try {
         const data = JSON.parse(event.data || "{}");
@@ -170,6 +175,10 @@ export function InstagramMonitoring() {
 
   const handleConnect = async (event) => {
     event.preventDefault();
+    if (!form.brand_id) {
+      setError("Brand tanlash majburiy.");
+      return;
+    }
     if (!form.access_token.trim()) {
       setError("Access token majburiy. Akkaunt token'dan avtomatik aniqlanadi.");
       return;
@@ -184,7 +193,7 @@ export function InstagramMonitoring() {
         source_category: form.source_category,
         monitoring_mode: form.monitoring_mode,
       });
-      setForm(emptyForm);
+      setForm({ ...emptyForm, brand_id: form.brand_id });
       try {
         const synced = await endpoints.instagramSyncSource(created.id);
         setNotice(
@@ -331,12 +340,12 @@ export function InstagramMonitoring() {
         {summary && summary.post_comments_total > summary.comments_total && (
           <div className="loadingBar">
             Instagram post hisoblagichi {summary.post_comments_total} ta comment borligini ko'rsatmoqda; hozircha {summary.comments_total} ta comment matni import qilingan.
-            {sources.some((source) => source.token_status === "invalid")
+            {visibleSources.some((source) => source.token_status === "invalid")
               ? " Token yaroqsiz bo'lib qolgan — “Token yangilash” orqali yangi token kiriting; sync avtomatik boshlanadi."
               : " Ulangan akkauntdagi “Sync” tugmasi comment matnlarini qayta yuklaydi."}
           </div>
         )}
-        <MonitoringInsights platform="instagram" sources={sources} summary={summary} status={status} loading={loading} />
+        <MonitoringInsights platform="instagram" sources={visibleSources} summary={summary} status={status} loading={loading} />
 
         <section className="monitoringWorkspace">
           <section className="recentSection">
@@ -353,18 +362,18 @@ export function InstagramMonitoring() {
                   <span className="eyebrow">Ulangan akkauntlar</span>
                   <h3>Instagram Business</h3>
                 </div>
-                <span className="accountCountBadge">{sources.length}</span>
+                <span className="accountCountBadge">{visibleSources.length}</span>
               </div>
 
               <div className="sourceList">
-                {sources.length === 0 && (
+                {visibleSources.length === 0 && (
                   <div className="emptyState connectedAccountsEmpty">
                     <Instagram size={22} />
                     <strong>Hali akkaunt ulanmagan</strong>
                     <span>Username, token va brandni kiriting, so‘ng “Akkauntni ulash” tugmasini bosing.</span>
                   </div>
                 )}
-                {sources.map((source) => (
+                {visibleSources.map((source) => (
                   <div className="igAccountRow" key={source.id}>
                     <div className="sourceIcon"><Instagram size={18} /></div>
                     <div className="sourceBody">
@@ -451,7 +460,13 @@ export function InstagramMonitoring() {
                 <select
                   className="input select"
                   value={form.brand_id}
-                  onChange={(e) => setForm({ ...form, brand_id: e.target.value })}
+                  onChange={(e) => {
+                    const brandId = saveSelectedBrandId(e.target.value);
+                    brandRef.current = brandId;
+                    setSelectedBrandId(brandId);
+                    setForm({ ...form, brand_id: brandId });
+                  }}
+                  required
                 >
                   <option value="">{translateUiText("Brand tanlang")}</option>
                   {brands.map((b) => (

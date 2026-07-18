@@ -16,25 +16,30 @@ async def main() -> None:
     if not settings.telegram_api_id or not settings.telegram_api_hash:
         raise RuntimeError("TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
 
-    client = TelegramClient(settings.telegram_session_name, settings.telegram_api_id, settings.telegram_api_hash)
-    await client.connect()
+    session_name = sys.argv[1] if len(sys.argv) > 1 else settings.telegram_session_name
+    client = TelegramClient(session_name, settings.telegram_api_id, settings.telegram_api_hash)
+    result: dict[str, object]
     try:
+        await client.connect()
         authorized = await client.is_user_authorized()
         if not authorized:
-            print({"authorized": False, "session": settings.telegram_session_name})
-            return
-        me = await client.get_me()
-        print(
-            {
+            result = {"authorized": False, "session": session_name}
+        else:
+            me = await client.get_me()
+            result = {
                 "authorized": True,
-                "session": settings.telegram_session_name,
+                "session": session_name,
                 "id": getattr(me, "id", None),
                 "username": getattr(me, "username", None),
-                "phone": getattr(me, "phone", None),
             }
-        )
+    except Exception as exc:
+        result = {"authorized": False, "session": session_name, "error": exc.__class__.__name__}
     finally:
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        except Exception as exc:
+            result = {"authorized": False, "session": session_name, "error": exc.__class__.__name__}
+    print(result)
 
 
 if __name__ == "__main__":

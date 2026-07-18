@@ -80,6 +80,26 @@ def ensure_schema_upgrades() -> None:
         statements.append("ALTER TABLE telegram_sources ADD COLUMN notes TEXT")
     if "monitor_from" not in columns:
         statements.append("ALTER TABLE telegram_sources ADD COLUMN monitor_from TIMESTAMP WITH TIME ZONE")
+    if "bot_connection_id" not in columns:
+        statements.append(
+            "ALTER TABLE telegram_sources ADD COLUMN bot_connection_id UUID "
+            "REFERENCES telegram_bot_connections(id) ON DELETE SET NULL"
+        )
+    if "parent_source_id" not in columns:
+        statements.append(
+            "ALTER TABLE telegram_sources ADD COLUMN parent_source_id UUID "
+            "REFERENCES telegram_sources(id) ON DELETE SET NULL"
+        )
+    if "source_role" not in columns:
+        statements.append("ALTER TABLE telegram_sources ADD COLUMN source_role VARCHAR(32) NOT NULL DEFAULT 'legacy'")
+    if "connector_managed" not in columns:
+        statements.append("ALTER TABLE telegram_sources ADD COLUMN connector_managed BOOLEAN NOT NULL DEFAULT FALSE")
+    if "bot_access_status" not in columns:
+        statements.append("ALTER TABLE telegram_sources ADD COLUMN bot_access_status VARCHAR(32) NOT NULL DEFAULT 'unverified'")
+    if "telethon_access_status" not in columns:
+        statements.append("ALTER TABLE telegram_sources ADD COLUMN telethon_access_status VARCHAR(32) NOT NULL DEFAULT 'unverified'")
+    if "access_checked_at" not in columns:
+        statements.append("ALTER TABLE telegram_sources ADD COLUMN access_checked_at TIMESTAMP WITH TIME ZONE")
 
     # Backfill monitor_from only when the column was just added, not on every boot.
     monitor_from_added = "monitor_from" not in columns
@@ -89,6 +109,27 @@ def ensure_schema_upgrades() -> None:
                 connection.execute(text(statement))
             if monitor_from_added:
                 connection.execute(text("UPDATE telegram_sources SET monitor_from = created_at WHERE monitor_from IS NULL"))
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE telegram_sources SET connector_managed = TRUE "
+                "WHERE bot_connection_id IS NOT NULL OR source_role = 'bot_inbox'"
+            )
+        )
+        connection.execute(
+            text(
+                "UPDATE telegram_sources SET source_role = "
+                "CASE WHEN collect_posts THEN 'channel' ELSE 'discussion' END "
+                "WHERE connector_managed = TRUE AND source_role = 'group'"
+            )
+        )
+        connection.execute(
+            text(
+                "UPDATE telegram_sources SET source_role = 'legacy' "
+                "WHERE connector_managed = FALSE AND source_role = 'group'"
+            )
+        )
 
     if "youtube_sources" in table_names:
         youtube_columns = {column["name"] for column in inspector.get_columns("youtube_sources")}
@@ -103,6 +144,9 @@ def ensure_schema_upgrades() -> None:
             with engine.begin() as connection:
                 for statement in youtube_statements:
                     connection.execute(text(statement))
+
+    ensure_telegram_brand_scoped_uniqueness(table_names)
+    ensure_youtube_brand_scoped_uniqueness(table_names)
 
     if "instagram_sources" in table_names:
         ig_columns = {column["name"] for column in inspector.get_columns("instagram_sources")}
@@ -133,6 +177,129 @@ def ensure_schema_upgrades() -> None:
     ensure_indexes()
 
 
+def ensure_telegram_brand_scoped_uniqueness(table_names: set[str]) -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    if "telegram_sources" not in table_names or "mentions" not in table_names:
+        return
+
+    with engine.begin() as connection:
+        connection_inspector = inspect(connection)
+        quote = connection.dialect.identifier_preparer.quote
+        removals: list[str] = []
+        if "telegram_bot_connections" in table_names:
+            connection_constraints = connection_inspector.get_unique_constraints("telegram_bot_connections")
+            connection_unique_columns = {
+                tuple(constraint.get("column_names") or ())
+                for constraint in connection_constraints
+            }
+            if ("bot_id",) not in connection_unique_columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE telegram_bot_connections "
+                        "ADD CONSTRAINT uq_telegram_bot_connections_bot_id UNIQUE (bot_id)"
+                    )
+                )
+        source_constraints = connection_inspector.get_unique_constraints("telegram_sources")
+        for constraint in source_constraints:
+            columns = tuple(constraint.get("column_names") or ())
+            name = constraint.get("name")
+            if name and columns in {
+                ("chat_id",),
+                ("username",),
+                ("brand_id", "chat_id"),
+                ("brand_id", "username"),
+            }:
+                removals.append(
+                    f"ALTER TABLE {quote('telegram_sources')} DROP CONSTRAINT {quote(name)}"
+                )
+
+        mention_constraints = connection_inspector.get_unique_constraints("mentions")
+        mention_columns = {
+            tuple(constraint.get("column_names") or ()): constraint.get("name")
+            for constraint in mention_constraints
+        }
+        desired_mention_columns = ("brand_id", "source_id", "platform", "chat_id", "message_id")
+        if desired_mention_columns not in mention_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE mentions ADD CONSTRAINT uq_mentions_brand_source_chat_message "
+                    "UNIQUE NULLS NOT DISTINCT (brand_id, source_id, platform, chat_id, message_id)"
+                )
+            )
+        legacy_mention_name = mention_columns.get(("platform", "chat_id", "message_id"))
+        if legacy_mention_name:
+            removals.append(
+                f"ALTER TABLE {quote('mentions')} DROP CONSTRAINT {quote(legacy_mention_name)}"
+            )
+
+        for statement in removals:
+            connection.execute(text(statement))
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_telegram_sources_brand_chat_id "
+                "ON telegram_sources (brand_id, chat_id) NULLS NOT DISTINCT WHERE chat_id IS NOT NULL"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_telegram_sources_brand_username "
+                "ON telegram_sources (brand_id, username) NULLS NOT DISTINCT WHERE username IS NOT NULL"
+            )
+        )
+
+
+def ensure_youtube_brand_scoped_uniqueness(table_names: set[str]) -> None:
+    if engine.dialect.name != "postgresql":
+        return
+
+    constraint_specs = (
+        (
+            "youtube_sources",
+            "uq_youtube_sources_brand_source_ref",
+            ("brand_id", "source_ref"),
+            ("source_ref",),
+        ),
+        (
+            "youtube_mentions",
+            "uq_youtube_mentions_brand_external_id",
+            ("brand_id", "external_id"),
+            ("external_id",),
+        ),
+    )
+    applicable_specs = [spec for spec in constraint_specs if spec[0] in table_names]
+    if not applicable_specs:
+        return
+
+    with engine.begin() as connection:
+        connection_inspector = inspect(connection)
+        additions: list[str] = []
+        removals: list[str] = []
+        quote = connection.dialect.identifier_preparer.quote
+
+        for table_name, desired_name, desired_columns, legacy_columns in applicable_specs:
+            constraints = connection_inspector.get_unique_constraints(table_name)
+            constraint_columns = {
+                tuple(constraint.get("column_names") or ()): constraint.get("name")
+                for constraint in constraints
+            }
+            if desired_columns not in constraint_columns:
+                additions.append(
+                    f"ALTER TABLE {quote(table_name)} ADD CONSTRAINT {quote(desired_name)} "
+                    f"UNIQUE NULLS NOT DISTINCT ({', '.join(quote(column) for column in desired_columns)})"
+                )
+            legacy_name = constraint_columns.get(legacy_columns)
+            if legacy_name:
+                removals.append(
+                    f"ALTER TABLE {quote(table_name)} DROP CONSTRAINT {quote(legacy_name)}"
+                )
+
+        for statement in additions:
+            connection.execute(text(statement))
+        for statement in removals:
+            connection.execute(text(statement))
+
+
 def ensure_indexes() -> None:
     """Create hot-path indexes on already-existing tables.
 
@@ -147,6 +314,11 @@ def ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_instagram_mentions_created ON instagram_mentions (created_at)",
         "CREATE INDEX IF NOT EXISTS ix_instagram_mentions_item_type ON instagram_mentions (item_type)",
         "CREATE INDEX IF NOT EXISTS ix_telegram_sources_brand ON telegram_sources (brand_id)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_sources_bot_connection ON telegram_sources (bot_connection_id)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_sources_parent ON telegram_sources (parent_source_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_telegram_sources_bot_inbox_connection "
+        "ON telegram_sources (bot_connection_id) "
+        "WHERE source_role = 'bot_inbox' AND bot_connection_id IS NOT NULL",
     )
     with engine.begin() as connection:
         for statement in index_statements:

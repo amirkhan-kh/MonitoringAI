@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,14 +30,20 @@ async def main() -> None:
     logger.info("Telethon backfill started")
 
     with SessionLocal() as session:
-        sources = session.query(TelegramSource).filter(TelegramSource.active.is_(True)).all()
+        sources = (
+            session.query(TelegramSource)
+            .filter(TelegramSource.active.is_(True))
+            .filter(TelegramSource.source_role != "bot_inbox")
+            .filter(TelegramSource.source_kind != "private")
+            .all()
+        )
         source_refs = [
-            (source.username or source.chat_id, source.monitor_from)
+            (source.id, source.username or source.chat_id, source.monitor_from)
             for source in sources
             if source.username or source.chat_id
         ]
 
-    for source_ref, from_date in source_refs:
+    for source_id, source_ref, from_date in source_refs:
         if source_ref is None:
             continue
         try:
@@ -46,6 +53,7 @@ async def main() -> None:
                 settings.telegram_backfill_limit,
                 settings.telegram_backfill_comments_per_post,
                 from_date=from_date,
+                source_id=source_id,
             )
         except Exception:
             logger.exception("Backfill failed for source=%s", source_ref)
@@ -60,6 +68,7 @@ async def backfill_source(
     comments_per_post: int,
     *,
     from_date: datetime | None = None,
+    source_id: uuid.UUID | None = None,
 ) -> dict[str, int]:
     return await import_source_messages(
         client,
@@ -69,6 +78,7 @@ async def backfill_source(
         min_message_id=None,
         mark_backfilled=True,
         from_date=from_date,
+        source_id=source_id,
     )
 
 
@@ -79,6 +89,7 @@ async def sync_source_since(
     min_message_id: int | None,
     limit: int,
     comments_per_post: int,
+    source_id: uuid.UUID | None = None,
 ) -> dict[str, int]:
     return await import_source_messages(
         client,
@@ -88,6 +99,7 @@ async def sync_source_since(
         min_message_id=min_message_id,
         mark_backfilled=False,
         from_date=None,
+        source_id=source_id,
     )
 
 
@@ -100,9 +112,23 @@ async def import_source_messages(
     min_message_id: int | None,
     mark_backfilled: bool,
     from_date: datetime | None,
+    source_id: uuid.UUID | None,
 ) -> dict[str, int]:
     entity = await client.get_entity(source_ref)
     chat = await entity_to_chat_dict(entity)
+    if source_id is not None:
+        with SessionLocal() as session:
+            source = session.get(TelegramSource, source_id)
+            if source is None:
+                raise ValueError("Telegram source not found")
+            source.chat_id = chat.get("id")
+            source.username = chat.get("username")
+            source.title = chat.get("title") or source.title
+            source.source_kind = chat.get("type") or source.source_kind
+            if source.connector_managed:
+                source.telethon_access_status = "ready"
+                source.access_checked_at = datetime.now(timezone.utc)
+            session.commit()
     normalized_from_date = normalize_datetime(from_date)
     iter_kwargs: dict[str, Any] = {}
     if limit is not None:
@@ -133,14 +159,40 @@ async def import_source_messages(
         message_payload = telethon_message_to_dict(message)
         source_type = source_type_for_telethon_message(chat, message)
         with SessionLocal() as session:
-            ingest_telethon_message(session, chat=chat, message=message_payload, source_type=source_type)
+            source_override = session.get(TelegramSource, source_id) if source_id is not None else None
+            ingest_telethon_message(
+                session,
+                chat=chat,
+                message=message_payload,
+                source_type=source_type,
+                source_override=source_override,
+            )
 
         if comments_per_post > 0 and source_type == "channel_post":
-            comments_seen += await backfill_comments(client, entity, chat, message, comments_per_post)
+            comments_seen += await backfill_comments(
+                client,
+                entity,
+                chat,
+                message,
+                comments_per_post,
+                parent_source_id=source_id,
+            )
+
+    if source_id is not None and messages:
+        with SessionLocal() as session:
+            source = session.get(TelegramSource, source_id)
+            if source:
+                newest_message_id = max(int(message.id or 0) for message in messages)
+                source.last_seen_message_id = max(source.last_seen_message_id or 0, newest_message_id)
+                session.commit()
 
     if mark_backfilled:
         with SessionLocal() as session:
-            source = session.query(TelegramSource).filter(TelegramSource.chat_id == chat.get("id")).one_or_none()
+            source = session.get(TelegramSource, source_id) if source_id is not None else (
+                session.query(TelegramSource)
+                .filter(TelegramSource.brand_id.is_(None), TelegramSource.chat_id == chat.get("id"))
+                .one_or_none()
+            )
             if source:
                 source.last_backfilled_at = datetime.now(timezone.utc)
                 session.commit()
@@ -164,20 +216,46 @@ def source_type_for_telethon_message(chat: dict[str, Any], message: Message) -> 
     return "group_message"
 
 
-async def backfill_comments(client: TelegramClient, entity: Any, chat: dict[str, Any], post: Message, limit: int) -> int:
+async def backfill_comments(
+    client: TelegramClient,
+    entity: Any,
+    chat: dict[str, Any],
+    post: Message,
+    limit: int,
+    *,
+    parent_source_id: uuid.UUID | None = None,
+) -> int:
     comments_seen = 0
     try:
         async for comment in client.iter_messages(entity, reply_to=post.id, limit=limit):
             if not isinstance(comment, Message):
                 continue
-            comments_seen += 1
+            discussion_entity = getattr(comment, "chat", None)
+            if discussion_entity is None:
+                discussion_entity = await comment.get_chat()
+            if discussion_entity is None:
+                logger.warning("Skipping Telegram comment without discussion chat post=%s comment=%s", post.id, comment.id)
+                continue
+            discussion_chat = await entity_to_chat_dict(discussion_entity)
+            if discussion_chat.get("id") == chat.get("id"):
+                logger.warning("Skipping Telegram comment resolved to parent channel post=%s comment=%s", post.id, comment.id)
+                continue
+
             payload = telethon_message_to_dict(comment)
             payload["discussion_message_id"] = post.id
             payload["reply_to_message_id"] = getattr(comment.reply_to, "reply_to_msg_id", None) if comment.reply_to else post.id
-            if getattr(comment, "chat", None):
-                payload["discussion_chat"] = await entity_to_chat_dict(comment.chat)
+            payload["discussion_chat"] = discussion_chat
             with SessionLocal() as session:
-                ingest_telethon_message(session, chat=chat, message=payload, source_type="comment")
+                parent_source = session.get(TelegramSource, parent_source_id) if parent_source_id is not None else None
+                ingest_telethon_message(
+                    session,
+                    chat=discussion_chat,
+                    message=payload,
+                    source_type="comment",
+                    parent_chat=chat,
+                    parent_source_override=parent_source,
+                )
+            comments_seen += 1
     except (RPCError, ValueError):
         logger.debug("No comments or inaccessible discussion for post=%s", post.id, exc_info=True)
     return comments_seen

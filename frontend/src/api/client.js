@@ -164,6 +164,130 @@ export async function cachedApi(path, ttlMs = 15000) {
   return request;
 }
 
+function dispatchSseBlock(target, block) {
+  let eventType = "message";
+  let lastEventId = "";
+  let hasData = false;
+  const dataLines = [];
+
+  for (const line of block.split(/\r?\n/)) {
+    if (!line || line.startsWith(":")) continue;
+    const separator = line.indexOf(":");
+    const field = separator === -1 ? line : line.slice(0, separator);
+    let value = separator === -1 ? "" : line.slice(separator + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") eventType = value || "message";
+    if (field === "id") lastEventId = value;
+    if (field === "data") {
+      hasData = true;
+      dataLines.push(value);
+    }
+  }
+
+  if (hasData) {
+    target.dispatchEvent(new MessageEvent(eventType, { data: dataLines.join("\n"), lastEventId }));
+  }
+}
+
+function reconnectDelay(milliseconds, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const timer = window.setTimeout(done, milliseconds);
+    function done() {
+      window.clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+export function openEventStream() {
+  const target = new EventTarget();
+  const controller = new AbortController();
+  let closed = false;
+  let errorHandler = null;
+
+  const stream = {
+    addEventListener: target.addEventListener.bind(target),
+    removeEventListener: target.removeEventListener.bind(target),
+    close() {
+      closed = true;
+      controller.abort();
+    },
+  };
+
+  Object.defineProperty(stream, "onerror", {
+    get: () => errorHandler,
+    set: (handler) => {
+      if (errorHandler) target.removeEventListener("error", errorHandler);
+      errorHandler = typeof handler === "function" ? handler : null;
+      if (errorHandler) target.addEventListener("error", errorHandler);
+    },
+  });
+
+  async function connect() {
+    while (!closed) {
+      const token = getToken();
+      if (!token) {
+        target.dispatchEvent(new Event("error"));
+        return;
+      }
+      try {
+        const response = await fetch(`${API_BASE_URL}/events`, {
+          headers: {
+            Accept: "text/event-stream",
+            "Accept-Language": getUiLanguage(),
+            Authorization: `Bearer ${token}`,
+          },
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (response.status === 401) {
+          clearSession();
+          clearApiCache();
+          if (!window.location.pathname.startsWith("/login")) {
+            navigateTo("/login", { replace: true });
+          }
+          target.dispatchEvent(new Event("error"));
+          return;
+        }
+        if (!response.ok || !response.body) {
+          throw new Error(`Event stream ${response.status}`);
+        }
+
+        target.dispatchEvent(new Event("open"));
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!closed) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary = /\r?\n\r?\n/.exec(buffer);
+          while (boundary) {
+            dispatchSseBlock(target, buffer.slice(0, boundary.index));
+            buffer = buffer.slice(boundary.index + boundary[0].length);
+            boundary = /\r?\n\r?\n/.exec(buffer);
+          }
+        }
+        buffer += decoder.decode();
+        if (buffer.trim()) dispatchSseBlock(target, buffer);
+      } catch (error) {
+        if (controller.signal.aborted || closed) return;
+        target.dispatchEvent(new Event("error"));
+      }
+      if (!closed) await reconnectDelay(2000, controller.signal);
+    }
+  }
+
+  void connect();
+  return stream;
+}
+
 function withQuery(path, params = {}) {
   const search = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
@@ -235,13 +359,21 @@ export const endpoints = {
       body: JSON.stringify(payload),
     }),
   botStatus: () => cachedApi("/telegram/bot/status", 10000),
+  telegramConnection: (brandId) => api(`${uuidPath("/brands", brandId)}/telegram/connection`),
+  telegramSetup: (brandId, payload) =>
+    api(`${uuidPath("/brands", brandId)}/telegram/setup`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  telegramDeleteConnection: (brandId) =>
+    api(`${uuidPath("/brands", brandId)}/telegram/connection`, { method: "DELETE" }),
   backfillSessionStatus: () => api("/telegram/backfill/session-status"),
   sourceCategories: () => cachedApi("/telegram/source-categories", 60000),
   sources: () => cachedApi("/telegram/sources", 5000),
-  sourceAccessCheck: (chatIdOrUsername) =>
-    api("/telegram/sources/access-check", {
+  sourceAccessCheck: (sourceId) =>
+    api(`/telegram/sources/${sourceId}/access-check`, {
       method: "POST",
-      body: JSON.stringify({ chat_id_or_username: chatIdOrUsername }),
+      body: JSON.stringify({}),
     }),
   importSources: (payload) =>
     api("/telegram/sources/import", {
@@ -316,8 +448,5 @@ export const endpoints = {
   facebookSummary: (brandId) => cachedApi(brandPath("/facebook/summary", brandId), 5000),
   facebookManualIngest: (payload) =>
     api("/facebook/mentions/manual", { method: "POST", body: JSON.stringify(payload) }),
-  eventsUrl: () => {
-    const token = getToken();
-    return `${API_BASE_URL}/events${token ? `?access_token=${encodeURIComponent(token)}` : ""}`;
-  },
+  eventsStream: () => openEventStream(),
 };

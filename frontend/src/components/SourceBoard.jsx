@@ -198,6 +198,16 @@ export function SourceBoard({
 }
 
 function SourceRow({ source, onToggleSource, onCheckSource, onRefreshSource, onBackfillSource, onDeleteSource }) {
+  const isBotInbox = source.source_role === "bot_inbox";
+  const connectorAccessReady = source.telethon_access_status === "ready";
+  const stateClass = !source.active ? "neutral" : source.connector_managed && !connectorAccessReady ? "warn" : "ok";
+  const stateLabel = !source.active
+    ? "paused"
+    : source.connector_managed && !connectorAccessReady
+      ? "access/transportni tekshiring"
+      : source.connector_managed
+        ? "monitoring"
+        : "yoqilgan";
   return (
     <article className="sourceRow">
       <div className="sourceIdentity">
@@ -213,28 +223,34 @@ function SourceRow({ source, onToggleSource, onCheckSource, onRefreshSource, onB
         {source.collect_posts && <span title="Kanal/guruh postlari olinadi">Postlar</span>}
         {source.collect_comments && <span title="Discussion yoki group commentlari olinadi">Commentlar</span>}
       </div>
-      <em className={source.active ? "state ok" : "state neutral"}>{source.active ? "active" : "paused"}</em>
+      <em className={`state ${stateClass}`}>{stateLabel}</em>
       <div className="rowActions">
-        <button className="miniButton" type="button" onClick={() => onCheckSource(sourceRef(source))} title="Bot va Telethon access holatini tekshiradi">
-          <Search size={15} />
-          <span>Tekshirish</span>
-        </button>
-        <button className="miniButton" type="button" onClick={() => onRefreshSource(source)} title="Source nomi, username va linked chat ma'lumotini yangilaydi">
-          <RefreshCw size={15} />
-          <span>Yangilash</span>
-        </button>
-        <button className="miniButton" type="button" onClick={() => onBackfillSource(source)} title="Kuzatuv sanasidan boshlab post/commentlarni qayta olib keladi">
-          <DownloadCloud size={15} />
-          <span>To'liq olish</span>
-        </button>
-        <button className="miniButton" type="button" onClick={() => onToggleSource(source)} title={source.active ? "Kuzatuvni vaqtincha to'xtatadi" : "Kuzatuvni qayta yoqadi"}>
-          {source.active ? <Pause size={15} /> : <Play size={15} />}
-          <span>{source.active ? "Pauza" : "Davom"}</span>
-        </button>
-        <button className="miniButton danger" type="button" onClick={() => onDeleteSource(source)} title="Source va unga tegishli barcha post, comment hamda AI tahlillarini o'chiradi">
-          <Trash2 size={15} />
-          <span>O'chirish</span>
-        </button>
+        {isBotInbox ? (
+          <span className="sourceManagedHint">Bot connector orqali boshqariladi</span>
+        ) : (
+          <>
+            <button className="miniButton" type="button" onClick={() => onCheckSource(source)} title="Aynan shu brand botining access holatini tekshiradi">
+              <Search size={15} />
+              <span>Tekshirish</span>
+            </button>
+            <button className="miniButton" type="button" onClick={() => onRefreshSource(source)} title="Source nomi, username va linked chat ma'lumotini yangilaydi">
+              <RefreshCw size={15} />
+              <span>Yangilash</span>
+            </button>
+            <button className="miniButton" type="button" onClick={() => onBackfillSource(source)} title="Kuzatuv sanasidan boshlab post/commentlarni qayta olib keladi">
+              <DownloadCloud size={15} />
+              <span>To'liq olish</span>
+            </button>
+            <button className="miniButton" type="button" onClick={() => onToggleSource(source)} title={source.active ? "Kuzatuvni vaqtincha to'xtatadi" : "Kuzatuvni qayta yoqadi"}>
+              {source.active ? <Pause size={15} /> : <Play size={15} />}
+              <span>{source.active ? "Pauza" : "Davom"}</span>
+            </button>
+            <button className="miniButton danger" type="button" onClick={() => onDeleteSource(source)} title="Source va unga tegishli barcha post, comment hamda AI tahlillarini o'chiradi">
+              <Trash2 size={15} />
+              <span>O'chirish</span>
+            </button>
+          </>
+        )}
       </div>
       {(source.notes || source.competitor_name) && (
         <p className="sourceRowNote">{source.notes || source.competitor_name}</p>

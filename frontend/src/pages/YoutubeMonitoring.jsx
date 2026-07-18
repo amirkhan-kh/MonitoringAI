@@ -4,6 +4,7 @@ import {
   DownloadCloud,
   Hash,
   KeyRound,
+  Link2,
   MessageSquareText,
   Pause,
   Play,
@@ -16,13 +17,21 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
+import {
+  clearApiCache,
+  endpoints,
+  readSelectedBrandId,
+  resolveSelectedBrandId,
+  saveSelectedBrandId,
+} from "../api/client";
 import { YouTubeIcon } from "../components/BrandIcons";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
+import { SmartSelect } from "../components/SmartSelect";
 import { StatsBar } from "../components/StatsBar";
 import { formatUiDate, translateUiText } from "../i18n";
+import { officialChannelRef } from "../youtubeChannelRef";
 
 const categoryIcons = {
   owned: YouTubeIcon,
@@ -36,7 +45,6 @@ const categoryIcons = {
 };
 
 const categoryOrder = ["owned", "competitor", "keyword", "hashtag", "influencer", "campaign", "risk", "unknown"];
-
 const sourceKindLabels = {
   channel: "Kanal",
   video: "Video",
@@ -91,6 +99,9 @@ function sourceUrl(source) {
   if (source.video_id) return `https://www.youtube.com/watch?v=${source.video_id}`;
   if (source.channel_handle) return `https://www.youtube.com/${source.channel_handle}`;
   if (source.channel_id) return `https://www.youtube.com/channel/${source.channel_id}`;
+  if (source.source_ref?.startsWith("user:")) {
+    return `https://www.youtube.com/user/${encodeURIComponent(source.source_ref.slice("user:".length))}`;
+  }
   const query = source.query || source.source_ref || "";
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
 }
@@ -206,7 +217,7 @@ export function YoutubeMonitoring() {
   }, [selectedBrandId]);
 
   const visibleSources = useMemo(() => {
-    if (!selectedBrandId) return sources;
+    if (!selectedBrandId) return [];
     return sources.filter((source) => source.brand_id === selectedBrandId);
   }, [sources, selectedBrandId]);
 
@@ -224,6 +235,12 @@ export function YoutubeMonitoring() {
   const loadDashboard = useCallback(async (brandId) => {
     const activeBrandId = (brandId ?? selectedBrandIdRef.current) || "";
     lastLoadedBrandId.current = activeBrandId;
+    if (!activeBrandId) {
+      setSources([]);
+      setSummary(null);
+      setMentions([]);
+      return;
+    }
     const [sourceRows, summaryRow, mentionRows] = await Promise.all([
       endpoints.youtubeSources(),
       endpoints.youtubeSummary(activeBrandId),
@@ -249,6 +266,7 @@ export function YoutubeMonitoring() {
       setCategories(categoryRows);
       setBrands(brandRows);
       const defaultBrandId = resolveSelectedBrandId(brandRows, selectedBrandId);
+      selectedBrandIdRef.current = defaultBrandId;
       if (defaultBrandId && defaultBrandId !== selectedBrandId) {
         setSelectedBrandId(defaultBrandId);
       }
@@ -270,9 +288,9 @@ export function YoutubeMonitoring() {
   }, [selectedBrandId, loadDashboard]);
 
   // Open the realtime stream once for the page lifetime; brand filtering reads
-  // the latest value via a ref so the EventSource is never torn down/reopened.
+  // the latest value via a ref so the connection is never torn down/reopened.
   useEffect(() => {
-    const eventSource = new EventSource(endpoints.eventsUrl());
+    const eventSource = endpoints.eventsStream();
 
     function shouldRefresh(event) {
       const activeBrandId = selectedBrandIdRef.current;
@@ -325,6 +343,10 @@ export function YoutubeMonitoring() {
   async function handleImport(payload) {
     const result = await endpoints.youtubeImportSources(payload);
     const importedSources = result.map((row) => row.source).filter((source) => source?.id);
+    if (!importedSources.length) {
+      const failed = result.find((row) => row.error);
+      throw new Error(failed?.error || "YouTube source qo'shilmadi.");
+    }
     let latest = null;
     for (const source of importedSources) {
       let sync = null;
@@ -366,6 +388,24 @@ export function YoutubeMonitoring() {
     }
   }
 
+  function handleBrandChange(brandId) {
+    const nextBrandId = saveSelectedBrandId(brandId);
+    selectedBrandIdRef.current = nextBrandId;
+    setSelectedBrandId(nextBrandId);
+    setSourceResult(null);
+    setError("");
+    setNotice("");
+  }
+
+  function handleOpenAdd() {
+    if (!selectedBrandId) {
+      setError("YouTube kanal ulashdan oldin brandni tanlang.");
+      return;
+    }
+    setSourceResult(null);
+    setIsAddModalOpen(true);
+  }
+
   const isInitialLoading = loading && !summary && !sources.length && !mentions.length;
 
   return (
@@ -384,6 +424,28 @@ export function YoutubeMonitoring() {
           <div className="loadingBar">YOUTUBE_API_KEY sozlanmagan. Source katalog ishlaydi, avtomatik sync uchun API key kerak.</div>
         )}
 
+        <section className="panel activeBrandToolbar">
+          <div>
+            <strong>Faol brand</strong>
+            <p>YouTube kanal va ma'lumotlar faqat shu tanlangan brandga ulanadi.</p>
+          </div>
+          <SmartSelect
+            value={selectedBrandId}
+            options={brands.map((brand) => ({ value: brand.id, label: brand.name }))}
+            onChange={handleBrandChange}
+            emptyLabel="Brand mavjud emas"
+            ariaLabel="YouTube uchun faol brandni tanlash"
+          />
+          <a className="button secondary linkButton" href="/profile">
+            <Link2 size={16} />
+            <span>Brand sozlamalari</span>
+          </a>
+        </section>
+
+        {!loading && !selectedBrandId && (
+          <div className="errorBanner">Monitoringni ko'rish va YouTube kanal ulash uchun avval brand yarating yoki tanlang.</div>
+        )}
+
         <StatsBar items={statItems} loading={isInitialLoading} />
         <MonitoringInsights
           platform="youtube"
@@ -397,9 +459,10 @@ export function YoutubeMonitoring() {
           <YoutubeSourceBoard
             categories={categories}
             sources={visibleSources}
+            apiReady={Boolean(youtubeStatus?.configured)}
             selectedCategoryKey={selectedCategoryKey}
             onCategoryChange={setSelectedCategoryKey}
-            onOpenAdd={() => setIsAddModalOpen(true)}
+            onOpenAdd={handleOpenAdd}
             onToggleSource={handleToggleSource}
             onSyncSource={handleSyncSource}
             onDeleteSource={handleDeleteSource}
@@ -429,8 +492,10 @@ export function YoutubeMonitoring() {
               <div className="modalContent">
                 <YoutubeSourceForm
                   categories={categories}
+                  brands={brands}
                   selectedBrandId={selectedBrandId}
                   initialCategory={selectedCategoryKey}
+                  youtubeStatus={youtubeStatus}
                   onImport={handleImport}
                   sourceResult={sourceResult}
                 />
@@ -446,6 +511,7 @@ export function YoutubeMonitoring() {
 function YoutubeSourceBoard({
   categories,
   sources,
+  apiReady,
   selectedCategoryKey,
   onCategoryChange,
   onOpenAdd,
@@ -552,6 +618,7 @@ function YoutubeSourceBoard({
             <YoutubeSourceRow
               key={source.id}
               source={source}
+              apiReady={apiReady}
               onToggleSource={onToggleSource}
               onSyncSource={onSyncSource}
               onDeleteSource={onDeleteSource}
@@ -565,7 +632,18 @@ function YoutubeSourceBoard({
   );
 }
 
-function YoutubeSourceRow({ source, onToggleSource, onSyncSource, onDeleteSource }) {
+function YoutubeSourceRow({ source, apiReady, onToggleSource, onSyncSource, onDeleteSource }) {
+  const channelResolved = source.source_kind !== "channel"
+    || Boolean(source.channel_id && source.uploads_playlist_id);
+  const monitoringReady = source.active && apiReady && channelResolved;
+  const stateClass = !source.active ? "neutral" : monitoringReady ? "ok" : "warn";
+  const stateLabel = !source.active
+    ? "paused"
+    : !apiReady
+      ? "API kutilmoqda"
+      : !channelResolved
+        ? "kanal resolve kutilmoqda"
+        : "monitoring";
   return (
     <article className="sourceRow">
       <div className="sourceIdentity">
@@ -583,7 +661,7 @@ function YoutubeSourceRow({ source, onToggleSource, onSyncSource, onDeleteSource
         {source.uploads_playlist_id && <span className="blue" title="Kanal videolari uploads playlist orqali olinadi">Uploads ulangan</span>}
       </div>
       <HashtagBadges tags={source.hashtags || []} />
-      <em className={source.active ? "state ok" : "state neutral"}>{source.active ? "active" : "paused"}</em>
+      <em className={`state ${stateClass}`}>{stateLabel}</em>
       <div className="rowActions">
         <button className="miniButton" type="button" onClick={() => onSyncSource(source)}>
           <RefreshCw size={15} />
@@ -607,9 +685,13 @@ function YoutubeSourceRow({ source, onToggleSource, onSyncSource, onDeleteSource
   );
 }
 
-function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImport, sourceResult }) {
+function YoutubeSourceForm({ categories, brands, selectedBrandId, initialCategory, youtubeStatus, onImport, sourceResult }) {
+  const [sourceMode, setSourceMode] = useState("official");
   const [nickname, setNickname] = useState("");
   const [channelLink, setChannelLink] = useState("");
+  const [officialChannelUrl, setOfficialChannelUrl] = useState("");
+  const [officialHandle, setOfficialHandle] = useState("");
+  const [officialChannelId, setOfficialChannelId] = useState("");
   const [hashtagInput, setHashtagInput] = useState("");
   const [hashtags, setHashtags] = useState([]);
   const [category, setCategory] = useState(initialCategory || "owned");
@@ -619,6 +701,10 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
   const [collectVideos, setCollectVideos] = useState(true);
   const [collectComments, setCollectComments] = useState(true);
   const [collectTranscripts, setCollectTranscripts] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  const selectedBrand = brands.find((brand) => brand.id === selectedBrandId);
+  const apiReady = Boolean(youtubeStatus?.configured);
 
   useEffect(() => {
     const nextCategory = categories.find((item) => item.key === initialCategory) || categories[0];
@@ -631,6 +717,34 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
     const meta = categories.find((item) => item.key === value);
     setCategory(value);
     if (meta) setMode(meta.default_monitoring_mode);
+  }
+
+  function selectSourceMode(value) {
+    setSourceMode(value);
+    setFormError("");
+  }
+
+  function updateOfficialField(field, value) {
+    setFormError("");
+    if (field === "url") {
+      setOfficialChannelUrl(value);
+      if (value.trim()) {
+        setOfficialHandle("");
+        setOfficialChannelId("");
+      }
+    } else if (field === "handle") {
+      setOfficialHandle(value);
+      if (value.trim()) {
+        setOfficialChannelUrl("");
+        setOfficialChannelId("");
+      }
+    } else {
+      setOfficialChannelId(value);
+      if (value.trim()) {
+        setOfficialChannelUrl("");
+        setOfficialHandle("");
+      }
+    }
   }
 
   function addHashtags(value = hashtagInput) {
@@ -650,35 +764,79 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
 
   async function handleSubmit(event) {
     event.preventDefault();
-    const nextHashtags = mergeHashtags(hashtags, splitHashtagInput(hashtagInput));
-    if (!channelLink.trim() && !nextHashtags.length) return;
-    const rows = [];
-    if (channelLink.trim()) {
-      rows.push([channelLink, category, mode, nickname, notes, monitorFrom, nextHashtags.join(" ")]);
+    setFormError("");
+    if (!selectedBrandId) {
+      setFormError("Avval Profile sahifasida brand yarating yoki tanlang.");
+      return;
     }
-    nextHashtags.forEach((tag) => {
-      rows.push([tag, "hashtag", "brand_matches_only", nickname, notes, monitorFrom, tag]);
-    });
+
+    const nextHashtags = mergeHashtags(hashtags, splitHashtagInput(hashtagInput));
+    const rows = [];
+    let defaultCategory = category;
+    let defaultMode = mode;
+    let payloadHashtags = nextHashtags;
+    let transcriptsEnabled = collectTranscripts;
+
+    if (sourceMode === "official") {
+      const official = officialChannelRef({
+        channelUrl: officialChannelUrl,
+        handle: officialHandle,
+        channelId: officialChannelId,
+      });
+      if (official.error) {
+        setFormError(official.error);
+        return;
+      }
+      defaultCategory = "owned";
+      defaultMode = "all_messages";
+      payloadHashtags = [];
+      transcriptsEnabled = false;
+      rows.push([official.ref, "owned", "all_messages", nickname, notes, monitorFrom, ""]);
+    } else {
+      if (!channelLink.trim() && !nextHashtags.length) {
+        setFormError("Video link, keyword yoki kamida bitta hashtag kiriting.");
+        return;
+      }
+      if (channelLink.trim()) {
+        rows.push([channelLink, category, mode, nickname, notes, monitorFrom, nextHashtags.join(" ")]);
+      }
+      nextHashtags.forEach((tag) => {
+        rows.push([tag, "hashtag", "brand_matches_only", nickname, notes, monitorFrom, tag]);
+      });
+    }
+
     const rawText = rows
       .map((row) => row.map((value) => `"${String(value || "").replaceAll('"', '""')}"`).join(","))
       .join("\n");
-    await onImport({
-      brand_id: selectedBrandId || null,
-      raw_text: rawText,
-      default_source_category: category,
-      default_monitoring_mode: mode,
-      default_monitor_from: monitorFrom,
-      default_hashtags: nextHashtags,
-      collect_videos: collectVideos,
-      collect_comments: collectComments,
-      collect_transcripts: collectTranscripts,
-    });
-    setNickname("");
-    setChannelLink("");
-    setHashtagInput("");
-    setHashtags([]);
-    setNotes("");
+    try {
+      await onImport({
+        brand_id: selectedBrandId,
+        official_channel_only: sourceMode === "official",
+        raw_text: rawText,
+        default_source_category: defaultCategory,
+        default_monitoring_mode: defaultMode,
+        default_monitor_from: monitorFrom,
+        default_hashtags: payloadHashtags,
+        collect_videos: collectVideos,
+        collect_comments: collectComments,
+        collect_transcripts: transcriptsEnabled,
+      });
+      setNickname("");
+      setChannelLink("");
+      setOfficialChannelUrl("");
+      setOfficialHandle("");
+      setOfficialChannelId("");
+      setHashtagInput("");
+      setHashtags([]);
+      setNotes("");
+    } catch (err) {
+      setFormError(err.message || "YouTube source qo'shilmadi.");
+    }
   }
+
+  const hasOfficialRef = Boolean(officialChannelUrl.trim() || officialHandle.trim() || officialChannelId.trim());
+  const hasAdvancedRef = Boolean(channelLink.trim() || hashtags.length || hashtagInput.trim());
+  const submitDisabled = !selectedBrandId || (sourceMode === "official" ? !hasOfficialRef : !hasAdvancedRef);
 
   return (
     <form className="sourceForm" onSubmit={handleSubmit}>
@@ -688,6 +846,135 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
           <p>Kuzatiladigan kanal, video link va hashtaglar.</p>
         </div>
       </div>
+
+      <div className="periodTabs youtubeSourceModeTabs" role="tablist" aria-label="YouTube source turi">
+        <button
+          className={sourceMode === "official" ? "active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={sourceMode === "official"}
+          onClick={() => selectSourceMode("official")}
+        >
+          Rasmiy kanal
+        </button>
+        <button
+          className={sourceMode === "advanced" ? "active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={sourceMode === "advanced"}
+          onClick={() => selectSourceMode("advanced")}
+        >
+          Advanced watch
+        </button>
+      </div>
+
+      <div className="statusPanel youtubeConnectionStatus">
+        <div className="statusTitle">
+          <YouTubeIcon size={18} />
+          <strong>Ulash holati</strong>
+        </div>
+        <div className="statusGrid">
+          <span>Tanlangan brand</span>
+          <strong>{selectedBrand?.name || "Brand tanlanmagan"}</strong>
+          <span>YouTube API</span>
+          <strong>{youtubeStatus ? (apiReady ? "Tayyor" : "Sozlanmagan") : "Tekshirilmoqda"}</strong>
+          <span>Source turi</span>
+          <strong>{sourceMode === "official" ? "Owned · barcha ma'lumot" : "Advanced watch"}</strong>
+        </div>
+        {!selectedBrandId && <p className="statusWarning">Profile sahifasida brand tanlamasdan source qo'shib bo'lmaydi.</p>}
+        {youtubeStatus && !apiReady && (
+          <p className="statusWarning">Source draft sifatida saqlanadi, lekin API key sozlanmaguncha resolve va sync ishlamaydi.</p>
+        )}
+      </div>
+
+      {formError && <div className="errorBanner compact">{formError}</div>}
+
+      {sourceMode === "official" ? (
+        <div className="formGrid officialChannelFields">
+          <label className="field">
+            <span>Kanal URL</span>
+            <input
+              className="input"
+              value={officialChannelUrl}
+              onChange={(event) => updateOfficialField("url", event.target.value)}
+              placeholder="https://youtube.com/@brand"
+            />
+            <p className="fieldHint">Public /@handle, /channel/UC... yoki legacy /user/... link.</p>
+          </label>
+          <label className="field">
+            <span>@handle</span>
+            <input
+              className="input"
+              value={officialHandle}
+              onChange={(event) => updateOfficialField("handle", event.target.value)}
+              placeholder="@brand"
+            />
+            <p className="fieldHint">URL o'rniga kanalning rasmiy handle qiymati.</p>
+          </label>
+          <label className="field">
+            <span>Channel ID</span>
+            <input
+              className="input"
+              value={officialChannelId}
+              onChange={(event) => updateOfficialField("id", event.target.value)}
+              placeholder="UC..."
+            />
+            <p className="fieldHint">UC bilan boshlanadigan 24 belgili YouTube channel ID.</p>
+          </label>
+        </div>
+      ) : (
+        <>
+          <label className="field">
+            <span>Video link yoki keyword</span>
+            <input
+              className="input"
+              value={channelLink}
+              onChange={(event) => setChannelLink(event.target.value)}
+              placeholder="Video URL, video ID yoki qidiruv iborasi"
+            />
+            <p className="fieldHint">Video bitta kontentni, oddiy matn esa YouTube search oqimini kuzatadi.</p>
+          </label>
+
+          <label className="field full">
+            <span>Hashtaglar</span>
+            <div className="hashtagComposer">
+              <input
+                className="input"
+                value={hashtagInput}
+                onChange={(event) => setHashtagInput(event.target.value)}
+                onKeyDown={handleHashtagKeyDown}
+                onBlur={() => addHashtags()}
+              />
+              <button className="miniButton" type="button" onClick={() => addHashtags()}>
+                <Plus size={15} />
+                <span>Hashtag</span>
+              </button>
+            </div>
+            <HashtagBadges tags={hashtags} onRemove={(tag) => setHashtags((current) => current.filter((item) => item !== tag))} />
+            <p className="fieldHint">Har bir hashtag alohida search source yaratadi va API quota sarflaydi.</p>
+          </label>
+
+          <div className="formGrid">
+            <label className="field">
+              <span>Papka</span>
+              <select className="input select" value={category} onChange={(event) => handleCategory(event.target.value)}>
+                {categories.map((item) => (
+                  <option key={item.key} value={item.key}>{item.label}</option>
+                ))}
+              </select>
+              <p className="fieldHint">Source dashboardda qaysi YouTube papkasida turishini belgilaydi.</p>
+            </label>
+            <label className="field">
+              <span>Qamrov</span>
+              <select className="input select" value={mode} onChange={(event) => setMode(event.target.value)}>
+                <option value="brand_matches_only">{monitoringModeLabel("brand_matches_only")}</option>
+                <option value="all_messages">{monitoringModeLabel("all_messages")}</option>
+              </select>
+              <p className="fieldHint">Faqat brand moslari yoki source topgan barcha ma'lumot.</p>
+            </label>
+          </div>
+        </>
+      )}
 
       <label className="field">
         <span>Nickname</span>
@@ -700,58 +987,10 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
       </label>
 
       <label className="field">
-        <span>Kanal yoki video link</span>
-        <input
-          className="input"
-          value={channelLink}
-          onChange={(event) => setChannelLink(event.target.value)}
-        />
-        <p className="fieldHint">Kanal handle/linki, video linki yoki YouTube ID kiriting. Kanal bo'lsa videolar uploads playlist orqali olinadi.</p>
+        <span>Kuzatuv sanasi</span>
+        <input className="input" type="date" value={monitorFrom} onChange={(event) => setMonitorFrom(event.target.value)} required />
+        <p className="fieldHint">Sync shu sanadan keyingi video va commentlarni import qiladi.</p>
       </label>
-
-      <label className="field full">
-        <span>Hashtaglar</span>
-        <div className="hashtagComposer">
-          <input
-            className="input"
-            value={hashtagInput}
-            onChange={(event) => setHashtagInput(event.target.value)}
-            onKeyDown={handleHashtagKeyDown}
-            onBlur={() => addHashtags()}
-          />
-          <button className="miniButton" type="button" onClick={() => addHashtags()}>
-            <Plus size={15} />
-            <span>Hashtag</span>
-          </button>
-        </div>
-        <HashtagBadges tags={hashtags} onRemove={(tag) => setHashtags((current) => current.filter((item) => item !== tag))} />
-        <p className="fieldHint">Har bir hashtag alohida watch source bo'ladi va kanal source ichida ham saqlanadi.</p>
-      </label>
-
-      <div className="formGrid">
-        <label className="field">
-          <span>Papka</span>
-          <select className="input select" value={category} onChange={(event) => handleCategory(event.target.value)}>
-            {categories.map((item) => (
-              <option key={item.key} value={item.key}>{item.label}</option>
-            ))}
-          </select>
-          <p className="fieldHint">Source dashboardda qaysi YouTube papkasida turishini belgilaydi.</p>
-        </label>
-        <label className="field">
-          <span>Qamrov</span>
-          <select className="input select" value={mode} onChange={(event) => setMode(event.target.value)}>
-            <option value="brand_matches_only">{monitoringModeLabel("brand_matches_only")}</option>
-            <option value="all_messages">{monitoringModeLabel("all_messages")}</option>
-          </select>
-          <p className="fieldHint">Faqat hashtag/brand moslari yoki kanalning barcha video/commentlari olinadi.</p>
-        </label>
-        <label className="field">
-          <span>Kuzatuv sanasi</span>
-          <input className="input" type="date" value={monitorFrom} onChange={(event) => setMonitorFrom(event.target.value)} required />
-          <p className="fieldHint">Sync shu sanadan keyingi video va commentlarni import qiladi.</p>
-        </label>
-      </div>
 
       <label className="field full">
         <span>Izoh</span>
@@ -773,15 +1012,22 @@ function YoutubeSourceForm({ categories, selectedBrandId, initialCategory, onImp
           <input type="checkbox" checked={collectComments} onChange={(event) => setCollectComments(event.target.checked)} />
           <span>Commentlar</span>
         </label>
-        <label>
-          <input type="checkbox" checked={collectTranscripts} onChange={(event) => setCollectTranscripts(event.target.checked)} />
-          <span>Transcript</span>
-        </label>
+        {sourceMode === "advanced" && (
+          <label title={youtubeStatus?.transcripts_supported ? "Transcript yig'ish" : "Transcript pipeline hali ishlamaydi"}>
+            <input
+              type="checkbox"
+              checked={collectTranscripts}
+              disabled={!youtubeStatus?.transcripts_supported}
+              onChange={(event) => setCollectTranscripts(event.target.checked)}
+            />
+            <span>Transcript {youtubeStatus?.transcripts_supported ? "" : "(hali mavjud emas)"}</span>
+          </label>
+        )}
       </div>
 
-      <button className="button primary fullButton" type="submit">
+      <button className="button primary fullButton" type="submit" disabled={submitDisabled}>
         <Plus size={17} />
-        <span>Qo'shish</span>
+        <span>{sourceMode === "official" ? "Rasmiy kanalni ulash" : "Watch source qo'shish"}</span>
       </button>
 
       {sourceResult?.sync && (

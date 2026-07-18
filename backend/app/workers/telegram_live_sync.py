@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import time
+import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import or_
@@ -33,7 +33,7 @@ failed_refs: dict[str, float] = {}
 
 @dataclass(frozen=True)
 class SourceSyncSpec:
-    source_id: str
+    source_id: uuid.UUID
     ref: str | int
     title: str
     last_seen_message_id: int | None
@@ -47,7 +47,6 @@ async def main() -> None:
 
     init_db()
     session_name = settings.telegram_live_sync_session_name or settings.telegram_session_name
-    ensure_session_copy(settings.telegram_session_name, session_name)
 
     client = TelegramClient(
         session_name,
@@ -60,7 +59,10 @@ async def main() -> None:
     await client.connect()
     try:
         if not await client.is_user_authorized():
-            raise RuntimeError("Telethon session is not authorized. Run backend/scripts/telegram_login.py first.")
+            raise RuntimeError(
+                f"Telethon live-sync session is not authorized. Run scripts/telegram_login.py {session_name} first; "
+                "never copy a .session file between workers or machines."
+            )
 
         register_event_handlers(client)
         logger.info("Telethon live sync started interval=%ss", settings.telegram_live_sync_interval_seconds)
@@ -95,21 +97,38 @@ async def ingest_event_message(client: TelegramClient, event: events.NewMessage.
         return
 
     chat = await entity_to_chat_dict(entity)
-    with SessionLocal() as session:
-        source = active_source_for_chat(session, chat)
-        if not source:
-            return
-
     source_type = source_type_for_telethon_message(chat, message)
     payload = telethon_message_to_dict(message)
     with SessionLocal() as session:
-        mention = ingest_telethon_message(session, chat=chat, message=payload, source_type=source_type)
+        source_specs = [
+            (source.id, source.collect_comments)
+            for source in active_sources_for_chat(session, chat)
+        ]
+    for source_id, collect_comments in source_specs:
+        with SessionLocal() as session:
+            source = session.get(TelegramSource, source_id)
+            if source is None or not source.active:
+                continue
+            ingest_telethon_message(
+                session,
+                chat=chat,
+                message=payload,
+                source_type=source_type,
+                source_override=source,
+            )
+        set_telethon_access_status(source_id, "ready")
 
-    if mention and source_type == "channel_post":
-        settings = get_settings()
-        comments_per_post = settings.telegram_live_sync_comments_per_post if source.collect_comments else 0
-        if comments_per_post:
-            await backfill_comments(client, entity, chat, message, comments_per_post)
+        if source_type == "channel_post" and collect_comments:
+            comments_per_post = get_settings().telegram_live_sync_comments_per_post
+            if comments_per_post:
+                await backfill_comments(
+                    client,
+                    entity,
+                    chat,
+                    message,
+                    comments_per_post,
+                    parent_source_id=source_id,
+                )
 
 
 async def catchup_loop(client: TelegramClient) -> None:
@@ -126,7 +145,7 @@ async def sync_once(client: TelegramClient) -> None:
         return
 
     for spec in specs:
-        failed_until = failed_refs.get(str(spec.ref), 0)
+        failed_until = failed_refs.get(str(spec.source_id), 0)
         if failed_until > time.monotonic():
             continue
 
@@ -139,6 +158,7 @@ async def sync_once(client: TelegramClient) -> None:
                 min_message_id=spec.last_seen_message_id,
                 limit=limit,
                 comments_per_post=comments_per_post,
+                source_id=spec.source_id,
             )
             if counts.get("posts_seen") or counts.get("comments_seen"):
                 logger.info(
@@ -147,15 +167,33 @@ async def sync_once(client: TelegramClient) -> None:
                     counts.get("posts_seen", 0),
                     counts.get("comments_seen", 0),
                 )
-            failed_refs.pop(str(spec.ref), None)
+            set_telethon_access_status(spec.source_id, "ready")
+            failed_refs.pop(str(spec.source_id), None)
         except (ValueError, RPCError, ConnectionError, OSError, asyncio.TimeoutError) as exc:
-            failed_refs[str(spec.ref)] = time.monotonic() + FAILED_REF_BACKOFF_SECONDS
+            failed_refs[str(spec.source_id)] = time.monotonic() + FAILED_REF_BACKOFF_SECONDS
+            if isinstance(exc, (ValueError, RPCError)):
+                set_telethon_access_status(spec.source_id, "denied")
             logger.warning("Telethon source unavailable for %s ref=%s: %s", spec.title, spec.ref, exc)
         except Exception:
             logger.exception("Telethon live sync failed for source=%s ref=%s", spec.title, spec.ref)
 
 
 def active_source_for_chat(session: Any, chat: dict[str, Any]) -> TelegramSource | None:
+    sources = active_sources_for_chat(session, chat)
+    return sources[0] if sources else None
+
+
+def set_telethon_access_status(source_id: uuid.UUID, status: str) -> None:
+    with SessionLocal() as session:
+        source = session.get(TelegramSource, source_id)
+        if source is None or not source.connector_managed:
+            return
+        source.telethon_access_status = status
+        source.access_checked_at = datetime.now(timezone.utc)
+        session.commit()
+
+
+def active_sources_for_chat(session: Any, chat: dict[str, Any]) -> list[TelegramSource]:
     chat_id = chat.get("id")
     username = chat.get("username")
     filters = []
@@ -165,12 +203,13 @@ def active_source_for_chat(session: Any, chat: dict[str, Any]) -> TelegramSource
         filters.append(TelegramSource.username == username)
     if not filters:
         return None
-    return (
+    return list(
         session.query(TelegramSource)
         .filter(TelegramSource.active.is_(True))
+        .filter(TelegramSource.source_role != "bot_inbox")
         .filter(or_(*filters))
         .order_by(TelegramSource.created_at.asc())
-        .first()
+        .all()
     )
 
 
@@ -179,7 +218,7 @@ def load_source_specs() -> list[SourceSyncSpec]:
         sources = (
             session.query(TelegramSource)
             .filter(TelegramSource.active.is_(True))
-            .filter(TelegramSource.collect_posts.is_(True))
+            .filter(or_(TelegramSource.collect_posts.is_(True), TelegramSource.collect_comments.is_(True)))
             .filter(TelegramSource.source_category != "bot")
             .filter(TelegramSource.source_kind != "private")
             .order_by(TelegramSource.created_at.asc())
@@ -192,7 +231,7 @@ def load_source_specs() -> list[SourceSyncSpec]:
                 continue
             specs.append(
                 SourceSyncSpec(
-                    source_id=str(source.id),
+                    source_id=source.id,
                     ref=ref,
                     title=source.title or source.username or str(source.chat_id),
                     last_seen_message_id=source.last_seen_message_id,
@@ -200,27 +239,6 @@ def load_source_specs() -> list[SourceSyncSpec]:
                 )
             )
         return specs
-
-
-def ensure_session_copy(source_name: str, target_name: str) -> None:
-    if source_name == target_name:
-        return
-
-    source_file = session_file(source_name)
-    target_file = session_file(target_name)
-    if target_file.exists() or not source_file.exists():
-        return
-
-    target_file.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_file, target_file)
-    logger.info("Created live sync Telethon session copy at %s", target_file)
-
-
-def session_file(session_name: str) -> Path:
-    path = Path(session_name)
-    if path.suffix == ".session":
-        return path
-    return path.with_suffix(".session")
 
 
 async def run_forever() -> None:

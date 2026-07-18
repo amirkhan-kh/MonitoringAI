@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -43,18 +43,84 @@ class Brand(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     telegram_sources: Mapped[list["TelegramSource"]] = relationship(back_populates="brand")
+    telegram_bot_connection: Mapped["TelegramBotConnection | None"] = relationship(
+        back_populates="brand",
+        uselist=False,
+    )
+
+
+class TelegramBotConnection(Base):
+    __tablename__ = "telegram_bot_connections"
+    __table_args__ = (
+        UniqueConstraint("brand_id", name="uq_telegram_bot_connections_brand_id"),
+        UniqueConstraint("token_fingerprint", name="uq_telegram_bot_connections_token_fingerprint"),
+        UniqueConstraint("bot_id", name="uq_telegram_bot_connections_bot_id"),
+        Index("ix_telegram_bot_connections_mode_status", "mode", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    brand_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("brands.id"), nullable=False)
+    token_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    bot_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    bot_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bot_link: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    mode: Mapped[str] = mapped_column(String(32), default="reference")
+    status: Mapped[str] = mapped_column(String(32), default="reference")
+    status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_update_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    retry_after_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    brand: Mapped[Brand] = relationship(back_populates="telegram_bot_connection")
+    sources: Mapped[list["TelegramSource"]] = relationship(back_populates="bot_connection")
 
 
 class TelegramSource(Base):
     __tablename__ = "telegram_sources"
     __table_args__ = (
-        UniqueConstraint("chat_id", name="uq_telegram_sources_chat_id"),
-        UniqueConstraint("username", name="uq_telegram_sources_username"),
+        Index(
+            "uq_telegram_sources_brand_chat_id",
+            "brand_id",
+            "chat_id",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+            postgresql_where=text("chat_id IS NOT NULL"),
+            sqlite_where=text("chat_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_telegram_sources_brand_username",
+            "brand_id",
+            "username",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+            postgresql_where=text("username IS NOT NULL"),
+            sqlite_where=text("username IS NOT NULL"),
+        ),
         Index("ix_telegram_sources_brand", "brand_id"),
+        Index("ix_telegram_sources_bot_connection", "bot_connection_id"),
+        Index("ix_telegram_sources_parent", "parent_source_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     brand_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("brands.id"), nullable=True)
+    bot_connection_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("telegram_bot_connections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    parent_source_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("telegram_sources.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_role: Mapped[str] = mapped_column(String(32), default="legacy")
+    connector_managed: Mapped[bool] = mapped_column(Boolean, default=False)
+    bot_access_status: Mapped[str] = mapped_column(String(32), default="unverified")
+    telethon_access_status: Mapped[str] = mapped_column(String(32), default="unverified")
+    access_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source_kind: Mapped[str] = mapped_column(String(32), default="channel")
     source_category: Mapped[str] = mapped_column(String(64), default="unknown")
     monitoring_mode: Mapped[str] = mapped_column(String(64), default="all_messages")
@@ -75,12 +141,18 @@ class TelegramSource(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     brand: Mapped[Brand | None] = relationship(back_populates="telegram_sources")
+    bot_connection: Mapped[TelegramBotConnection | None] = relationship(back_populates="sources")
 
 
 class YouTubeSource(Base):
     __tablename__ = "youtube_sources"
     __table_args__ = (
-        UniqueConstraint("source_ref", name="uq_youtube_sources_source_ref"),
+        UniqueConstraint(
+            "brand_id",
+            "source_ref",
+            name="uq_youtube_sources_brand_source_ref",
+            postgresql_nulls_not_distinct=True,
+        ),
         Index("ix_youtube_sources_brand_category", "brand_id", "source_category"),
     )
 
@@ -115,7 +187,12 @@ class YouTubeSource(Base):
 class YouTubeMention(Base):
     __tablename__ = "youtube_mentions"
     __table_args__ = (
-        UniqueConstraint("external_id", name="uq_youtube_mentions_external_id"),
+        UniqueConstraint(
+            "brand_id",
+            "external_id",
+            name="uq_youtube_mentions_brand_external_id",
+            postgresql_nulls_not_distinct=True,
+        ),
         Index("ix_youtube_mentions_brand_date", "brand_id", "published_at"),
         Index("ix_youtube_mentions_source_date", "source_id", "published_at"),
         Index("ix_youtube_mentions_created", "created_at"),
@@ -170,7 +247,15 @@ class YouTubeAnalysis(Base):
 class Mention(Base):
     __tablename__ = "mentions"
     __table_args__ = (
-        UniqueConstraint("platform", "chat_id", "message_id", name="uq_mentions_platform_chat_message"),
+        UniqueConstraint(
+            "brand_id",
+            "source_id",
+            "platform",
+            "chat_id",
+            "message_id",
+            name="uq_mentions_brand_source_chat_message",
+            postgresql_nulls_not_distinct=True,
+        ),
         Index("ix_mentions_brand_date", "brand_id", "message_date"),
         Index("ix_mentions_platform_date", "platform", "message_date"),
         Index("ix_mentions_created", "created_at"),

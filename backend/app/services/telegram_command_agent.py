@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from app.config import get_settings
 from app.models import Brand, TelegramSource
 from app.services.realtime import publish_realtime_event
 from app.services.telegram_api import TelegramBotApi
+from app.services.telegram_ingestion import ensure_telegram_source_owner
 from app.workers.telegram_backfill import backfill_source
 
 
@@ -36,6 +38,7 @@ VALID_CATEGORIES = set(CATEGORY_DEFAULT_MODES)
 VALID_MODES = {"all_messages", "brand_matches_only"}
 LOCAL_TZ = timezone(timedelta(hours=5))
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -78,6 +81,13 @@ def handle_command_update(api: TelegramBotApi, session: Session, update: dict[st
             api.send_message(chat_id, "Agent komandalarini botga private chatda yuboring.")
             return True
         return False
+
+    sender_id = (message.get("from") or {}).get("id")
+    allowed_user_ids = set(get_settings().telegram_command_allowed_user_ids)
+    if sender_id not in allowed_user_ids:
+        logger.warning("Rejected Telegram agent command name=%s sender_id=%s", command.name, sender_id)
+        api.send_message(chat_id, "Bu agent komandalarini ishlatishga ruxsatingiz yo'q.")
+        return True
 
     try:
         response = execute_command(api, session, command)
@@ -377,12 +387,22 @@ def upsert_telegram_source_from_chat(
     collect_comments: bool,
     monitor_from: datetime | None = None,
 ) -> TelegramSource:
-    source = session.query(TelegramSource).filter(TelegramSource.chat_id == chat_info["id"]).one_or_none()
+    source = (
+        session.query(TelegramSource)
+        .filter(TelegramSource.brand_id == brand_id, TelegramSource.chat_id == chat_info["id"])
+        .one_or_none()
+    )
     if not source and chat_info.get("username"):
-        source = session.query(TelegramSource).filter(TelegramSource.username == chat_info["username"]).one_or_none()
+        source = (
+            session.query(TelegramSource)
+            .filter(TelegramSource.brand_id == brand_id, TelegramSource.username == chat_info["username"])
+            .one_or_none()
+        )
     if not source:
         source = TelegramSource(chat_id=chat_info["id"])
         session.add(source)
+    else:
+        ensure_telegram_source_owner(source, brand_id)
 
     source.brand_id = brand_id
     source.source_kind = chat_info.get("type") or "unknown"
@@ -469,10 +489,12 @@ def upsert_catalog_source(
 ) -> TelegramSource:
     chat_id = normalize_chat_ref(ref)
     username = username_from_ref(ref)
-    source = find_source(session, ref)
+    source = find_source(session, ref, brand_id=brand_id)
     if source is None:
         source = TelegramSource(chat_id=chat_id if isinstance(chat_id, int) else None, username=username)
         session.add(source)
+    else:
+        ensure_telegram_source_owner(source, brand_id)
 
     source.brand_id = brand_id
     source.source_kind = source.source_kind or "unknown"
@@ -587,7 +609,12 @@ def is_admin_status(status: str | None) -> bool:
     return status in {"creator", "administrator"}
 
 
-def find_source(session: Session, ref: int | str) -> TelegramSource | None:
+def find_source(
+    session: Session,
+    ref: int | str,
+    *,
+    brand_id: uuid.UUID | None,
+) -> TelegramSource | None:
     normalized = normalize_chat_ref(ref)
     username = username_from_ref(ref)
     filters = []
@@ -597,11 +624,15 @@ def find_source(session: Session, ref: int | str) -> TelegramSource | None:
         filters.append(TelegramSource.username == username)
     if not filters:
         return None
-    return session.query(TelegramSource).filter(or_(*filters)).one_or_none()
+    return (
+        session.query(TelegramSource)
+        .filter(TelegramSource.brand_id == brand_id, or_(*filters))
+        .one_or_none()
+    )
 
 
 def set_source_active(session: Session, ref: str, *, active: bool) -> str:
-    source = find_source(session, ref)
+    source = find_source(session, ref, brand_id=default_brand_id(session))
     if not source:
         return "Source topilmadi."
     source.active = active
@@ -662,7 +693,7 @@ def telethon_status_text(session_name: str, api_id: int | None, api_hash: str) -
 
 
 def backfill_ref(session: Session, ref: str, *, limit: int | None, comments_per_post: int, from_date: datetime | None = None) -> str:
-    source = find_source(session, ref)
+    source = find_source(session, ref, brand_id=default_brand_id(session))
     if not source:
         return "Source topilmadi. Avval /add bilan qo'shing."
     return backfill_source_text(source, limit=limit, comments_per_post=comments_per_post, from_date=from_date)
@@ -695,6 +726,7 @@ def backfill_source_text(
                 limit,
                 comments_per_post,
                 from_date=from_date or source.monitor_from or source.created_at,
+                source_id=source.id,
             )
         finally:
             await client.disconnect()

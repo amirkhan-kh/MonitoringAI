@@ -17,7 +17,13 @@ class Settings(BaseSettings):
     telegram_allowed_updates: list[str] = Field(
         default_factory=lambda: ["message", "edited_message", "channel_post", "edited_channel_post"]
     )
+    telegram_command_allowed_user_ids: list[int] = Field(default_factory=list)
     telegram_poll_timeout_seconds: int = 30
+    telegram_poll_conflict_backoff_seconds: int = 300
+    telegram_poll_lock_file: str = ".sessions/telegram_bot_polling.lock"
+    connector_encryption_key: str = ""
+    telegram_connector_poll_interval_seconds: int = Field(default=2, ge=1)
+    telegram_connector_error_backoff_seconds: int = Field(default=30, ge=5)
 
     telegram_api_id: int | None = None
     telegram_api_hash: str = ""
@@ -34,6 +40,7 @@ class Settings(BaseSettings):
     youtube_poll_interval_seconds: int = 120
     youtube_sync_max_pages: int = 1
     youtube_comments_per_video: int = 100
+    youtube_rate_limit_backoff_seconds: int = Field(default=3600, ge=60)
 
     # --- Instagram (Meta Graph API + webhooks) ---
     # A brand connects its Instagram Business/Creator account (linked to a Facebook
@@ -128,6 +135,21 @@ class Settings(BaseSettings):
                 return list(json.loads(stripped))
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return value
+
+    @field_validator("telegram_command_allowed_user_ids", mode="before")
+    @classmethod
+    def parse_telegram_command_allowed_user_ids(cls, value: Any) -> list[int]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, int):
+            return [value]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            parsed = json.loads(stripped) if stripped.startswith("[") else stripped.split(",")
+            return [int(item) for item in parsed if str(item).strip()]
+        return [int(item) for item in value]
 
 
 @lru_cache

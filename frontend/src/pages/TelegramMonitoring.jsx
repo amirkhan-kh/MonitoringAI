@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { X } from "lucide-react";
-import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
+import { Link2, X } from "lucide-react";
+import {
+  clearApiCache,
+  endpoints,
+  readSelectedBrandId,
+  resolveSelectedBrandId,
+  saveSelectedBrandId,
+} from "../api/client";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { RecentMentions } from "../components/RecentMentions";
 import { Sidebar } from "../components/Sidebar";
+import { SmartSelect } from "../components/SmartSelect";
 import { SourceBoard } from "../components/SourceBoard";
-import { SourceForm } from "../components/SourceForm";
 import { StatsBar } from "../components/StatsBar";
+import { TelegramConnectionForm } from "../components/TelegramConnectionForm";
 import { translateUiText } from "../i18n";
 
 export function TelegramMonitoring() {
@@ -18,23 +25,27 @@ export function TelegramMonitoring() {
   const [summary, setSummary] = useState(null);
   const [mentions, setMentions] = useState([]);
   const [selectedBrandId, setSelectedBrandId] = useState(() => readSelectedBrandId());
-  const [accessResult, setAccessResult] = useState(null);
-  const [sourceResult, setSourceResult] = useState(null);
+  const [connection, setConnection] = useState(null);
+  const [setupResult, setSetupResult] = useState(null);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("owned");
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [connectionLoading, setConnectionLoading] = useState(false);
+  const [setupSaving, setSetupSaving] = useState(false);
+  const [connectionDeleting, setConnectionDeleting] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const realtimeRefreshTimer = useRef(null);
   const selectedBrandIdRef = useRef("");
   const lastLoadedBrandId = useRef("");
+  const lastLoadedConnectionBrandId = useRef("");
 
   useEffect(() => {
     selectedBrandIdRef.current = selectedBrandId;
   }, [selectedBrandId]);
 
   const visibleSources = useMemo(() => {
-    if (!selectedBrandId) return sources;
+    if (!selectedBrandId) return [];
     return sources.filter((source) => source.brand_id === selectedBrandId);
   }, [sources, selectedBrandId]);
 
@@ -42,6 +53,12 @@ export function TelegramMonitoring() {
   const loadDashboard = useCallback(async (brandId) => {
     const activeBrandId = (brandId ?? selectedBrandIdRef.current) || "";
     lastLoadedBrandId.current = activeBrandId;
+    if (!activeBrandId) {
+      setSources([]);
+      setSummary(null);
+      setMentions([]);
+      return;
+    }
     const [sourceRows, summaryRow, mentionRows] = await Promise.all([
       endpoints.sources(),
       endpoints.dashboardSummary(activeBrandId),
@@ -50,6 +67,24 @@ export function TelegramMonitoring() {
     setSources(sourceRows);
     setSummary(summaryRow);
     setMentions(mentionRows);
+  }, []);
+
+  const loadConnection = useCallback(async (brandId) => {
+    const activeBrandId = (brandId ?? selectedBrandIdRef.current) || "";
+    if (!activeBrandId) {
+      lastLoadedConnectionBrandId.current = "";
+      setConnection(null);
+      return null;
+    }
+    setConnectionLoading(true);
+    try {
+      const row = await endpoints.telegramConnection(activeBrandId);
+      lastLoadedConnectionBrandId.current = activeBrandId;
+      setConnection(row);
+      return row;
+    } finally {
+      setConnectionLoading(false);
+    }
   }, []);
 
   const loadInitial = useCallback(async () => {
@@ -65,34 +100,39 @@ export function TelegramMonitoring() {
       setCategories(categoryRows);
       setBrands(brandRows);
       const defaultBrandId = resolveSelectedBrandId(brandRows, selectedBrandId);
+      selectedBrandIdRef.current = defaultBrandId;
       if (defaultBrandId && defaultBrandId !== selectedBrandId) {
         setSelectedBrandId(defaultBrandId);
       }
-      await loadDashboard(defaultBrandId);
+      await Promise.all([loadDashboard(defaultBrandId), loadConnection(defaultBrandId)]);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [loadDashboard, selectedBrandId]);
+  }, [loadConnection, loadDashboard, selectedBrandId]);
 
   useEffect(() => {
     loadInitial();
   }, []);
 
   useEffect(() => {
-    if (selectedBrandId === lastLoadedBrandId.current) return;
-    loadDashboard(selectedBrandId).catch((err) => setError(err.message));
-  }, [selectedBrandId, loadDashboard]);
+    if (loading) return;
+    const requests = [];
+    if (selectedBrandId !== lastLoadedBrandId.current) requests.push(loadDashboard(selectedBrandId));
+    if (selectedBrandId !== lastLoadedConnectionBrandId.current) requests.push(loadConnection(selectedBrandId));
+    if (!requests.length) return;
+    Promise.all(requests).catch((err) => setError(err.message));
+  }, [loading, selectedBrandId, loadConnection, loadDashboard]);
 
   // Open the realtime stream once for the page lifetime; brand filtering reads
-  // the latest value via a ref so the EventSource is never torn down/reopened.
+  // the latest value via a ref so the connection is never torn down/reopened.
   useEffect(() => {
-    const eventSource = new EventSource(endpoints.eventsUrl());
+    const eventSource = endpoints.eventsStream();
 
     function shouldRefresh(event) {
       const activeBrandId = selectedBrandIdRef.current;
-      if (!activeBrandId) return true;
+      if (!activeBrandId) return false;
       try {
         const payload = JSON.parse(event.data || "{}");
         return !payload.brand_id || payload.brand_id === activeBrandId;
@@ -138,43 +178,24 @@ export function TelegramMonitoring() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isAddModalOpen]);
 
-  async function handleAccessCheck(ref) {
-    if (!ref?.trim()) return;
-    const result = await endpoints.sourceAccessCheck(ref.trim());
-    setAccessResult(result);
-    setSourceResult({ type: "check", access: result });
-  }
-
-  async function handleImport(payload) {
-    const result = await endpoints.importSources(payload);
-    const importedSources = result.map((row) => row.source).filter((source) => source?.id);
-    let latestSourceResult = null;
-    for (const source of importedSources) {
-      let refresh = null;
-      let refreshError = "";
-      try {
-        refresh = await endpoints.refreshSource(source.id);
-      } catch (err) {
-        refreshError = err.message;
-      }
-
-      let backfill = null;
-      try {
-        backfill = await endpoints.backfillSource(source.id, { comments_per_post: 50 });
-      } catch (err) {
-        backfill = { ok: false, error: err.message, posts_seen: 0, comments_seen: 0 };
-      }
-
-      latestSourceResult = {
-        type: "import",
-        source: refresh?.source || source,
-        access: refresh?.access,
-        backfill,
-        error: refreshError,
-      };
+  async function handleAccessCheck(source) {
+    if (!source?.id) return;
+    setError("");
+    try {
+      const result = await endpoints.sourceAccessCheck(source.id);
+      const issues = Array.isArray(result.issues) ? result.issues : [];
+      const reason = issues.includes("brand_bot_token_not_configured")
+        ? "Bu source uchun brand bot tokeni yo'q; Telethon worker accessi hali tasdiqlanmagan."
+        : issues.includes("channel_admin_required")
+          ? "Kanal postlari uchun botni kanalga administrator qiling."
+          : issues.includes("group_access_or_privacy_required")
+            ? "Botni groupga qo'shing va BotFather orqali privacy mode'ni o'chiring."
+            : "Telegram manziliga monitoring accessi tasdiqlanmadi.";
+      setNotice(result.ok ? "Telegram monitoring accessi tasdiqlandi." : reason);
+      await loadConnection(selectedBrandId);
+    } catch (err) {
+      setError(err.message);
     }
-    if (latestSourceResult) setSourceResult(latestSourceResult);
-    await loadDashboard(selectedBrandId);
   }
 
   async function handleToggleSource(source) {
@@ -184,20 +205,93 @@ export function TelegramMonitoring() {
 
   async function handleRefreshSource(source) {
     const result = await endpoints.refreshSource(source.id);
-    setSourceResult({ type: "refresh", ...result });
+    setNotice(`${result.source?.title || source.title || "Telegram source"} refresh qilindi.`);
     await loadDashboard(selectedBrandId);
   }
 
   async function handleBackfillSource(source) {
-    let refresh = null;
     try {
-      refresh = await endpoints.refreshSource(source.id);
-    } catch (err) {
-      refresh = { error: err.message };
-    }
+      await endpoints.refreshSource(source.id);
+    } catch {}
     const result = await endpoints.backfillSource(source.id, { comments_per_post: 50 });
-    setSourceResult({ type: "backfill", source: refresh?.source || source, access: refresh?.access, backfill: result });
+    setNotice(result.ok === false
+      ? result.error || "Backfill yakunlanmadi."
+      : `${result.posts_seen || 0} ta post va ${result.comments_seen || 0} ta comment tekshirildi.`);
     await loadDashboard(selectedBrandId);
+  }
+
+  function handleBrandChange(brandId) {
+    const nextBrandId = saveSelectedBrandId(brandId);
+    selectedBrandIdRef.current = nextBrandId;
+    setSelectedBrandId(nextBrandId);
+    setConnection(null);
+    setSetupResult(null);
+    setError("");
+    setNotice("");
+  }
+
+  function handleOpenSetup() {
+    if (!selectedBrandId) {
+      setError("Telegram ulashdan oldin brandni tanlang.");
+      return;
+    }
+    setSetupResult(null);
+    setIsAddModalOpen(true);
+    if (selectedBrandId !== lastLoadedConnectionBrandId.current) {
+      loadConnection(selectedBrandId).catch((err) => setError(err.message));
+    }
+  }
+
+  async function handleSetup(payload) {
+    if (!selectedBrandId) {
+      const failure = { ok: false, message: "Telegram ulashdan oldin brandni tanlang." };
+      setSetupResult(failure);
+      return failure;
+    }
+    setSetupSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await endpoints.telegramSetup(selectedBrandId, payload);
+      setConnection(response);
+      lastLoadedConnectionBrandId.current = selectedBrandId;
+      setSetupResult({
+        ...response,
+        ok: true,
+        message: "Telegram bot, kanal va discussion sozlamalari saqlandi.",
+      });
+      clearApiCache(["/telegram/", "/dashboard/summary", "/mentions"]);
+      await loadDashboard(selectedBrandId);
+      setNotice("Telegram bot, kanal va discussion sozlamalari saqlandi.");
+      return response;
+    } catch (err) {
+      const failure = { ok: false, message: err.message };
+      setSetupResult(failure);
+      setError(err.message);
+      return failure;
+    } finally {
+      setSetupSaving(false);
+    }
+  }
+
+  async function handleDeleteConnection() {
+    if (!selectedBrandId || !window.confirm("Brandning Telegram bot connectioni uzilsinmi? Kanal va group source'lari o'chirilmaydi.")) return;
+    setConnectionDeleting(true);
+    setError("");
+    setNotice("");
+    try {
+      const deleted = await endpoints.telegramDeleteConnection(selectedBrandId);
+      const refreshed = await loadConnection(selectedBrandId);
+      const message = deleted.connection_deleted
+        ? "Telegram bot connection uzildi. Kanal va group source'lari saqlanib qoldi."
+        : "Bu brandda uziladigan Telegram bot connection topilmadi.";
+      setSetupResult({ ...refreshed, ok: true, message });
+      setNotice(message);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setConnectionDeleting(false);
+    }
   }
 
   async function handleDeleteSource(source) {
@@ -211,7 +305,7 @@ export function TelegramMonitoring() {
     try {
       const deleted = await endpoints.deleteSource(source.id);
       setNotice(`${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`);
-      await loadDashboard(selectedBrandId);
+      await Promise.all([loadDashboard(selectedBrandId), loadConnection(selectedBrandId)]);
     } catch (err) {
       setError(err.message || "Source o'chirishda xatolik yuz berdi.");
     }
@@ -230,6 +324,28 @@ export function TelegramMonitoring() {
         {error && <div className="errorBanner">{error}</div>}
         {notice && <div className="loadingBar success">{notice}</div>}
 
+        <section className="panel activeBrandToolbar">
+          <div>
+            <strong>Faol brand</strong>
+            <p>Telegram ma'lumotlari faqat shu tanlangan brand bo'yicha ko'rsatiladi va ulanadi.</p>
+          </div>
+          <SmartSelect
+            value={selectedBrandId}
+            options={brands.map((brand) => ({ value: brand.id, label: brand.name }))}
+            onChange={handleBrandChange}
+            emptyLabel="Brand mavjud emas"
+            ariaLabel="Telegram uchun faol brandni tanlash"
+          />
+          <a className="button secondary linkButton" href="/profile">
+            <Link2 size={16} />
+            <span>Brand sozlamalari</span>
+          </a>
+        </section>
+
+        {!loading && !selectedBrandId && (
+          <div className="errorBanner">Monitoringni ko'rish va Telegram ulash uchun avval brand yarating yoki tanlang.</div>
+        )}
+
         <StatsBar sources={visibleSources} summary={summary} loading={isInitialLoading} />
         <MonitoringInsights platform="telegram" sources={visibleSources} summary={summary} loading={isInitialLoading} />
 
@@ -239,7 +355,7 @@ export function TelegramMonitoring() {
             sources={visibleSources}
             selectedCategoryKey={selectedCategoryKey}
             onCategoryChange={setSelectedCategoryKey}
-            onOpenAdd={() => setIsAddModalOpen(true)}
+            onOpenAdd={handleOpenSetup}
             onToggleSource={handleToggleSource}
             onCheckSource={handleAccessCheck}
             onRefreshSource={handleRefreshSource}
@@ -262,23 +378,28 @@ export function TelegramMonitoring() {
             >
               <div className="modalHeader">
                 <div>
-                  <h2 id="add-source-title">Manzil qo'shish</h2>
-                  <p>Telegram kanal, group, bot yoki CSV/TXT ro'yxatini qo'shing.</p>
+                  <h2 id="add-source-title">Telegram ulanishini sozlash</h2>
+                  <p>Bot, rasmiy kanal va discussion groupni tanlangan brandga mustaqil ulang.</p>
                 </div>
                 <button className="iconButton" type="button" aria-label="Yopish" onClick={() => setIsAddModalOpen(false)}>
                   <X size={18} />
                 </button>
               </div>
               <div className="modalContent">
-                <SourceForm
-                  categories={categories}
-                  selectedBrandId={selectedBrandId}
-                  initialCategory={selectedCategoryKey}
-                  onAccessCheck={handleAccessCheck}
-                  onImport={handleImport}
-                  accessResult={accessResult}
-                  sourceResult={sourceResult}
-                />
+                {connectionLoading ? (
+                  <div className="loadingBar">Telegram ulanish holati yuklanmoqda...</div>
+                ) : (
+                  <TelegramConnectionForm
+                    selectedBrandId={selectedBrandId}
+                    selectedBrandName={brands.find((brand) => brand.id === selectedBrandId)?.name || ""}
+                    initialConnection={connection}
+                    result={setupResult}
+                    onSubmit={handleSetup}
+                    onDelete={handleDeleteConnection}
+                    saving={setupSaving}
+                    deleting={connectionDeleting}
+                  />
+                )}
               </div>
             </section>
           </div>

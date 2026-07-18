@@ -23,6 +23,7 @@ def main() -> None:
     logger.info("YouTube worker started interval=%ss", settings.youtube_poll_interval_seconds)
 
     while True:
+        cycle_sleep_seconds = settings.youtube_poll_interval_seconds
         try:
             if not settings.youtube_api_key:
                 logger.info("YOUTUBE_API_KEY is not configured; YouTube sync paused")
@@ -65,10 +66,20 @@ def main() -> None:
                         )
                     else:
                         logger.warning("YouTube source sync failed source=%s error=%s", source.source_ref, result.error)
+                        if result.rate_limited:
+                            cycle_sleep_seconds = max(
+                                settings.youtube_rate_limit_backoff_seconds,
+                                result.retry_after_seconds or 0,
+                            )
+                            logger.warning(
+                                "YouTube API rate limited; pausing all source syncs for %ss",
+                                cycle_sleep_seconds,
+                            )
+                            break
         except Exception:
             logger.exception("YouTube worker loop failed")
 
-        time.sleep(settings.youtube_poll_interval_seconds)
+        time.sleep(cycle_sleep_seconds)
 
 
 if __name__ == "__main__":

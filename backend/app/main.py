@@ -11,7 +11,6 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -39,6 +38,7 @@ from app.models import (
     InstagramMention,
     InstagramSource,
     Mention,
+    TelegramBotConnection,
     TelegramSource,
     YouTubeAnalysis,
     YouTubeMention,
@@ -78,6 +78,11 @@ from app.schemas import (
     MentionOut,
     SourceDeleteResult,
     TelegramBotStatus,
+    TelegramBotConnectionOut,
+    TelegramCapabilities,
+    TelegramConnectionDeleteResult,
+    TelegramSetupRequest,
+    TelegramSetupResponse,
     TelegramSourceBackfillRequest,
     TelegramSourceBackfillResult,
     TelegramSourceAccessCheck,
@@ -123,13 +128,25 @@ from app.services.instagram_ingestion import ingest_instagram_comment
 from app.services.instagram_sync import sync_instagram_source
 from app.services.matching import BrandMatch, collect_matched_terms, invalidate_brand_cache, match_brand, normalize_text
 from app.services.source_deletion import SourceNotFoundError, delete_monitored_source
-from app.services.telegram_api import TelegramBotApi
+from app.services.telegram_api import TelegramBotApi, TelegramBotApiError
+from app.services.telegram_connector import (
+    ConnectorEncryptionError,
+    InvalidBotLinkError,
+    bot_token_fingerprint,
+    canonical_bot_link,
+    decrypt_bot_token,
+    encrypt_bot_token,
+    normalize_bot_username,
+)
+from app.services.telegram_ingestion import ensure_telegram_source_owner
 from app.services.realtime import publish_realtime_event, realtime_event_stream
 from app.services.youtube_api import (
     YouTubeApi,
+    YouTubeApiError,
     comment_url,
     parse_rfc3339,
     parse_youtube_ref,
+    safe_youtube_error,
     video_url,
 )
 from app.workers.telegram_backfill import backfill_source
@@ -140,6 +157,7 @@ import logging
 
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telethon.network.mtprotosender").setLevel(logging.WARNING)
 
 SOURCE_CATEGORIES = [
@@ -360,11 +378,18 @@ async def lifespan(_: FastAPI):
     yield
 
 
-# Routes reachable without a token: health check, the login endpoint itself, the API
-# docs, and the Instagram webhook (Meta calls it unauthenticated — it has its own
-# signature/verify-token checks).
-AUTH_PUBLIC_PATHS = {"/health", "/auth/login", "/docs", "/redoc", "/openapi.json"}
-AUTH_PUBLIC_PREFIXES = ("/instagram/webhook",)
+# Routes reachable without a dashboard token. Meta calls both webhook endpoints
+# unauthenticated; GET uses the verify token and POST requires an app-secret
+# signature.
+AUTH_PUBLIC_PATHS = {
+    "/health",
+    "/auth/login",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/instagram/webhook",
+    "/facebook/webhook",
+}
 
 
 async def require_auth(request: Request) -> None:
@@ -372,15 +397,10 @@ async def require_auth(request: Request) -> None:
     if not settings.auth_enabled:
         return
     path = request.url.path
-    if request.method == "OPTIONS" or path in AUTH_PUBLIC_PATHS or path.startswith(AUTH_PUBLIC_PREFIXES):
+    if request.method == "OPTIONS" or path in AUTH_PUBLIC_PATHS:
         return
-    # EventSource (SSE) can't set an Authorization header, so /events takes the token
-    # as a query param instead.
-    if path == "/events":
-        token = request.query_params.get("access_token")
-    else:
-        header = request.headers.get("Authorization", "")
-        token = header[7:] if header.startswith("Bearer ") else None
+    header = request.headers.get("Authorization", "")
+    token = header[7:] if header.startswith("Bearer ") else None
     if verify_token(settings, token) is None:
         raise HTTPException(status_code=401, detail="Avtorizatsiya talab qilinadi. Qaytadan kiring.")
 
@@ -451,11 +471,16 @@ def normalize_chat_ref(value: int | str) -> int | str:
     ref = ref.removeprefix("t.me/")
     ref = ref.removeprefix("telegram.me/")
     ref = ref.split("?", 1)[0].strip("/")
+    if ref.startswith("+") or ref.lower().startswith("joinchat/"):
+        raise ValueError("Private Telegram invite link o'rniga chatning -100... numeric ID qiymatini kiriting")
     if "/" in ref:
         ref = ref.split("/", 1)[0]
     if re.fullmatch(r"-?\d+", ref):
         return int(ref)
-    return ref if ref.startswith("@") else f"@{ref}"
+    username = ref.lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+        raise ValueError("Telegram public username 5-32 ta harf, raqam yoki underscore'dan iborat bo'lishi kerak")
+    return f"@{username}"
 
 
 def username_from_ref(value: int | str) -> str | None:
@@ -479,12 +504,22 @@ def upsert_telegram_source_from_chat(
     collect_comments: bool,
     monitor_from: datetime | None = None,
 ) -> TelegramSource:
-    source = session.query(TelegramSource).filter(TelegramSource.chat_id == chat_info["id"]).one_or_none()
+    source = (
+        session.query(TelegramSource)
+        .filter(TelegramSource.brand_id == brand_id, TelegramSource.chat_id == chat_info["id"])
+        .one_or_none()
+    )
     if not source and chat_info.get("username"):
-        source = session.query(TelegramSource).filter(TelegramSource.username == chat_info["username"]).one_or_none()
+        source = (
+            session.query(TelegramSource)
+            .filter(TelegramSource.brand_id == brand_id, TelegramSource.username == chat_info["username"])
+            .one_or_none()
+        )
     if not source:
         source = TelegramSource(chat_id=chat_info["id"])
         session.add(source)
+    else:
+        ensure_telegram_source_owner(source, brand_id)
 
     source.brand_id = brand_id
     source.source_kind = chat_info.get("type") or "unknown"
@@ -573,12 +608,22 @@ def upsert_catalog_source(
     username = username_from_ref(ref)
     source = None
     if isinstance(chat_id, int):
-        source = session.query(TelegramSource).filter(TelegramSource.chat_id == chat_id).one_or_none()
+        source = (
+            session.query(TelegramSource)
+            .filter(TelegramSource.brand_id == brand_id, TelegramSource.chat_id == chat_id)
+            .one_or_none()
+        )
     if source is None and username:
-        source = session.query(TelegramSource).filter(TelegramSource.username == username).one_or_none()
+        source = (
+            session.query(TelegramSource)
+            .filter(TelegramSource.brand_id == brand_id, TelegramSource.username == username)
+            .one_or_none()
+        )
     if source is None:
         source = TelegramSource(chat_id=chat_id if isinstance(chat_id, int) else None, username=username)
         session.add(source)
+    else:
+        ensure_telegram_source_owner(source, brand_id)
 
     source.brand_id = brand_id
     source.source_kind = source.source_kind or "unknown"
@@ -590,6 +635,322 @@ def upsert_catalog_source(
     source.collect_comments = collect_comments
     source.monitor_from = monitor_from or source.monitor_from or datetime.now(timezone.utc)
     source.active = True
+    return source
+
+
+def telegram_connection_out(connection: TelegramBotConnection | None) -> TelegramBotConnectionOut | None:
+    if connection is None:
+        return None
+    return TelegramBotConnectionOut(
+        id=connection.id,
+        brand_id=connection.brand_id,
+        bot_id=connection.bot_id,
+        bot_username=connection.bot_username,
+        bot_link=connection.bot_link,
+        mode=connection.mode,
+        status=connection.status,
+        status_detail=connection.status_detail,
+        token_configured=bool(connection.token_ciphertext),
+        last_update_id=connection.last_update_id,
+        active=connection.active,
+        created_at=connection.created_at,
+        updated_at=connection.updated_at,
+    )
+
+
+def connector_brand_sources(session: Session, brand_id: uuid.UUID) -> list[TelegramSource]:
+    return (
+        session.query(TelegramSource)
+        .filter(
+            TelegramSource.brand_id == brand_id,
+            TelegramSource.connector_managed.is_(True),
+            TelegramSource.source_role.in_(("channel", "discussion", "bot_inbox")),
+        )
+        .order_by(TelegramSource.created_at.asc())
+        .all()
+    )
+
+
+def telegram_setup_response(
+    session: Session,
+    brand_id: uuid.UUID,
+    *,
+    warnings: list[str] | None = None,
+) -> TelegramSetupResponse:
+    connection = (
+        session.query(TelegramBotConnection)
+        .filter(TelegramBotConnection.brand_id == brand_id)
+        .one_or_none()
+    )
+    sources = connector_brand_sources(session, brand_id)
+    warning_list = list(warnings or [])
+    token_configured = bool(connection and connection.token_ciphertext)
+    inbox_ready = any(
+        source.source_role == "bot_inbox"
+        and source.active
+        and connection is not None
+        and source.bot_connection_id == connection.id
+        for source in sources
+    )
+    polling_active = bool(
+        connection
+        and connection.active
+        and connection.mode == "polling"
+        and token_configured
+        and connection.status == "active"
+        and inbox_ready
+    )
+    legacy_polling_active = bool(
+        connection
+        and connection.active
+        and connection.mode == "reference"
+        and connection.status == "legacy"
+    )
+    transport_active = polling_active or legacy_polling_active
+    active_sources = [source for source in sources if source.active]
+    active_chat_sources = [
+        source for source in active_sources if source.source_role in {"channel", "discussion"}
+    ]
+
+    def role_monitoring_ready(role: str) -> bool:
+        return any(
+            source.source_role == role
+            and (
+                (transport_active and source.bot_access_status == "ready")
+                or source.telethon_access_status == "ready"
+            )
+            for source in active_sources
+        )
+
+    if connection and not token_configured:
+        warning_list.append("bot_link_is_reference_only_without_token")
+    elif connection and connection.status == "legacy":
+        warning_list.append("global_bot_uses_legacy_worker")
+    elif connection and connection.status == "webhook_conflict":
+        warning_list.append("global_bot_webhook_blocks_legacy_polling")
+    elif connection and connection.mode == "reference":
+        warning_list.append("bot_polling_is_disabled_in_reference_mode")
+    if connection and connection.status in {"invalid", "conflict", "rate_limited", "encryption_error"}:
+        warning_list.append(f"bot_connection_{connection.status}")
+    if connection and connection.mode == "polling" and not inbox_ready:
+        warning_list.append("bot_inbox_missing_reconnect_required")
+    for source in sources:
+        if source.source_role in {"channel", "discussion"} and source.chat_id is None:
+            warning_list.append(f"{source.source_role}_is_cataloged_until_resolved")
+        if source.source_role in {"channel", "discussion"} and source.active:
+            if source.bot_access_status == "denied":
+                warning_list.append(f"{source.source_role}_bot_access_denied")
+            if source.telethon_access_status != "ready" and not (
+                transport_active and source.bot_access_status == "ready"
+            ):
+                warning_list.append(f"{source.source_role}_monitoring_not_verified")
+    if active_chat_sources and not any(
+        source.telethon_access_status == "ready" for source in active_chat_sources
+    ):
+        warning_list.append("telethon_access_is_unverified_until_worker_reads_chat")
+
+    return TelegramSetupResponse(
+        brand_id=brand_id,
+        connection=telegram_connection_out(connection),
+        sources=sources,
+        capabilities=TelegramCapabilities(
+            bot_reference=bool(connection and connection.bot_username),
+            bot_polling=polling_active,
+            channel_monitoring=role_monitoring_ready("channel"),
+            discussion_monitoring=role_monitoring_ready("discussion"),
+            history_backfill=any(
+                source.telethon_access_status == "ready" for source in active_chat_sources
+            ),
+        ),
+        warnings=sorted(set(warning_list)),
+    )
+
+
+def find_connector_source(
+    session: Session,
+    *,
+    brand_id: uuid.UUID,
+    chat_id: int | None,
+    username: str | None,
+    source_role: str,
+) -> TelegramSource | None:
+    if source_role == "bot_inbox":
+        return (
+            session.query(TelegramSource)
+            .filter(
+                TelegramSource.brand_id == brand_id,
+                TelegramSource.source_role == "bot_inbox",
+            )
+            .order_by(TelegramSource.created_at.asc())
+            .first()
+        )
+    filters = []
+    if chat_id is not None:
+        filters.append(TelegramSource.chat_id == chat_id)
+    if username:
+        filters.append(TelegramSource.username == username)
+    if not filters:
+        return None
+    return (
+        session.query(TelegramSource)
+        .filter(TelegramSource.brand_id == brand_id)
+        .filter(or_(*filters))
+        .order_by(TelegramSource.created_at.asc())
+        .first()
+    )
+
+
+def upsert_connector_source(
+    session: Session,
+    *,
+    brand_id: uuid.UUID,
+    connection: TelegramBotConnection | None,
+    source_ref: int | str,
+    source_role: str,
+    api: TelegramBotApi | None,
+    monitor_from: datetime,
+    collect_posts: bool,
+    collect_comments: bool,
+    warnings: list[str],
+) -> TelegramSource:
+    normalized_ref = normalize_chat_ref(source_ref)
+    catalog_username = username_from_ref(source_ref)
+    chat_info = None
+    access_status: TelegramSourceAccessStatus | None = None
+    if api is not None:
+        try:
+            access_status, chat_info = build_access_status(api, normalized_ref)
+        except TelegramBotApiError:
+            warnings.append(f"{source_role}_bot_has_no_access_cataloged_for_telethon")
+
+    chat_id = int(chat_info["id"]) if chat_info and chat_info.get("id") is not None else (
+        normalized_ref if isinstance(normalized_ref, int) else None
+    )
+    username = (chat_info or {}).get("username") or catalog_username
+    source = find_connector_source(
+        session,
+        brand_id=brand_id,
+        chat_id=chat_id,
+        username=username,
+        source_role=source_role,
+    )
+    if source is None:
+        source = TelegramSource(brand_id=brand_id)
+        session.add(source)
+
+    resolved_type = (chat_info or {}).get("type")
+    if source_role == "channel" and resolved_type in {"group", "supergroup"}:
+        warnings.append("channel_ref_resolved_as_group")
+
+    source.brand_id = brand_id
+    source.bot_connection_id = connection.id if connection else None
+    source.source_role = source_role
+    source.connector_managed = True
+    source.source_kind = resolved_type or source.source_kind or source_role
+    source.source_category = "owned"
+    source.monitoring_mode = "all_messages"
+    source.chat_id = chat_id
+    source.username = username
+    source.title = (chat_info or {}).get("title") or (chat_info or {}).get("first_name") or source.title
+    source.description = (chat_info or {}).get("description") or source.description
+    source.linked_discussion_chat_id = (chat_info or {}).get("linked_chat_id")
+    source.collect_posts = collect_posts if source_role != "discussion" else False
+    source.collect_comments = collect_comments
+    source.monitor_from = monitor_from
+    source.active = True
+    if access_status is None:
+        source.bot_access_status = "unverified"
+    else:
+        can_read = (
+            access_status.can_read_posts
+            if source_role == "channel"
+            else access_status.can_read_comments
+        )
+        source.bot_access_status = "ready" if can_read else "denied"
+        if not can_read:
+            warnings.append(f"{source_role}_bot_access_denied")
+    return source
+
+
+def refresh_connector_source_bot_access(
+    source: TelegramSource,
+    api: TelegramBotApi,
+    warnings: list[str],
+) -> None:
+    source_ref: int | str | None = source.chat_id or (f"@{source.username}" if source.username else None)
+    if source_ref is None:
+        source.bot_access_status = "unverified"
+        return
+    try:
+        access, _ = build_access_status(api, source_ref)
+    except TelegramBotApiError:
+        source.bot_access_status = "unverified"
+        warnings.append(f"{source.source_role}_bot_access_check_failed")
+        return
+    can_read = access.can_read_posts if source.source_role == "channel" else access.can_read_comments
+    source.bot_access_status = "ready" if can_read else "denied"
+    source.access_checked_at = datetime.now(timezone.utc)
+    if not can_read:
+        warnings.append(f"{source.source_role}_bot_access_denied")
+
+
+def retire_replaced_connector_sources(
+    session: Session,
+    *,
+    brand_id: uuid.UUID,
+    source_role: str,
+    keep_source_id: uuid.UUID,
+) -> None:
+    replaced = (
+        session.query(TelegramSource)
+        .filter(
+            TelegramSource.brand_id == brand_id,
+            TelegramSource.connector_managed.is_(True),
+            TelegramSource.source_role == source_role,
+            TelegramSource.id != keep_source_id,
+        )
+        .all()
+    )
+    for source in replaced:
+        source.active = False
+        source.connector_managed = False
+        source.bot_connection_id = None
+        source.parent_source_id = None
+
+
+def upsert_bot_inbox_source(
+    session: Session,
+    connection: TelegramBotConnection,
+    *,
+    monitor_from: datetime,
+    collect_posts: bool,
+    collect_comments: bool,
+) -> TelegramSource:
+    source = find_connector_source(
+        session,
+        brand_id=connection.brand_id,
+        chat_id=None,
+        username=connection.bot_username,
+        source_role="bot_inbox",
+    )
+    if source is None:
+        source = TelegramSource(brand_id=connection.brand_id)
+        session.add(source)
+    source.bot_connection_id = connection.id
+    source.parent_source_id = None
+    source.source_role = "bot_inbox"
+    source.connector_managed = True
+    source.bot_access_status = "ready" if connection.mode == "polling" else "unverified"
+    source.source_kind = "bot"
+    source.source_category = "bot"
+    source.monitoring_mode = "all_messages"
+    source.chat_id = None
+    source.username = connection.bot_username
+    source.title = f"@{connection.bot_username}" if connection.bot_username else "Telegram bot inbox"
+    source.collect_posts = collect_posts
+    source.collect_comments = collect_comments
+    source.monitor_from = monitor_from
+    source.active = bool(connection.active and connection.mode == "polling" and connection.token_ciphertext)
     return source
 
 
@@ -707,9 +1068,19 @@ def upsert_youtube_source(
     collect_transcripts: bool,
     monitor_from: datetime,
     api: YouTubeApi | None = None,
+    official_channel_only: bool = False,
 ) -> YouTubeSource:
     parsed = parse_youtube_ref(ref)
-    source = session.query(YouTubeSource).filter(YouTubeSource.source_ref == parsed.ref).one_or_none()
+    if official_channel_only and parsed.kind != "channel":
+        raise ValueError("Rasmiy YouTube profiliga faqat kanal linki, @handle yoki UC... kanal ID ulash mumkin")
+    source = (
+        session.query(YouTubeSource)
+        .filter(
+            YouTubeSource.brand_id == brand_id,
+            YouTubeSource.source_ref == parsed.ref,
+        )
+        .one_or_none()
+    )
     if source is None:
         source = YouTubeSource(source_ref=parsed.ref)
         session.add(source)
@@ -743,23 +1114,25 @@ def upsert_youtube_source(
 def enrich_youtube_source(source: YouTubeSource, api: YouTubeApi) -> None:
     if source.source_kind == "channel":
         item = api.channel_by_id(source.channel_id) if source.channel_id else api.channel_by_handle(source.channel_handle or source.source_ref)
-        if item:
-            snippet = item.get("snippet") or {}
-            content_details = item.get("contentDetails") or {}
-            related_playlists = content_details.get("relatedPlaylists") or {}
-            source.channel_id = item.get("id") or source.channel_id
-            source.channel_title = snippet.get("title") or source.channel_title
-            source.title = snippet.get("title") or source.title
-            source.description = snippet.get("description") or source.description
-            source.uploads_playlist_id = related_playlists.get("uploads") or source.uploads_playlist_id
+        if not item:
+            raise ValueError("YouTube kanal topilmadi. @handle yoki UC... kanal ID ni tekshiring")
+        snippet = item.get("snippet") or {}
+        content_details = item.get("contentDetails") or {}
+        related_playlists = content_details.get("relatedPlaylists") or {}
+        source.channel_id = item.get("id") or source.channel_id
+        source.channel_title = snippet.get("title") or source.channel_title
+        source.title = snippet.get("title") or source.title
+        source.description = snippet.get("description") or source.description
+        source.uploads_playlist_id = related_playlists.get("uploads") or source.uploads_playlist_id
     elif source.source_kind == "video" and source.video_id:
         item = api.video_by_id(source.video_id)
-        if item:
-            snippet = item.get("snippet") or {}
-            source.title = snippet.get("title") or source.title
-            source.description = snippet.get("description") or source.description
-            source.channel_id = snippet.get("channelId") or source.channel_id
-            source.channel_title = snippet.get("channelTitle") or source.channel_title
+        if not item:
+            raise ValueError("YouTube video topilmadi. Video ID yoki linkni tekshiring")
+        snippet = item.get("snippet") or {}
+        source.title = snippet.get("title") or source.title
+        source.description = snippet.get("description") or source.description
+        source.channel_id = snippet.get("channelId") or source.channel_id
+        source.channel_title = snippet.get("channelTitle") or source.channel_title
 
 
 def match_brand_for_youtube_source(session: Session, source: YouTubeSource, normalized_text: str) -> BrandMatch:
@@ -821,13 +1194,25 @@ def ingest_youtube_video(session: Session, source: YouTubeSource, item: dict) ->
         return None
 
     external_id = f"youtube:video:{video_id}"
-    mention = session.query(YouTubeMention).filter(YouTubeMention.external_id == external_id).one_or_none()
+    mention_brand_id = brand_match.brand.id if brand_match.brand else source.brand_id
+    mention = (
+        session.query(YouTubeMention)
+        .filter(
+            YouTubeMention.brand_id == mention_brand_id,
+            YouTubeMention.external_id == external_id,
+        )
+        .one_or_none()
+    )
     if mention is None:
-        mention = YouTubeMention(external_id=external_id, item_type="video")
+        mention = YouTubeMention(
+            brand_id=mention_brand_id,
+            external_id=external_id,
+            item_type="video",
+        )
         session.add(mention)
 
     mention.source_id = source.id
-    mention.brand_id = brand_match.brand.id if brand_match.brand else source.brand_id
+    mention.brand_id = mention_brand_id
     mention.video_id = video_id
     mention.channel_id = snippet.get("channelId") or source.channel_id
     mention.channel_title = snippet.get("channelTitle") or source.channel_title
@@ -863,14 +1248,26 @@ def ingest_youtube_comment(
         return None
 
     external_id = f"youtube:comment:{comment_id}"
-    mention = session.query(YouTubeMention).filter(YouTubeMention.external_id == external_id).one_or_none()
+    mention_brand_id = brand_match.brand.id if brand_match.brand else source.brand_id
+    mention = (
+        session.query(YouTubeMention)
+        .filter(
+            YouTubeMention.brand_id == mention_brand_id,
+            YouTubeMention.external_id == external_id,
+        )
+        .one_or_none()
+    )
     if mention is None:
-        mention = YouTubeMention(external_id=external_id, item_type=item_type)
+        mention = YouTubeMention(
+            brand_id=mention_brand_id,
+            external_id=external_id,
+            item_type=item_type,
+        )
         session.add(mention)
 
     author_channel = snippet.get("authorChannelId") or {}
     mention.source_id = source.id
-    mention.brand_id = brand_match.brand.id if brand_match.brand else source.brand_id
+    mention.brand_id = mention_brand_id
     mention.item_type = item_type
     mention.video_id = video_id
     mention.channel_id = source.channel_id
@@ -1024,9 +1421,22 @@ def sync_youtube_source(session: Session, source: YouTubeSource, api: YouTubeApi
             comments_seen=comments_seen,
             imported=imported + comments_seen,
         )
+    except YouTubeApiError as exc:
+        session.rollback()
+        return YouTubeSourceSyncResult(
+            source_id=source.id,
+            ok=False,
+            error=str(exc),
+            rate_limited=exc.rate_limited,
+            retry_after_seconds=exc.retry_after_seconds,
+        )
     except Exception as exc:
         session.rollback()
-        return YouTubeSourceSyncResult(source_id=source.id, ok=False, error=str(exc))
+        return YouTubeSourceSyncResult(
+            source_id=source.id,
+            ok=False,
+            error=safe_youtube_error(exc, api_key=api.api_key),
+        )
 
 
 def fetch_youtube_video_items(
@@ -1122,8 +1532,8 @@ def fetch_and_ingest_video_comments(
     for _ in range(max_pages):
         try:
             payload = api.video_comments(video_id, page_token=page_token, max_results=max_results)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in {403, 404}:
+        except YouTubeApiError as exc:
+            if exc.status_code in {403, 404} and not exc.rate_limited:
                 break
             raise
         for item in payload.get("items") or []:
@@ -1150,8 +1560,8 @@ def fetch_and_ingest_channel_comments(
     for _ in range(max_pages):
         try:
             payload = api.channel_comments(source.channel_id, page_token=page_token, max_results=max_results)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in {403, 404}:
+        except YouTubeApiError as exc:
+            if exc.status_code in {403, 404} and not exc.rate_limited:
                 break
             raise
         for item in payload.get("items") or []:
@@ -1239,7 +1649,13 @@ def build_access_status(api: TelegramBotApi, chat_id_or_username: int | str) -> 
     can_read_comments = False
     if chat_type == "channel":
         can_read_posts = is_admin_status(bot_status)
-        can_read_comments = bool(linked_chat_id and is_member_status(linked_status) and bot.get("can_read_all_group_messages"))
+        can_read_comments = bool(
+            linked_chat_id
+            and (
+                is_admin_status(linked_status)
+                or (is_member_status(linked_status) and bot.get("can_read_all_group_messages"))
+            )
+        )
         if not can_read_posts:
             issues.append("channel_admin_required")
         if not linked_chat_id:
@@ -1247,7 +1663,9 @@ def build_access_status(api: TelegramBotApi, chat_id_or_username: int | str) -> 
         elif not can_read_comments:
             issues.append("discussion_group_access_required")
     elif chat_type in {"group", "supergroup"}:
-        can_read_posts = is_member_status(bot_status) and bool(bot.get("can_read_all_group_messages"))
+        can_read_posts = is_admin_status(bot_status) or (
+            is_member_status(bot_status) and bool(bot.get("can_read_all_group_messages"))
+        )
         can_read_comments = can_read_posts
         if not can_read_posts:
             issues.append("group_access_or_privacy_required")
@@ -1332,6 +1750,311 @@ async def realtime_events(request: Request) -> StreamingResponse:
     )
 
 
+@app.post("/brands/{brand_id}/telegram/setup", response_model=TelegramSetupResponse)
+def setup_brand_telegram(
+    brand_id: uuid.UUID,
+    payload: TelegramSetupRequest,
+    session: DbSession,
+) -> TelegramSetupResponse:
+    brand = session.get(Brand, brand_id)
+    if brand is None:
+        raise HTTPException(status_code=404, detail="Brand not found")
+
+    settings = get_settings()
+    warnings: list[str] = []
+    connection = (
+        session.query(TelegramBotConnection)
+        .filter(TelegramBotConnection.brand_id == brand_id)
+        .one_or_none()
+    )
+    requested_username = None
+    if payload.bot_link:
+        try:
+            requested_username = normalize_bot_username(payload.bot_link)
+        except InvalidBotLinkError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    supplied_token = payload.bot_token.get_secret_value().strip() if payload.bot_token else ""
+    token_for_api: str | None = None
+    encrypted_token: str | None = None
+    fingerprint: str | None = None
+    bot_info: dict[str, Any] | None = None
+    webhook_info: dict[str, Any] | None = None
+    bot_configuration_requested = bool(
+        supplied_token
+        or payload.bot_link
+        or "bot_mode" in payload.model_fields_set
+    )
+
+    if supplied_token:
+        try:
+            encrypted_token = encrypt_bot_token(supplied_token)
+            fingerprint = bot_token_fingerprint(supplied_token)
+        except ConnectorEncryptionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        token_for_api = supplied_token
+    elif connection and connection.token_ciphertext:
+        try:
+            token_for_api = decrypt_bot_token(connection.token_ciphertext)
+            fingerprint = connection.token_fingerprint
+        except ConnectorEncryptionError as exc:
+            if bot_configuration_requested:
+                raise HTTPException(status_code=503, detail=str(exc)) from None
+            warnings.append("stored_bot_token_cannot_be_decrypted_sources_cataloged")
+
+    if payload.bot_mode == "polling" and not token_for_api:
+        raise HTTPException(status_code=422, detail="Polling mode uchun bot_token kerak")
+    uses_global_bot = bool(
+        token_for_api
+        and settings.telegram_bot_token
+        and token_for_api == settings.telegram_bot_token
+    )
+    if payload.bot_mode == "polling" and uses_global_bot:
+        raise HTTPException(
+            status_code=409,
+            detail="Bu bot token legacy Telegram worker tomonidan allaqachon ishlatilmoqda",
+        )
+
+    api = TelegramBotApi(token_for_api) if token_for_api else None
+    if token_for_api and bot_configuration_requested:
+        try:
+            bot_info = api.get_me() if api else None
+            webhook_info = api.get_webhook_info() if api else None
+        except TelegramBotApiError as exc:
+            status = 409 if exc.status_code == 409 else 422
+            raise HTTPException(status_code=status, detail="Telegram bot token tekshirilmadi") from None
+        if not bot_info or not bot_info.get("id") or not bot_info.get("username"):
+            raise HTTPException(status_code=422, detail="Telegram bot token yaroqsiz")
+        verified_username = str(bot_info["username"])
+        if requested_username and requested_username.lower() != verified_username.lower():
+            raise HTTPException(status_code=409, detail="bot_link token tasdiqlagan bot username bilan mos emas")
+        if payload.bot_mode == "polling" and str((webhook_info or {}).get("url") or "").strip():
+            raise HTTPException(
+                status_code=409,
+                detail="Botda faol webhook bor; polling uni avtomatik o'chirmaydi",
+            )
+
+        duplicate_query = session.query(TelegramBotConnection).filter(
+            TelegramBotConnection.brand_id != brand_id,
+            or_(
+                TelegramBotConnection.bot_id == int(bot_info["id"]),
+                TelegramBotConnection.token_fingerprint == fingerprint,
+            ),
+        )
+        if duplicate_query.first() is not None:
+            raise HTTPException(status_code=409, detail="Bu Telegram bot boshqa brandga ulangan")
+
+        if connection is None:
+            connection = TelegramBotConnection(brand_id=brand_id)
+            session.add(connection)
+        credentials_changed = bool(
+            (connection.bot_id is not None and connection.bot_id != int(bot_info["id"]))
+            or (
+                fingerprint is not None
+                and connection.token_fingerprint is not None
+                and connection.token_fingerprint != fingerprint
+            )
+        )
+        connection.bot_id = int(bot_info["id"])
+        connection.bot_username = verified_username
+        connection.bot_link = canonical_bot_link(verified_username)
+        if encrypted_token is not None:
+            connection.token_ciphertext = encrypted_token
+            connection.token_fingerprint = fingerprint
+        if credentials_changed:
+            connection.last_update_id = None
+        connection.mode = payload.bot_mode
+        if payload.bot_mode == "polling":
+            connection.status = "ready"
+            connection.status_detail = "Polling worker ulanishga tayyor"
+        elif uses_global_bot and str((webhook_info or {}).get("url") or "").strip():
+            connection.status = "webhook_conflict"
+            connection.status_detail = "Global bot webhook bilan band; legacy polling ishlamaydi"
+            warnings.append("global_bot_webhook_blocks_legacy_polling")
+        elif uses_global_bot:
+            connection.status = "legacy"
+            connection.status_detail = "Global Telegram worker bu bot update oqimini boshqaradi"
+            warnings.append("global_bot_uses_legacy_worker")
+        else:
+            connection.status = "reference"
+            connection.status_detail = "Bot tasdiqlangan; polling o'chirilgan"
+        connection.retry_after_at = None
+        connection.active = True
+    elif requested_username:
+        if connection and connection.bot_username and connection.bot_username.lower() != requested_username.lower():
+            raise HTTPException(status_code=409, detail="bot_link mavjud connection bot username bilan mos emas")
+        if connection is None:
+            connection = TelegramBotConnection(brand_id=brand_id)
+            session.add(connection)
+        connection.bot_username = connection.bot_username or requested_username
+        connection.bot_link = canonical_bot_link(connection.bot_username)
+        connection.mode = "reference"
+        connection.status = "reference"
+        connection.status_detail = "Bot link reference sifatida saqlandi; token sozlanmagan"
+        connection.active = True
+        warnings.append("bot_link_is_reference_only_without_token")
+    elif connection and "bot_mode" in payload.model_fields_set:
+        connection.mode = payload.bot_mode
+        connection.status = "ready" if payload.bot_mode == "polling" else "reference"
+        connection.status_detail = (
+            "Polling worker ulanishga tayyor"
+            if payload.bot_mode == "polling"
+            else "Bot tasdiqlangan; polling o'chirilgan"
+        )
+        connection.retry_after_at = None
+        connection.active = True
+
+    monitor_from = monitor_start_or_today(payload.monitor_from)
+    try:
+        source_connection = connection if token_for_api and not uses_global_bot else None
+        if connection and not uses_global_bot:
+            session.flush()
+            upsert_bot_inbox_source(
+                session,
+                connection,
+                monitor_from=monitor_from,
+                collect_posts=payload.collect_posts,
+                collect_comments=payload.collect_comments,
+            )
+        elif connection:
+            session.flush()
+            existing_inbox = (
+                session.query(TelegramSource)
+                .filter(
+                    TelegramSource.brand_id == brand_id,
+                    TelegramSource.source_role == "bot_inbox",
+                )
+                .first()
+            )
+            if existing_inbox:
+                existing_inbox.active = False
+                existing_inbox.connector_managed = False
+                existing_inbox.bot_connection_id = None
+
+        if connection and bot_configuration_requested:
+            existing_connector_sources = (
+                session.query(TelegramSource)
+                .filter(
+                    TelegramSource.brand_id == brand_id,
+                    TelegramSource.connector_managed.is_(True),
+                    TelegramSource.source_role.in_(("channel", "discussion")),
+                )
+                .all()
+            )
+            for existing_source in existing_connector_sources:
+                existing_source.bot_connection_id = source_connection.id if source_connection else None
+                if api is not None:
+                    refresh_connector_source_bot_access(existing_source, api, warnings)
+
+        channel_source = None
+        if payload.channel_ref is not None and str(payload.channel_ref).strip():
+            channel_source = upsert_connector_source(
+                session,
+                brand_id=brand_id,
+                connection=source_connection,
+                source_ref=payload.channel_ref,
+                source_role="channel",
+                api=api,
+                monitor_from=monitor_from,
+                collect_posts=payload.collect_posts,
+                collect_comments=payload.collect_comments,
+                warnings=warnings,
+            )
+            session.flush()
+            retire_replaced_connector_sources(
+                session,
+                brand_id=brand_id,
+                source_role="channel",
+                keep_source_id=channel_source.id,
+            )
+
+        discussion_ref = payload.discussion_ref
+        if discussion_ref is None and channel_source and channel_source.linked_discussion_chat_id:
+            discussion_ref = channel_source.linked_discussion_chat_id
+            warnings.append("discussion_group_auto_discovered")
+
+        discussion_source = None
+        if discussion_ref is not None and str(discussion_ref).strip():
+            discussion_source = upsert_connector_source(
+                session,
+                brand_id=brand_id,
+                connection=source_connection,
+                source_ref=discussion_ref,
+                source_role="discussion",
+                api=api,
+                monitor_from=monitor_from,
+                collect_posts=False,
+                collect_comments=payload.collect_comments,
+                warnings=warnings,
+            )
+            session.flush()
+            retire_replaced_connector_sources(
+                session,
+                brand_id=brand_id,
+                source_role="discussion",
+                keep_source_id=discussion_source.id,
+            )
+
+        if channel_source and discussion_source:
+            discussion_source.parent_source_id = channel_source.id
+            if discussion_source.chat_id is not None:
+                if (
+                    channel_source.linked_discussion_chat_id is not None
+                    and channel_source.linked_discussion_chat_id != discussion_source.chat_id
+                ):
+                    warnings.append("discussion_ref_differs_from_telegram_linked_chat")
+                channel_source.linked_discussion_chat_id = discussion_source.chat_id
+
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Telegram connector yoki source allaqachon ulangan") from None
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    return telegram_setup_response(session, brand_id, warnings=warnings)
+
+
+@app.get("/brands/{brand_id}/telegram/connection", response_model=TelegramSetupResponse)
+def get_brand_telegram_connection(brand_id: uuid.UUID, session: DbSession) -> TelegramSetupResponse:
+    if session.get(Brand, brand_id) is None:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    return telegram_setup_response(session, brand_id)
+
+
+@app.delete("/brands/{brand_id}/telegram/connection", response_model=TelegramConnectionDeleteResult)
+def delete_brand_telegram_connection(
+    brand_id: uuid.UUID,
+    session: DbSession,
+) -> TelegramConnectionDeleteResult:
+    connection = (
+        session.query(TelegramBotConnection)
+        .filter(TelegramBotConnection.brand_id == brand_id)
+        .one_or_none()
+    )
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Telegram bot connection topilmadi")
+
+    sources = (
+        session.query(TelegramSource)
+        .filter(TelegramSource.bot_connection_id == connection.id)
+        .all()
+    )
+    for source in sources:
+        source.bot_connection_id = None
+        if source.source_role == "bot_inbox":
+            source.active = False
+    detached = len(sources)
+    session.delete(connection)
+    session.commit()
+    return TelegramConnectionDeleteResult(
+        brand_id=brand_id,
+        connection_deleted=True,
+        sources_detached=detached,
+    )
+
+
 @app.get("/telegram/bot/status", response_model=TelegramBotStatus)
 def telegram_bot_status() -> TelegramBotStatus:
     settings = get_settings()
@@ -1354,8 +2077,8 @@ async def telegram_backfill_session_status() -> TelegramSessionStatus:
         return TelegramSessionStatus(configured=False, authorized=False, error="TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
 
     client = TelegramClient(settings.telegram_session_name, settings.telegram_api_id, settings.telegram_api_hash)
-    await client.connect()
     try:
+        await client.connect()
         authorized = await client.is_user_authorized()
         if not authorized:
             return TelegramSessionStatus(configured=True, authorized=False, session_name=settings.telegram_session_name)
@@ -1369,9 +2092,17 @@ async def telegram_backfill_session_status() -> TelegramSessionStatus:
             phone=mask_phone(getattr(me, "phone", None)),
         )
     except Exception as exc:
-        return TelegramSessionStatus(configured=True, authorized=False, session_name=settings.telegram_session_name, error=str(exc))
+        return TelegramSessionStatus(
+            configured=True,
+            authorized=False,
+            session_name=settings.telegram_session_name,
+            error=exc.__class__.__name__,
+        )
     finally:
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 @app.post("/brands", response_model=BrandOut)
@@ -1506,6 +2237,120 @@ def check_telegram_source_access(payload: TelegramSourceAccessCheck) -> Telegram
     return status
 
 
+def telegram_api_for_source(
+    session: Session,
+    source: TelegramSource,
+) -> tuple[TelegramBotApi | None, str | None]:
+    connection = source.bot_connection
+    if connection is None and source.connector_managed and source.brand_id:
+        connection = (
+            session.query(TelegramBotConnection)
+            .filter(TelegramBotConnection.brand_id == source.brand_id)
+            .one_or_none()
+        )
+    if connection and connection.token_ciphertext:
+        try:
+            return TelegramBotApi(decrypt_bot_token(connection.token_ciphertext)), "brand_bot"
+        except ConnectorEncryptionError:
+            return None, None
+    if source.connector_managed:
+        return None, None
+
+    global_token = get_settings().telegram_bot_token
+    if global_token:
+        return TelegramBotApi(global_token), "global_bot"
+    return None, None
+
+
+def access_ready_for_source(source: TelegramSource, access: TelegramSourceAccessStatus) -> bool:
+    if source.source_role == "channel":
+        return access.can_read_posts
+    if source.source_role == "discussion":
+        return access.can_read_comments
+    if source.collect_posts and source.collect_comments:
+        return access.can_read_posts and access.can_read_comments
+    if source.collect_posts:
+        return access.can_read_posts
+    if source.collect_comments:
+        return access.can_read_comments
+    return access.ok
+
+
+@app.post("/telegram/sources/{source_id}/access-check", response_model=TelegramSourceAccessStatus)
+def check_brand_telegram_source_access(
+    source_id: uuid.UUID,
+    session: DbSession,
+) -> TelegramSourceAccessStatus:
+    source = session.get(TelegramSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Telegram source topilmadi")
+    if source.source_role == "bot_inbox":
+        raise HTTPException(status_code=409, detail="Bot inbox accessi connector statusi orqali tekshiriladi")
+    source_ref: int | str | None = source.chat_id or (f"@{source.username}" if source.username else None)
+    if source_ref is None:
+        raise HTTPException(status_code=422, detail="Source uchun chat ID yoki public username kerak")
+
+    api, checked_via = telegram_api_for_source(session, source)
+    if api is None:
+        if source.telethon_access_status == "ready":
+            return TelegramSourceAccessStatus(
+                ok=True,
+                chat_id_or_username=source_ref,
+                chat_id=source.chat_id,
+                chat_username=source.username,
+                chat_title=source.title,
+                chat_type=source.source_kind,
+                can_read_posts=source.collect_posts,
+                can_read_comments=source.collect_comments,
+                issues=["verified_by_telethon_worker"],
+            )
+        telethon_issue = (
+            "telethon_worker_access_denied"
+            if source.telethon_access_status == "denied"
+            else "telethon_worker_access_not_verified"
+        )
+        return TelegramSourceAccessStatus(
+            ok=False,
+            chat_id_or_username=source_ref,
+            chat_id=source.chat_id,
+            chat_username=source.username,
+            chat_title=source.title,
+            chat_type=source.source_kind,
+            issues=["brand_bot_token_not_configured", telethon_issue],
+        )
+
+    access, _ = build_access_status(api, source_ref)
+    ready = access_ready_for_source(source, access)
+    source.bot_access_status = "ready" if ready else "denied"
+    source.access_checked_at = datetime.now(timezone.utc)
+    session.commit()
+    if not ready and source.telethon_access_status == "ready":
+        return access.model_copy(
+            update={
+                "ok": True,
+                "issues": sorted(
+                    set(
+                        [
+                            *access.issues,
+                            f"{source.source_role}_bot_access_requirement_not_met",
+                            "verified_by_telethon_worker",
+                        ]
+                    )
+                ),
+            }
+        )
+    if not ready:
+        access = access.model_copy(
+            update={
+                "ok": False,
+                "issues": sorted(set([*access.issues, f"{source.source_role}_access_requirement_not_met"])),
+            }
+        )
+    if checked_via == "global_bot" and "global_bot" not in access.issues:
+        access = access.model_copy(update={"issues": [*access.issues, "checked_with_global_bot"]})
+    return access
+
+
 @app.post("/telegram/sources/import", response_model=list[TelegramSourceImportResult])
 def import_telegram_sources(payload: TelegramSourceImport, session: DbSession) -> list[TelegramSourceImportResult]:
     settings = get_settings()
@@ -1588,6 +2433,11 @@ def update_telegram_source(source_id: uuid.UUID, payload: TelegramSourceUpdate, 
     source = session.get(TelegramSource, source_id)
     if not source:
         raise HTTPException(status_code=404, detail="Telegram source not found")
+    if source.source_role == "bot_inbox":
+        raise HTTPException(
+            status_code=409,
+            detail="Bot inbox connector orqali boshqariladi; bot connectionni sozlang yoki uzing",
+        )
 
     for field, value in payload.model_dump(exclude_unset=True).items():
         if field == "monitor_from":
@@ -1603,6 +2453,12 @@ def update_telegram_source(source_id: uuid.UUID, payload: TelegramSourceUpdate, 
 
 @app.delete("/telegram/sources/{source_id}", response_model=SourceDeleteResult)
 def delete_telegram_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
+    source = session.get(TelegramSource, source_id)
+    if source and source.source_role == "bot_inbox" and source.bot_connection_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Bot inboxni alohida o'chirib bo'lmaydi; avval bot connectionni uzing",
+        )
     return delete_source_and_notify("telegram", source_id, session)
 
 
@@ -1611,14 +2467,22 @@ def refresh_telegram_source(source_id: uuid.UUID, session: DbSession) -> Telegra
     source = session.get(TelegramSource, source_id)
     if not source:
         raise HTTPException(status_code=404, detail="Telegram source not found")
+    if source.source_role == "bot_inbox":
+        raise HTTPException(status_code=409, detail="Bot inboxni Telegram source sifatida refresh qilib bo'lmaydi")
 
     source_ref: int | str | None = source.chat_id or (f"@{source.username}" if source.username else None)
     if source_ref is None:
         raise HTTPException(status_code=400, detail="Source has no chat_id or username")
 
-    settings = get_settings()
-    api = TelegramBotApi(settings.telegram_bot_token)
+    api, _ = telegram_api_for_source(session, source)
+    if api is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Bu source uchun brand bot tokeni yo'q; Telethon worker accessini kuting",
+        )
     access, chat_info = build_access_status(api, source_ref)
+    source.bot_access_status = "ready" if access_ready_for_source(source, access) else "denied"
+    source.access_checked_at = datetime.now(timezone.utc)
     linked_source = None
 
     if chat_info:
@@ -1658,6 +2522,8 @@ def backfill_telegram_source(
     source = session.get(TelegramSource, source_id)
     if not source:
         raise HTTPException(status_code=404, detail="Telegram source not found")
+    if source.source_role == "bot_inbox":
+        raise HTTPException(status_code=409, detail="Bot inbox uchun Telethon history backfill qo'llanmaydi")
 
     source_ref: int | str | None = source.username or source.chat_id
     if source_ref is None:
@@ -1685,6 +2551,7 @@ def backfill_telegram_source(
                 payload.limit,
                 payload.comments_per_post,
                 from_date=from_date,
+                source_id=source.id,
             )
         finally:
             await client.disconnect()
@@ -1736,6 +2603,9 @@ def list_youtube_sources(session: DbSession) -> list[YouTubeSource]:
 
 @app.post("/youtube/sources/import", response_model=list[YouTubeSourceImportResult])
 def import_youtube_sources(payload: YouTubeSourceImport, session: DbSession) -> list[YouTubeSourceImportResult]:
+    if session.get(Brand, payload.brand_id) is None:
+        raise HTTPException(status_code=404, detail="Brand not found")
+
     settings = get_settings()
     api = YouTubeApi(settings.youtube_api_key)
     results: list[YouTubeSourceImportResult] = []
@@ -1759,6 +2629,7 @@ def import_youtube_sources(payload: YouTubeSourceImport, session: DbSession) -> 
                 collect_transcripts=payload.collect_transcripts,
                 monitor_from=monitor_start_or_today(parse_date_field(row["monitor_from"]) or payload.default_monitor_from),
                 api=api,
+                official_channel_only=payload.official_channel_only,
             )
             session.commit()
             session.refresh(source)
@@ -1769,7 +2640,13 @@ def import_youtube_sources(payload: YouTubeSourceImport, session: DbSession) -> 
             results.append(YouTubeSourceImportResult(ref=ref, status="error", error=str(exc.orig)))
         except Exception as exc:
             session.rollback()
-            results.append(YouTubeSourceImportResult(ref=ref, status="error", error=str(exc)))
+            results.append(
+                YouTubeSourceImportResult(
+                    ref=ref,
+                    status="error",
+                    error=safe_youtube_error(exc, api_key=api.api_key),
+                )
+            )
 
     return results
 
@@ -3012,10 +3889,11 @@ def instagram_webhook_verify(request: Request) -> PlainTextResponse:
 async def instagram_webhook_receive(request: Request) -> dict[str, object]:
     """Receive Meta webhook events for the connected Instagram accounts."""
     settings = get_settings()
+    if not settings.ig_app_secret:
+        raise HTTPException(status_code=503, detail="Instagram webhook app secret is not configured")
     raw = await request.body()
     signature = request.headers.get("X-Hub-Signature-256")
-    # Signature is enforced only when an app secret is configured (dev-friendly).
-    if settings.ig_app_secret and not verify_signature(settings.ig_app_secret, raw, signature):
+    if not verify_signature(settings.ig_app_secret, raw, signature):
         raise HTTPException(status_code=403, detail="Invalid signature")
     try:
         body = json.loads(raw.decode() or "{}")
@@ -3392,9 +4270,11 @@ def facebook_webhook_verify(request: Request) -> PlainTextResponse:
 @app.post("/facebook/webhook")
 async def facebook_webhook_receive(request: Request) -> dict[str, object]:
     settings = get_settings()
+    if not settings.fb_app_secret:
+        raise HTTPException(status_code=503, detail="Facebook webhook app secret is not configured")
     raw = await request.body()
     signature = request.headers.get("X-Hub-Signature-256")
-    if settings.fb_app_secret and not fb_verify_signature(settings.fb_app_secret, raw, signature):
+    if not fb_verify_signature(settings.fb_app_secret, raw, signature):
         raise HTTPException(status_code=403, detail="Invalid signature")
     try:
         body = json.loads(raw.decode() or "{}")

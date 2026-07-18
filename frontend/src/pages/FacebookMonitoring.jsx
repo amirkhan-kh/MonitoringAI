@@ -18,7 +18,7 @@ import {
   Trash2,
   Webhook,
 } from "lucide-react";
-import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
+import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId, saveSelectedBrandId } from "../api/client";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
@@ -83,6 +83,11 @@ export function FacebookMonitoring() {
     brandRef.current = selectedBrandId;
   }, [selectedBrandId]);
 
+  const visibleSources = useMemo(
+    () => selectedBrandId ? sources.filter((source) => source.brand_id === selectedBrandId) : [],
+    [sources, selectedBrandId],
+  );
+
   const loadData = useCallback(async (brandId) => {
     const active = (brandId ?? brandRef.current) || "";
     try {
@@ -132,7 +137,7 @@ export function FacebookMonitoring() {
   }, [selectedBrandId, loadData]);
 
   useEffect(() => {
-    const source = new EventSource(endpoints.eventsUrl());
+    const source = endpoints.eventsStream();
     const onEvent = (event) => {
       try {
         const data = JSON.parse(event.data || "{}");
@@ -167,6 +172,10 @@ export function FacebookMonitoring() {
 
   const handleConnect = async (event) => {
     event.preventDefault();
+    if (!form.brand_id) {
+      setError("Brand tanlash majburiy.");
+      return;
+    }
     if (!form.access_token.trim()) {
       setError("Access token majburiy. Sahifa token'dan avtomatik aniqlanadi.");
       return;
@@ -181,7 +190,7 @@ export function FacebookMonitoring() {
         source_category: form.source_category,
         monitoring_mode: form.monitoring_mode,
       });
-      setForm(emptyForm);
+      setForm({ ...emptyForm, brand_id: form.brand_id });
       setNotice(`Ulandi: ${created.page_name || created.page_id}. Kommentlar yig'ila boshlaydi.`);
       await loadData(brandRef.current);
     } catch (err) {
@@ -283,7 +292,7 @@ export function FacebookMonitoring() {
         {notice && <div className="loadingBar">{notice}</div>}
 
         <StatsBar items={statItems} loading={loading} />
-        <MonitoringInsights platform="facebook" sources={sources} summary={summary} status={status} loading={loading} />
+        <MonitoringInsights platform="facebook" sources={visibleSources} summary={summary} status={status} loading={loading} />
 
         <section className="monitoringWorkspace">
           <section className="recentSection">
@@ -329,7 +338,13 @@ export function FacebookMonitoring() {
                 <select
                   className="input select"
                   value={form.brand_id}
-                  onChange={(e) => setForm({ ...form, brand_id: e.target.value })}
+                  onChange={(e) => {
+                    const brandId = saveSelectedBrandId(e.target.value);
+                    brandRef.current = brandId;
+                    setSelectedBrandId(brandId);
+                    setForm({ ...form, brand_id: brandId });
+                  }}
+                  required
                 >
                   <option value="">{translateUiText("Brand tanlang")}</option>
                   {brands.map((b) => (
@@ -380,8 +395,8 @@ export function FacebookMonitoring() {
             </div>
 
             <div className="sourceList">
-              {sources.length === 0 && <div className="emptyState">Hali sahifa ulanmagan</div>}
-              {sources.map((source) => (
+              {visibleSources.length === 0 && <div className="emptyState">Hali sahifa ulanmagan</div>}
+              {visibleSources.map((source) => (
                 <div className="igAccountRow" key={source.id}>
                   <div className="sourceIcon"><Facebook size={18} /></div>
                   <div className="sourceBody">

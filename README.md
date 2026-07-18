@@ -2,6 +2,9 @@
 
 Telegram-first monitoring workspace for brand source cataloging, post/comment ingestion, Gemini analysis through Vertex AI, and a dedicated dashboard UI.
 
+Client brandning Telegram va YouTube profilini ulash bo'yicha sodda qo'llanma:
+[`docs/brand-platform-ulash-qollanmasi.md`](docs/brand-platform-ulash-qollanmasi.md).
+
 ## Structure
 
 ```text
@@ -34,7 +37,7 @@ MonitoringAI/
 Backend services run through Docker:
 
 ```bash
-docker compose up -d --build postgres api telegram-worker telegram-live-sync ai-worker
+docker compose up -d --build postgres api telegram-worker telegram-connector-worker telegram-live-sync youtube-worker instagram-worker facebook-worker ai-worker alert-worker
 ```
 
 Frontend runs from `frontend/`:
@@ -64,6 +67,48 @@ Monitoring modes:
 - `all_messages`: attach every post/comment from the source to the brand scope.
 - `brand_matches_only`: attach only messages matching brand aliases/keywords.
 
+### Per-brand bot connector
+
+Each brand may save any non-empty combination of a bot reference, dedicated bot
+token, channel reference, and discussion-group reference through:
+
+- `POST /brands/{brand_id}/telegram/setup`
+- `GET /brands/{brand_id}/telegram/connection`
+- `DELETE /brands/{brand_id}/telegram/connection`
+
+Before accepting bot tokens, configure one stable Fernet key in `.env`:
+
+```bash
+! grep -Eq '^CONNECTOR_ENCRYPTION_KEY=.+$' .env && \
+  printf 'CONNECTOR_ENCRYPTION_KEY=%s\n' \
+  "$(docker compose run --rm --no-deps api python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> .env
+```
+
+Important:
+
+- Generate this key once per environment, keep it secret, back it up securely, and
+  keep the same value across every API/worker restart and replica. Changing or
+  losing it makes already-stored bot tokens undecryptable.
+- There is no plaintext fallback. If the key is empty or invalid, token setup is
+  rejected and existing encrypted tokens are not used.
+- `reference` mode stores the verified bot identity but does not consume updates.
+  A bot link without its token is reference-only and its inbox source stays inactive.
+- `polling` is only for a dedicated/unused bot token. Telegram permits one update
+  consumer per token. Setup rejects a token already used by another brand, the
+  legacy global worker, or a bot with an active webhook.
+- Neither worker deletes a webhook automatically. Existing production bots should
+  remain in `reference` mode unless their current update transport is deliberately
+  moved to this connector.
+- Polling cursors persist per brand connection. `401` suspends the connection,
+  `409` marks consumer conflict, and `429` honors Telegram's `retry_after` value.
+- Replacing/rotating a token resets its persisted cursor. Revoke the old token with
+  BotFather after the new token is verified; token revocation is not available via
+  the Bot API.
+
+Connector status values are `reference`, `legacy`, `webhook_conflict`, `ready`,
+`active`, `rate_limited`, `conflict`, `invalid`, `encryption_error`, and transient `error`. API responses
+return only `token_configured`; encrypted or plaintext tokens are never returned.
+
 Recommended defaults:
 
 ```text
@@ -76,29 +121,6 @@ community    -> brand_matches_only
 risk         -> all_messages
 ```
 
-## Current Seeded Test Scope
-
-The current test brand is `MonitoringChanel Test`.
-
-Seeded Telegram sources:
-
-```text
-@monitoring_check_test  -> owned -> all_messages
-MonitoringChanel Chat   -> owned -> all_messages
-@chec_king_bot          -> bot   -> all_messages
-Amirxon private chat    -> bot   -> all_messages
-```
-
-Access check confirms:
-
-```text
-@monitoring_check_test
-bot_status: administrator
-can_read_posts: true
-can_read_comments: true
-linked discussion: MonitoringChanel Chat
-```
-
 ## Telethon Login For Full Telegram Backfill
 
 Bot API real-time monitoring works for channels/groups where the bot has access. Historical posts, public/member competitor channels, adminless source import, post reaction snapshots, views and forwards use Telethon user access.
@@ -109,7 +131,11 @@ Current Telethon config is loaded from `.env`:
 TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
 TELEGRAM_SESSION_NAME=.sessions/monitoring
+TELEGRAM_LIVE_SYNC_SESSION_NAME=.sessions/monitoring_live
+TELEGRAM_COMMAND_ALLOWED_USER_IDS=123456789
 ```
+
+`TELEGRAM_COMMAND_ALLOWED_USER_IDS` accepts comma-separated Telegram user IDs or a JSON list. It is empty by default, which denies every private agent command. Add only trusted operator IDs.
 
 The session is stored in the Docker volume mounted at `/app/.sessions`, so it remains available after containers restart.
 
@@ -118,6 +144,15 @@ From the project root, run:
 ```bash
 make telethon-login
 ```
+
+Create the live-sync session with a separate Telegram login/auth key:
+
+```bash
+make telethon-live-login
+```
+
+The Make target reads `TELEGRAM_LIVE_SYNC_SESSION_NAME`, stops the live worker
+before opening its SQLite session, and starts the worker again when login exits.
 
 The terminal will ask for:
 
@@ -132,6 +167,7 @@ Important:
 - Use your Telegram user phone number, not the bot token.
 - Enter the login code only in the terminal.
 - Do not paste the Telegram login code into chat.
+- Never copy a Telethon `.session` file between workers or machines. Login each session name separately; copied auth keys can be invalidated with `AuthKeyDuplicatedError`.
 - The logged-in Telegram user must have access to private groups/channels that you want to backfill.
 - The `telegram-live-sync` service continuously imports active public/member sources through this user session, even when the bot is not channel admin.
 - If a channel has a linked discussion group, comments are imported when Telegram exposes them to the Telethon user. If not, AI analysis falls back to post text plus reaction/view/forward context.
@@ -140,13 +176,17 @@ After login, check status:
 
 ```bash
 make telethon-status
+make telethon-live-status
 ```
 
-Successful login returns `authorized: True`. Then use the dashboard `To'liq olish` button or run the test backfill:
+Successful login returns `authorized: True`. Then use the dashboard `To'liq olish`
+button. CLI orqali ishlatsangiz source UUID va dashboard Bearer tokenini aniq bering:
 
 ```bash
-make backfill-channel
+make backfill-channel SOURCE_ID=<uuid> API_TOKEN=<bearer-token>
 ```
+
+If status returns `AuthKeyDuplicatedError`, stop every process using that session, remove only the affected `.session` file, and login that session name again. Do not reuse its file on another machine.
 
 ## Source File Import Format
 
@@ -172,11 +212,15 @@ Example:
 - `GET /health`
 - `GET /events`
 - `GET /brands`
+- `POST /brands/{brand_id}/telegram/setup`
+- `GET /brands/{brand_id}/telegram/connection`
+- `DELETE /brands/{brand_id}/telegram/connection`
 - `GET /telegram/bot/status`
 - `GET /telegram/backfill/session-status`
 - `GET /telegram/source-categories`
 - `GET /telegram/sources`
 - `POST /telegram/sources/access-check`
+- `POST /telegram/sources/{source_id}/access-check`
 - `POST /telegram/sources/import`
 - `PATCH /telegram/sources/{source_id}`
 - `POST /telegram/sources/{source_id}/refresh`
@@ -206,4 +250,3 @@ Telegram Bot API / Telethon -> ingestion -> Postgres NOTIFY -> API SSE -> React 
 - Keep Telegram `.session` files out of git.
 - Keep Google service account JSON outside the repo.
 - Regenerate any Telegram token that was exposed in chat or logs before production.
-# MonitoringAI
