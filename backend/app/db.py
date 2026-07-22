@@ -174,6 +174,47 @@ def ensure_schema_upgrades() -> None:
             if media_url_column is not None and getattr(media_url_column["type"], "length", None):
                 connection.execute(text("ALTER TABLE instagram_mentions ALTER COLUMN media_url TYPE TEXT"))
 
+    if "alert_events" in table_names:
+        alert_columns = {column["name"] for column in inspector.get_columns("alert_events")}
+        alert_statements = [
+            f"ALTER TABLE alert_events ADD COLUMN {definition}"
+            for name, definition in (
+                ("work_status", "work_status VARCHAR(32) NOT NULL DEFAULT 'open'"),
+                ("checked_by", "checked_by VARCHAR(255)"),
+                ("checked_by_user_id", "checked_by_user_id BIGINT"),
+                ("checked_at", "checked_at TIMESTAMP WITH TIME ZONE"),
+                ("answered_by", "answered_by VARCHAR(255)"),
+                ("answered_by_user_id", "answered_by_user_id BIGINT"),
+                ("answered_at", "answered_at TIMESTAMP WITH TIME ZONE"),
+                ("telegram_chat_id", "telegram_chat_id VARCHAR(64)"),
+                ("telegram_message_id", "telegram_message_id BIGINT"),
+                ("reminded_at", "reminded_at TIMESTAMP WITH TIME ZONE"),
+                ("reminder_count", "reminder_count INTEGER NOT NULL DEFAULT 0"),
+            )
+            if name not in alert_columns
+        ]
+        if alert_statements:
+            with engine.begin() as connection:
+                for statement in alert_statements:
+                    connection.execute(text(statement))
+                if "work_status" not in alert_columns:
+                    # Alerts delivered before the staff-group workflow existed carry no
+                    # buttons, so nobody can ever close them: counting them as "open"
+                    # would start the counter on a backlog that cannot be worked off.
+                    connection.execute(
+                        text("UPDATE alert_events SET work_status = 'archived' WHERE status IN ('sent', 'abandoned')")
+                    )
+
+    # Soft-delete marker: a removed source whose mentions the operator chose to keep stays
+    # in the table with deleted_at set, so re-adding it revives the same row and its id.
+    for source_table in ("telegram_sources", "youtube_sources", "instagram_sources", "facebook_sources"):
+        if source_table not in table_names:
+            continue
+        if "deleted_at" in {column["name"] for column in inspector.get_columns(source_table)}:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE {source_table} ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE"))
+
     ensure_indexes()
 
 
@@ -311,6 +352,14 @@ def ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_mentions_created ON mentions (created_at)",
         "CREATE INDEX IF NOT EXISTS ix_mentions_source ON mentions (source_id)",
         "CREATE INDEX IF NOT EXISTS ix_youtube_mentions_created ON youtube_mentions (created_at)",
+        # Every hot YouTube read orders/filters by coalesce(published_at, created_at),
+        # which a plain (brand_id, published_at) b-tree cannot serve.
+        "CREATE INDEX IF NOT EXISTS ix_youtube_mentions_brand_recency "
+        "ON youtube_mentions (brand_id, (coalesce(published_at, created_at)) DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_youtube_mentions_source_recency "
+        "ON youtube_mentions (source_id, (coalesce(published_at, created_at)) DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_youtube_sources_due "
+        "ON youtube_sources (last_checked_at) WHERE active AND deleted_at IS NULL",
         "CREATE INDEX IF NOT EXISTS ix_instagram_mentions_created ON instagram_mentions (created_at)",
         "CREATE INDEX IF NOT EXISTS ix_instagram_mentions_item_type ON instagram_mentions (item_type)",
         "CREATE INDEX IF NOT EXISTS ix_telegram_sources_brand ON telegram_sources (brand_id)",
@@ -319,6 +368,12 @@ def ensure_indexes() -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_telegram_sources_bot_inbox_connection "
         "ON telegram_sources (bot_connection_id) "
         "WHERE source_role = 'bot_inbox' AND bot_connection_id IS NOT NULL",
+        # The staff-group inbox reads "everything still unanswered, oldest first" on every
+        # summary refresh and every SLA sweep, so that filter needs its own index.
+        "CREATE INDEX IF NOT EXISTS ix_alert_events_work_status "
+        "ON alert_events (work_status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_alert_events_open "
+        "ON alert_events (created_at) WHERE work_status <> 'answered'",
     )
     with engine.begin() as connection:
         for statement in index_statements:

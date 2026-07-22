@@ -1,0 +1,453 @@
+"""The staff-group alert workflow: who reviewed it, who answered the customer, what's left.
+
+The whole point of the buttons is accountability, so these tests pin down the parts that
+would quietly destroy it: a second presser overwriting the first one's name, an "answered"
+card with nobody attached, a reopened signal that instantly re-nudges, and a counter that
+keeps counting closed work.
+"""
+
+from __future__ import annotations
+
+import unittest
+import uuid
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+from typing import Any
+
+from app.config import get_settings
+from app.db import SessionLocal, init_db
+from app.models import AlertEvent, AppState, Brand
+from app.services.alert_workflow import (
+    SUMMARY_STATE_KEY,
+    Actor,
+    actor_from_telegram_user,
+    apply_alert_action,
+    handle_alert_group_message,
+    handle_callback_query,
+    open_alert_counts,
+    open_alerts_text,
+    render_summary_text,
+    sync_summary_message,
+    today_stats,
+)
+from app.services.alerts import (
+    build_alert_keyboard,
+    build_alert_text,
+    deliver_one,
+    due_reminder_alerts,
+    send_sla_reminders,
+)
+
+STAFF_CHAT_ID = "-1009999999999"
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class FakeTelegramApi:
+    """Records calls instead of hitting Telegram."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.edits: list[dict[str, Any]] = []
+        self.answers: list[dict[str, Any]] = []
+        self.pins: list[int] = []
+        self.next_message_id = 500
+
+    def send_message(self, chat_id, text, *, reply_markup=None, reply_to_message_id=None):
+        self.next_message_id += 1
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "reply_markup": reply_markup,
+                "reply_to_message_id": reply_to_message_id,
+            }
+        )
+        return {"ok": True, "result": {"message_id": self.next_message_id, "chat": {"id": chat_id}}}
+
+    def edit_message_text(self, chat_id, message_id, text, *, reply_markup=None):
+        self.edits.append({"chat_id": chat_id, "message_id": message_id, "text": text, "reply_markup": reply_markup})
+        return {"ok": True, "result": {"message_id": message_id}}
+
+    def answer_callback_query(self, callback_query_id, text=None, *, show_alert=False):
+        self.answers.append({"id": callback_query_id, "text": text, "show_alert": show_alert})
+        return {"ok": True}
+
+    def pin_chat_message(self, chat_id, message_id, *, disable_notification=True):
+        self.pins.append(message_id)
+        return {"ok": True}
+
+
+def staff_settings(**overrides: Any):
+    base = {
+        "alert_telegram_chat_id": STAFF_CHAT_ID,
+        "telegram_bot_token": "test-token",
+        "alert_summary_enabled": False,
+    }
+    base.update(overrides)
+    return get_settings().model_copy(update=base)
+
+
+def callback_update(action: str, event_id, user: dict[str, Any], chat_id: str = STAFF_CHAT_ID) -> dict[str, Any]:
+    return {
+        "callback_query": {
+            "id": "cb-1",
+            "from": user,
+            "data": f"alert:{action}:{event_id}",
+            "message": {"message_id": 42, "chat": {"id": chat_id, "type": "supergroup"}},
+        }
+    }
+
+
+class AlertWorkflowTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        init_db()
+
+    def setUp(self) -> None:
+        self.brand_id = uuid.uuid4()
+        with SessionLocal() as session:
+            session.add(Brand(id=self.brand_id, name=f"test-brand-{self.brand_id.hex[:8]}"))
+            session.commit()
+
+    def tearDown(self) -> None:
+        with SessionLocal() as session:
+            session.query(AlertEvent).filter(AlertEvent.brand_id == self.brand_id).delete()
+            session.query(Brand).filter(Brand.id == self.brand_id).delete()
+            session.commit()
+
+    def make_event(self, session, **overrides: Any) -> AlertEvent:
+        payload = {
+            "dedup_key": f"telegram:{uuid.uuid4()}",
+            "platform": "telegram",
+            "brand_name": "Uzum market",
+            "source": "Официальный чат Uzum Market",
+            "author": "Dildora",
+            "text": "Buyurtmam bekor qilindi",
+            "risk_level": "high",
+            "risk_score": 0.8,
+            "sentiment": "negative",
+            "sentiment_score": -0.6,
+            "summary": "Mijoz kompensatsiya kutmoqda",
+            "suggested_action": "Zudlik bilan bog'laning",
+            "permalink": "https://t.me/uzummarket_chat/361937",
+        }
+        payload.update(overrides.pop("payload", {}))
+        event = AlertEvent(
+            brand_id=self.brand_id,
+            event_type="reputation_risk",
+            status=overrides.pop("status", "sent"),
+            delivery_channel="telegram",
+            delivery_target=STAFF_CHAT_ID,
+            payload=payload,
+            sent_at=overrides.pop("sent_at", utcnow()),
+            telegram_chat_id=STAFF_CHAT_ID,
+            telegram_message_id=overrides.pop("telegram_message_id", 42),
+            **overrides,
+        )
+        session.add(event)
+        session.commit()
+        session.refresh(event)
+        return event
+
+
+class CardRenderingTests(AlertWorkflowTestCase):
+    def test_open_card_shows_unchecked_status_and_both_buttons(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            text = build_alert_text(event.payload, event)
+            keyboard = build_alert_keyboard(event)
+
+        self.assertIn("Tekshirilmadi", text)
+        self.assertIn("Link: https://t.me/uzummarket_chat/361937", text)
+        rows = keyboard["inline_keyboard"]
+        self.assertEqual(len(rows[0]), 2)
+        self.assertEqual(rows[0][0]["callback_data"], f"alert:check:{event.id}")
+        self.assertEqual(rows[0][1]["callback_data"], f"alert:answer:{event.id}")
+        # The deep link is what turns "we saw it" into "we replied" in one tap.
+        self.assertEqual(rows[1][0]["url"], "https://t.me/uzummarket_chat/361937")
+
+    def test_answered_card_names_the_support_agent_and_offers_reopen(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            apply_alert_action(session, event, "answer", Actor(name="Aziz Karimov", user_id=7))
+            session.commit()
+            text = build_alert_text(event.payload, event)
+            keyboard = build_alert_keyboard(event)
+
+        self.assertIn("✅ Javob berildi", text)
+        self.assertIn("Aziz Karimov", text)
+        self.assertEqual(keyboard["inline_keyboard"][0][0]["callback_data"], f"alert:reopen:{event.id}")
+
+    def test_card_without_permalink_has_no_link_button(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session, payload={"permalink": None})
+            keyboard = build_alert_keyboard(event)
+        self.assertEqual(len(keyboard["inline_keyboard"]), 1)
+
+
+class TransitionTests(AlertWorkflowTestCase):
+    def test_check_records_the_reviewer_and_toggles_off_for_the_same_person(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            changed, _ = apply_alert_action(session, event, "check", Actor(name="Dildora", user_id=1))
+            self.assertTrue(changed)
+            self.assertEqual(event.work_status, "checked")
+            self.assertEqual(event.checked_by, "Dildora")
+
+            changed, _ = apply_alert_action(session, event, "check", Actor(name="Dildora", user_id=1))
+            self.assertTrue(changed)
+            self.assertEqual(event.work_status, "open")
+            self.assertIsNone(event.checked_by)
+
+    def test_second_person_cannot_overwrite_the_first_reviewer(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            apply_alert_action(session, event, "check", Actor(name="Dildora", user_id=1))
+            changed, message = apply_alert_action(session, event, "check", Actor(name="Aziz", user_id=2))
+
+        self.assertFalse(changed)
+        self.assertIn("Dildora", message)
+        self.assertEqual(event.checked_by, "Dildora")
+
+    def test_answering_implies_review_so_no_card_closes_anonymously(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            changed, _ = apply_alert_action(session, event, "answer", Actor(name="Aziz", user_id=2))
+
+        self.assertTrue(changed)
+        self.assertEqual(event.work_status, "answered")
+        self.assertEqual(event.answered_by, "Aziz")
+        self.assertEqual(event.checked_by, "Aziz")
+        self.assertIsNotNone(event.answered_at)
+
+    def test_answering_twice_reports_who_already_closed_it(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            apply_alert_action(session, event, "answer", Actor(name="Aziz", user_id=2))
+            changed, message = apply_alert_action(session, event, "answer", Actor(name="Nodira", user_id=3))
+
+        self.assertFalse(changed)
+        self.assertIn("Aziz", message)
+        self.assertEqual(event.answered_by, "Aziz")
+
+    def test_reopen_clears_the_answer_and_resets_the_sla_clock(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session, reminder_count=2, reminded_at=utcnow())
+            apply_alert_action(session, event, "answer", Actor(name="Aziz", user_id=2))
+            changed, _ = apply_alert_action(session, event, "reopen", Actor(name="Nodira", user_id=3))
+
+        self.assertTrue(changed)
+        self.assertEqual(event.work_status, "checked")
+        self.assertIsNone(event.answered_by)
+        self.assertEqual(event.reminder_count, 0)
+        self.assertIsNone(event.reminded_at)
+
+
+class ActorNameTests(unittest.TestCase):
+    def test_full_name_and_username_are_both_kept(self) -> None:
+        actor = actor_from_telegram_user({"id": 5, "first_name": "Aziz", "last_name": "Karimov", "username": "aziz"})
+        self.assertEqual(actor.name, "Aziz Karimov (@aziz)")
+        self.assertEqual(actor.user_id, 5)
+
+    def test_username_only_account_still_gets_a_name(self) -> None:
+        self.assertEqual(actor_from_telegram_user({"id": 6, "username": "support"}).name, "@support")
+
+    def test_anonymous_account_falls_back_to_id(self) -> None:
+        self.assertEqual(actor_from_telegram_user({"id": 9}).name, "id9")
+
+
+class CallbackTests(AlertWorkflowTestCase):
+    def test_button_press_updates_the_row_and_rerenders_the_card(self) -> None:
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            event_id = event.id
+
+        import app.services.alert_workflow as workflow
+
+        original = workflow.get_settings
+        workflow.get_settings = lambda: staff_settings()
+        try:
+            with SessionLocal() as session:
+                handled = handle_callback_query(
+                    api,
+                    session,
+                    callback_update("answer", event_id, {"id": 7, "first_name": "Aziz"}),
+                )
+        finally:
+            workflow.get_settings = original
+
+        self.assertTrue(handled)
+        with SessionLocal() as session:
+            stored = session.get(AlertEvent, event_id)
+            self.assertEqual(stored.work_status, "answered")
+            self.assertEqual(stored.answered_by, "Aziz")
+        self.assertEqual(len(api.edits), 1)
+        self.assertIn("Aziz", api.edits[0]["text"])
+        self.assertTrue(api.answers)
+
+    def test_press_from_another_chat_is_refused(self) -> None:
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            event_id = event.id
+
+        import app.services.alert_workflow as workflow
+
+        original = workflow.get_settings
+        workflow.get_settings = lambda: staff_settings()
+        try:
+            with SessionLocal() as session:
+                handled = handle_callback_query(
+                    api,
+                    session,
+                    callback_update("answer", event_id, {"id": 7, "first_name": "Aziz"}, chat_id="-100123"),
+                )
+        finally:
+            workflow.get_settings = original
+
+        self.assertTrue(handled)
+        self.assertEqual(api.edits, [])
+        with SessionLocal() as session:
+            self.assertEqual(session.get(AlertEvent, event_id).work_status, "open")
+
+    def test_unrelated_callback_is_left_for_other_handlers(self) -> None:
+        with SessionLocal() as session:
+            self.assertFalse(
+                handle_callback_query(FakeTelegramApi(), session, {"callback_query": {"id": "x", "data": "other:1"}})
+            )
+
+    def test_group_id_command_answers_with_the_chat_id(self) -> None:
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            handled = handle_alert_group_message(
+                api,
+                session,
+                {"message": {"text": "/id", "chat": {"id": -100777, "type": "supergroup", "title": "Support"}}},
+            )
+        self.assertTrue(handled)
+        self.assertIn("-100777", api.sent[0]["text"])
+
+
+class DeliveryTests(AlertWorkflowTestCase):
+    def test_delivery_stores_the_card_location_so_buttons_can_edit_it_later(self) -> None:
+        api = FakeTelegramApi()
+        settings = staff_settings()
+        with SessionLocal() as session:
+            event = self.make_event(session, status="pending", sent_at=None, telegram_message_id=None)
+            event.telegram_chat_id = None
+            session.commit()
+
+            with patch("app.services.alerts.TelegramBotApi", return_value=api):
+                deliver_one(session, settings, event)
+            session.refresh(event)
+
+            self.assertEqual(event.status, "sent")
+            self.assertEqual(event.telegram_message_id, 501)
+            self.assertEqual(event.telegram_chat_id, STAFF_CHAT_ID)
+        # The very first delivery already carries the buttons — no signal is ever posted
+        # as a dead-end message the group cannot close.
+        self.assertEqual(len(api.sent[0]["reply_markup"]["inline_keyboard"][0]), 2)
+
+
+class ReminderTests(AlertWorkflowTestCase):
+    def test_only_overdue_unanswered_alerts_are_nudged(self) -> None:
+        settings = staff_settings(alert_sla_minutes=30)
+        with SessionLocal() as session:
+            overdue = self.make_event(session, sent_at=utcnow() - timedelta(minutes=45))
+            self.make_event(session, sent_at=utcnow() - timedelta(minutes=5))
+            answered = self.make_event(session, sent_at=utcnow() - timedelta(hours=3))
+            apply_alert_action(session, answered, "answer", Actor(name="Aziz", user_id=2))
+            session.commit()
+
+            due = due_reminder_alerts(session, settings)
+            self.assertEqual([event.id for event in due], [overdue.id])
+
+    def test_reminders_stop_at_the_configured_cap(self) -> None:
+        settings = staff_settings(alert_sla_minutes=30, alert_reminder_max=2)
+        with SessionLocal() as session:
+            self.make_event(session, sent_at=utcnow() - timedelta(hours=5), reminder_count=2, reminded_at=utcnow() - timedelta(hours=2))
+            self.assertEqual(due_reminder_alerts(session, settings), [])
+
+    def test_nudge_replies_to_the_card_and_counts_up(self) -> None:
+        api = FakeTelegramApi()
+        settings = staff_settings(alert_sla_minutes=30)
+        with SessionLocal() as session:
+            event = self.make_event(session, sent_at=utcnow() - timedelta(minutes=90))
+            sent = send_sla_reminders(session, settings, api)
+            session.refresh(event)
+
+            self.assertEqual(sent, 1)
+            self.assertEqual(event.reminder_count, 1)
+            self.assertIsNotNone(event.reminded_at)
+        self.assertEqual(api.sent[0]["reply_to_message_id"], 42)
+        self.assertIn("javobsiz", api.sent[0]["text"])
+
+
+class CounterTests(AlertWorkflowTestCase):
+    def test_counter_tracks_open_work_and_drops_answered_signals(self) -> None:
+        # The counter is global (one dashboard, one staff group), so assert on the delta —
+        # a dev database with real signals in it must not make this test lie.
+        with SessionLocal() as session:
+            before = open_alert_counts(session)
+            self.make_event(session)
+            checked = self.make_event(session, payload={"risk_level": "critical"})
+            apply_alert_action(session, checked, "check", Actor(name="Dildora", user_id=1))
+            answered = self.make_event(session)
+            apply_alert_action(session, answered, "answer", Actor(name="Aziz", user_id=2))
+            session.commit()
+
+            counts = open_alert_counts(session)
+            stats = today_stats(session)
+
+        self.assertEqual(counts["open"] - before["open"], 2)
+        self.assertEqual(counts["checked"] - before["checked"], 1)
+        self.assertEqual(counts["by_risk"].get("critical", 0) - before["by_risk"].get("critical", 0), 1)
+        self.assertGreaterEqual(stats["answered"], 1)
+        self.assertIn("Aziz", [row["name"] for row in stats["by_person"]])
+
+    def test_pinned_summary_is_posted_once_then_edited_in_place(self) -> None:
+        api = FakeTelegramApi()
+        settings = staff_settings(alert_summary_enabled=True)
+        with SessionLocal() as session:
+            session.query(AppState).filter(AppState.key == SUMMARY_STATE_KEY).delete()
+            session.commit()
+
+            event = self.make_event(session)
+            sync_summary_message(api, session, settings, force=True)
+            self.assertEqual(len(api.sent), 1)
+            self.assertEqual(api.pins, [501])
+
+            # Unchanged board → no Telegram traffic at all. Re-store the text the renderer
+            # produces *now* so the clock in "Yangilandi: HH:MM" cannot make this flaky.
+            state = session.get(AppState, SUMMARY_STATE_KEY)
+            state.value = {**state.value, "text": render_summary_text(session)}
+            session.commit()
+            sync_summary_message(api, session, settings, force=True)
+            self.assertEqual(len(api.sent), 1)
+            self.assertEqual(api.edits, [])
+
+            apply_alert_action(session, event, "answer", Actor(name="Aziz", user_id=2))
+            session.commit()
+            sync_summary_message(api, session, settings, force=True)
+
+        self.assertEqual(len(api.sent), 1)
+        self.assertEqual(len(api.edits), 1)
+        self.assertEqual(api.edits[0]["message_id"], 501)
+
+    def test_summary_and_open_list_render_source_and_link(self) -> None:
+        with SessionLocal() as session:
+            self.make_event(session)
+            summary = render_summary_text(session)
+            listing = open_alerts_text(session)
+
+        self.assertIn("Javob kutayotgan signallar", summary)
+        self.assertIn("Официальный чат Uzum Market", summary)
+        self.assertIn("https://t.me/uzummarket_chat/361937", listing)
+
+
+if __name__ == "__main__":
+    unittest.main()

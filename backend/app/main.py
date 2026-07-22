@@ -7,13 +7,15 @@ import re
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
+from urllib.parse import parse_qs, quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
@@ -45,7 +47,9 @@ from app.models import (
     YouTubeSource,
 )
 from app.schemas import (
+    AlertActionIn,
     AlertEventOut,
+    AlertSummaryOut,
     BrandCreate,
     BrandOut,
     BrandProfileSuggestRequest,
@@ -107,7 +111,16 @@ from app.schemas import (
     YouTubeStatus,
     YouTubeSummary,
 )
-from app.services.alerts import record_alert
+from app.services.alert_workflow import (
+    Actor,
+    apply_alert_action,
+    open_alert_counts,
+    publish_alert_event,
+    refresh_alert_card,
+    sync_summary_message,
+    today_stats,
+)
+from app.services.alerts import OPEN_WORK_STATUSES, record_alert
 from app.services.auth import create_token, verify_credentials, verify_token
 from app.services.facebook_api import (
     FacebookApi,
@@ -125,6 +138,15 @@ from app.services.gemini_analysis import (
 )
 from app.services.instagram_api import InstagramApi, InstagramApiError, detect_account, verify_signature
 from app.services.instagram_ingestion import ingest_instagram_comment
+from app.services.instagram_oauth import (
+    InstagramOAuthError,
+    build_authorize_url,
+    decode_state,
+    encode_state,
+    exchange_code_for_token,
+    exchange_for_long_lived,
+    parse_signed_request,
+)
 from app.services.instagram_sync import sync_instagram_source
 from app.services.matching import BrandMatch, collect_matched_terms, invalidate_brand_cache, match_brand, normalize_text
 from app.services.source_deletion import SourceNotFoundError, delete_monitored_source
@@ -389,6 +411,13 @@ AUTH_PUBLIC_PATHS = {
     "/openapi.json",
     "/instagram/webhook",
     "/facebook/webhook",
+    # Meta redirects the operator's browser here (no Authorization header can be set on
+    # a redirect) and calls the two account callbacks server-to-server. Each verifies
+    # its own signature: the OAuth callback via the signed ``state``, the callbacks via
+    # ``signed_request``.
+    "/instagram/oauth/callback",
+    "/instagram/deauthorize",
+    "/instagram/data-deletion",
 }
 
 
@@ -536,6 +565,10 @@ def upsert_telegram_source_from_chat(
     source.collect_comments = collect_comments
     source.monitor_from = monitor_from or source.monitor_from or datetime.now(timezone.utc)
     source.active = True
+    # Re-adding a source that was removed with its mentions kept revives the same row, so
+    # last_seen_message_id survives: catch-up imports only the gap and the AI worker only
+    # analyses what still has no verdict.
+    source.deleted_at = None
     return source
 
 
@@ -635,6 +668,10 @@ def upsert_catalog_source(
     source.collect_comments = collect_comments
     source.monitor_from = monitor_from or source.monitor_from or datetime.now(timezone.utc)
     source.active = True
+    # Re-adding a source that was removed with its mentions kept revives the same row, so
+    # last_seen_message_id survives: catch-up imports only the gap and the AI worker only
+    # analyses what still has no verdict.
+    source.deleted_at = None
     return source
 
 
@@ -858,6 +895,9 @@ def upsert_connector_source(
     source.collect_comments = collect_comments
     source.monitor_from = monitor_from
     source.active = True
+    # See upsert_telegram_source_from_chat: reviving keeps the row id, so retained mentions
+    # stay attached and are not re-ingested or re-analysed.
+    source.deleted_at = None
     if access_status is None:
         source.bot_access_status = "unverified"
     else:
@@ -1099,6 +1139,9 @@ def upsert_youtube_source(
     source.collect_transcripts = collect_transcripts
     source.monitor_from = monitor_from
     source.active = True
+    # Re-adding a source that was removed with its mentions kept revives the same row, so
+    # the retained mentions stay attached instead of being re-ingested under a new id.
+    source.deleted_at = None
     source.video_id = parsed.video_id
     source.channel_id = parsed.channel_id
     source.channel_handle = parsed.channel_handle
@@ -1133,6 +1176,89 @@ def enrich_youtube_source(source: YouTubeSource, api: YouTubeApi) -> None:
         source.description = snippet.get("description") or source.description
         source.channel_id = snippet.get("channelId") or source.channel_id
         source.channel_title = snippet.get("channelTitle") or source.channel_title
+
+
+@dataclass
+class YouTubeSyncWindow:
+    floor: datetime | None
+    since: datetime | None
+    first_sync: bool
+
+
+@dataclass
+class YouTubeIngestCache:
+    """Mentions added during the current sync, keyed by their uniqueness tuple.
+
+    The session runs with ``autoflush=False``, so a plain query cannot see rows
+    added earlier in the same sync. Without this, a comment returned twice by
+    pagination is inserted twice and the unique constraint aborts the whole cycle
+    at commit — losing every mention collected in it.
+    """
+
+    mentions: dict[tuple[Any, str], YouTubeMention] = field(default_factory=dict)
+
+    def get(self, brand_id: Any, external_id: str) -> YouTubeMention | None:
+        return self.mentions.get((brand_id, external_id))
+
+    def add(self, brand_id: Any, external_id: str, mention: YouTubeMention) -> None:
+        self.mentions[(brand_id, external_id)] = mention
+
+
+def youtube_source_is_resolved(source: YouTubeSource) -> bool:
+    """True when the immutable ids a sync needs are already stored.
+
+    Re-resolving a channel on every cycle costs an extra API call per source for
+    data that never changes, so enrichment is only repeated while something is
+    still missing.
+    """
+    if source.source_kind == "channel":
+        return bool(source.channel_id and source.uploads_playlist_id)
+    if source.source_kind == "video":
+        return bool(source.video_id and source.title)
+    return True
+
+
+def youtube_sync_window(source: YouTubeSource, *, overlap_seconds: int) -> YouTubeSyncWindow:
+    """Resolve how far back this sync should look.
+
+    ``floor`` is the absolute boundary the operator chose and is never crossed.
+    ``since`` is the incremental checkpoint: on the first sync it equals the floor
+    (full backfill), afterwards it is ``last_checked_at`` minus a small overlap so
+    items that landed while the previous cycle was mid-flight are still picked up.
+    """
+    floor = normalize_aware(source.monitor_from or source.created_at)
+    checkpoint = normalize_aware(source.last_checked_at)
+    if checkpoint is None:
+        return YouTubeSyncWindow(floor=floor, since=floor, first_sync=True)
+    since = checkpoint - timedelta(seconds=overlap_seconds)
+    if floor and since < floor:
+        since = floor
+    return YouTubeSyncWindow(floor=floor, since=since, first_sync=False)
+
+
+def recent_youtube_video_ids(session: Session, source: YouTubeSource, *, since: datetime | None, limit: int) -> list[str]:
+    """Videos this source already ingested that are still worth polling for comments.
+
+    Narrowing video discovery to the watermark means keyword/hashtag sources stop
+    re-discovering older videos, but comments keep arriving on them. Replaying the
+    recently-active ones from the database costs no search units.
+    """
+    if limit <= 0:
+        return []
+    recency = func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at)
+    query = (
+        session.query(YouTubeMention.video_id)
+        .filter(
+            YouTubeMention.source_id == source.id,
+            YouTubeMention.video_id.is_not(None),
+        )
+        .group_by(YouTubeMention.video_id)
+        .order_by(func.max(recency).desc())
+        .limit(limit)
+    )
+    if since is not None:
+        query = query.having(func.max(recency) >= since)
+    return [row.video_id for row in query.all()]
 
 
 def match_brand_for_youtube_source(session: Session, source: YouTubeSource, normalized_text: str) -> BrandMatch:
@@ -1181,7 +1307,46 @@ def unique_terms(values: list[str]) -> list[str]:
     return result
 
 
-def ingest_youtube_video(session: Session, source: YouTubeSource, item: dict) -> YouTubeMention | None:
+def resolve_youtube_mention_row(
+    session: Session,
+    *,
+    brand_id: Any,
+    external_id: str,
+    item_type: str,
+    cache: YouTubeIngestCache | None,
+) -> YouTubeMention:
+    """Find or create the mention row for this (brand, external id) pair.
+
+    Checks the in-sync cache before the database so a duplicate inside the same
+    cycle reuses the pending row instead of adding a second one.
+    """
+    cached = cache.get(brand_id, external_id) if cache else None
+    if cached is not None:
+        return cached
+
+    mention = (
+        session.query(YouTubeMention)
+        .filter(
+            YouTubeMention.brand_id == brand_id,
+            YouTubeMention.external_id == external_id,
+        )
+        .one_or_none()
+    )
+    if mention is None:
+        mention = YouTubeMention(brand_id=brand_id, external_id=external_id, item_type=item_type)
+        session.add(mention)
+    if cache:
+        cache.add(brand_id, external_id, mention)
+    return mention
+
+
+def ingest_youtube_video(
+    session: Session,
+    source: YouTubeSource,
+    item: dict,
+    *,
+    cache: YouTubeIngestCache | None = None,
+) -> YouTubeMention | None:
     video_id = youtube_video_id_from_item(item)
     if not video_id:
         return None
@@ -1195,21 +1360,13 @@ def ingest_youtube_video(session: Session, source: YouTubeSource, item: dict) ->
 
     external_id = f"youtube:video:{video_id}"
     mention_brand_id = brand_match.brand.id if brand_match.brand else source.brand_id
-    mention = (
-        session.query(YouTubeMention)
-        .filter(
-            YouTubeMention.brand_id == mention_brand_id,
-            YouTubeMention.external_id == external_id,
-        )
-        .one_or_none()
+    mention = resolve_youtube_mention_row(
+        session,
+        brand_id=mention_brand_id,
+        external_id=external_id,
+        item_type="video",
+        cache=cache,
     )
-    if mention is None:
-        mention = YouTubeMention(
-            brand_id=mention_brand_id,
-            external_id=external_id,
-            item_type="video",
-        )
-        session.add(mention)
 
     mention.source_id = source.id
     mention.brand_id = mention_brand_id
@@ -1240,6 +1397,7 @@ def ingest_youtube_comment(
     snippet: dict,
     raw: dict,
     item_type: str = "comment",
+    cache: YouTubeIngestCache | None = None,
 ) -> YouTubeMention | None:
     text = snippet.get("textDisplay") or snippet.get("textOriginal") or ""
     normalized = normalize_text(text)
@@ -1249,21 +1407,13 @@ def ingest_youtube_comment(
 
     external_id = f"youtube:comment:{comment_id}"
     mention_brand_id = brand_match.brand.id if brand_match.brand else source.brand_id
-    mention = (
-        session.query(YouTubeMention)
-        .filter(
-            YouTubeMention.brand_id == mention_brand_id,
-            YouTubeMention.external_id == external_id,
-        )
-        .one_or_none()
+    mention = resolve_youtube_mention_row(
+        session,
+        brand_id=mention_brand_id,
+        external_id=external_id,
+        item_type=item_type,
+        cache=cache,
     )
-    if mention is None:
-        mention = YouTubeMention(
-            brand_id=mention_brand_id,
-            external_id=external_id,
-            item_type=item_type,
-        )
-        session.add(mention)
 
     author_channel = snippet.get("authorChannelId") or {}
     mention.source_id = source.id
@@ -1284,41 +1434,55 @@ def ingest_youtube_comment(
     return mention
 
 
-def ingest_youtube_comment_thread(session: Session, source: YouTubeSource, item: dict, from_date: datetime | None) -> int:
-    count = 0
+def ingest_youtube_comment_thread(
+    session: Session,
+    source: YouTubeSource,
+    item: dict,
+    from_date: datetime | None,
+    *,
+    cache: YouTubeIngestCache | None = None,
+) -> list[YouTubeMention]:
+    ingested: list[YouTubeMention] = []
     snippet = item.get("snippet") or {}
     top_level = (snippet.get("topLevelComment") or {})
     top_snippet = top_level.get("snippet") or {}
     published_at = parse_rfc3339(top_snippet.get("publishedAt"))
     if from_date and published_at and published_at < from_date:
-        return 0
-    if top_level.get("id") and ingest_youtube_comment(
-        session,
-        source,
-        comment_id=top_level["id"],
-        video_id=snippet.get("videoId"),
-        snippet=top_snippet,
-        raw=item,
-        item_type="comment",
-    ):
-        count += 1
+        return ingested
+    if top_level.get("id"):
+        mention = ingest_youtube_comment(
+            session,
+            source,
+            comment_id=top_level["id"],
+            video_id=snippet.get("videoId"),
+            snippet=top_snippet,
+            raw=item,
+            item_type="comment",
+            cache=cache,
+        )
+        if mention:
+            mention.reply_count = int_or_none(snippet.get("totalReplyCount"))
+            ingested.append(mention)
 
     for reply in ((item.get("replies") or {}).get("comments") or []):
         reply_snippet = reply.get("snippet") or {}
         reply_published_at = parse_rfc3339(reply_snippet.get("publishedAt"))
         if from_date and reply_published_at and reply_published_at < from_date:
             continue
-        if reply.get("id") and ingest_youtube_comment(
-            session,
-            source,
-            comment_id=reply["id"],
-            video_id=reply_snippet.get("videoId") or snippet.get("videoId"),
-            snippet=reply_snippet,
-            raw=reply,
-            item_type="comment_reply",
-        ):
-            count += 1
-    return count
+        if reply.get("id"):
+            mention = ingest_youtube_comment(
+                session,
+                source,
+                comment_id=reply["id"],
+                video_id=reply_snippet.get("videoId") or snippet.get("videoId"),
+                snippet=reply_snippet,
+                raw=reply,
+                item_type="comment_reply",
+                cache=cache,
+            )
+            if mention:
+                ingested.append(mention)
+    return ingested
 
 
 def int_or_none(value: Any) -> int | None:
@@ -1345,7 +1509,7 @@ def publish_youtube_source_event(session: Session, source: YouTubeSource) -> Non
     )
 
 
-def publish_youtube_mention_event(session: Session, mention: YouTubeMention) -> None:
+def publish_youtube_mention_event(session: Session, mention: YouTubeMention, *, commit: bool = True) -> None:
     publish_realtime_event(
         session,
         "youtube_mention",
@@ -1357,6 +1521,7 @@ def publish_youtube_mention_event(session: Session, mention: YouTubeMention) -> 
             "video_id": mention.video_id,
             "published_at": mention.published_at,
         },
+        commit=commit,
     )
 
 
@@ -1364,55 +1529,85 @@ def sync_youtube_source(session: Session, source: YouTubeSource, api: YouTubeApi
     if not api.configured:
         return YouTubeSourceSyncResult(source_id=source.id, ok=False, error="YOUTUBE_API_KEY sozlanmagan")
 
+    settings = get_settings()
+    started_at = datetime.now(timezone.utc)
     try:
-        enrich_youtube_source(source, api)
-        session.flush()
-        from_date = normalize_aware(source.monitor_from or source.created_at)
+        if not youtube_source_is_resolved(source):
+            enrich_youtube_source(source, api)
+            session.flush()
+
+        window = youtube_sync_window(source, overlap_seconds=settings.youtube_sync_overlap_seconds)
+        cache = YouTubeIngestCache()
+        pending_events: list[YouTubeMention] = []
         imported = 0
         videos_seen = 0
         comments_seen = 0
         video_ids: list[str] = []
 
         if source.collect_videos:
-            video_items = fetch_youtube_video_items(api, source, from_date=from_date, max_pages=payload.max_pages)
+            video_items = fetch_youtube_video_items(api, source, from_date=window.since, max_pages=payload.max_pages)
+            for item in video_items:
+                video_id = youtube_video_id_from_item(item)
+                if video_id:
+                    videos_seen += 1
+                    video_ids.append(video_id)
+            # One batched videos.list per 50 ids instead of one call per video.
+            details = api.videos_by_ids(video_ids) if video_ids else {}
             for item in video_items:
                 video_id = youtube_video_id_from_item(item)
                 if not video_id:
                     continue
-                videos_seen += 1
-                video_ids.append(video_id)
-                detail = api.video_by_id(video_id) or item
-                mention = ingest_youtube_video(session, source, detail)
+                mention = ingest_youtube_video(session, source, details.get(video_id) or item, cache=cache)
                 if mention:
                     imported += 1
-                    session.flush()
-                    publish_youtube_mention_event(session, mention)
+                    pending_events.append(mention)
 
         if source.collect_comments:
             if source.source_kind == "channel" and source.channel_id:
-                comments_seen += fetch_and_ingest_channel_comments(
+                channel_mentions = fetch_and_ingest_channel_comments(
                     session,
                     api,
                     source,
-                    from_date=from_date,
+                    from_date=window.since,
                     max_pages=payload.max_pages,
                     max_results=payload.comments_per_video,
+                    cache=cache,
                 )
-            comment_video_ids = [] if source.source_kind == "channel" else [source.video_id, *video_ids]
-            for video_id in list(dict.fromkeys(comment_video_ids)):
-                if not video_id:
-                    continue
-                comments_seen += fetch_and_ingest_video_comments(
+                comments_seen += len(channel_mentions)
+                pending_events.extend(channel_mentions)
+            else:
+                # Videos discovered this cycle, plus recently active ones already in
+                # the database — narrowing discovery to the watermark must not stop
+                # comments arriving on videos found in earlier cycles.
+                replay_ids = recent_youtube_video_ids(
                     session,
-                    api,
                     source,
-                    video_id=video_id,
-                    from_date=from_date,
-                    max_pages=payload.max_pages,
-                    max_results=payload.comments_per_video,
+                    since=window.since,
+                    limit=settings.youtube_comment_replay_videos,
                 )
+                comment_video_ids = [source.video_id, *video_ids, *replay_ids]
+                for video_id in list(dict.fromkeys(comment_video_ids)):
+                    if not video_id:
+                        continue
+                    video_mentions = fetch_and_ingest_video_comments(
+                        session,
+                        api,
+                        source,
+                        video_id=video_id,
+                        from_date=window.since,
+                        max_pages=payload.max_pages,
+                        max_results=payload.comments_per_video,
+                        cache=cache,
+                    )
+                    comments_seen += len(video_mentions)
+                    pending_events.extend(video_mentions)
 
-        source.last_checked_at = datetime.now(timezone.utc)
+        # Checkpoint from when the sync STARTED, not when it finished: anything
+        # published while it was running must still fall inside the next window.
+        source.last_checked_at = started_at
+        session.flush()
+        for mention in pending_events:
+            publish_youtube_mention_event(session, mention, commit=False)
         session.commit()
         return YouTubeSourceSyncResult(
             source_id=source.id,
@@ -1428,6 +1623,7 @@ def sync_youtube_source(session: Session, source: YouTubeSource, api: YouTubeApi
             ok=False,
             error=str(exc),
             rate_limited=exc.rate_limited,
+            quota_exceeded=exc.quota_exceeded,
             retry_after_seconds=exc.retry_after_seconds,
         )
     except Exception as exc:
@@ -1447,8 +1643,9 @@ def fetch_youtube_video_items(
     max_pages: int,
 ) -> list[dict]:
     if source.source_kind == "video" and source.video_id:
-        item = api.video_by_id(source.video_id)
-        return [item] if item else []
+        # Just the id: the caller's batched videos.list fetches the detail, so
+        # resolving it here too would spend a second unit on the same video.
+        return [{"id": source.video_id}]
 
     if source.source_kind == "channel":
         if not source.uploads_playlist_id:
@@ -1526,8 +1723,9 @@ def fetch_and_ingest_video_comments(
     from_date: datetime | None,
     max_pages: int,
     max_results: int,
-) -> int:
-    comments_seen = 0
+    cache: YouTubeIngestCache | None = None,
+) -> list[YouTubeMention]:
+    ingested: list[YouTubeMention] = []
     page_token = None
     for _ in range(max_pages):
         try:
@@ -1536,12 +1734,30 @@ def fetch_and_ingest_video_comments(
             if exc.status_code in {403, 404} and not exc.rate_limited:
                 break
             raise
-        for item in payload.get("items") or []:
-            comments_seen += ingest_youtube_comment_thread(session, source, item, from_date)
+        items = payload.get("items") or []
+        for item in items:
+            ingested.extend(ingest_youtube_comment_thread(session, source, item, from_date, cache=cache))
         page_token = payload.get("nextPageToken")
-        if not page_token:
+        if not page_token or comment_page_is_older_than(items, from_date):
             break
-    return comments_seen
+    return ingested
+
+
+def comment_page_is_older_than(items: list[dict], from_date: datetime | None) -> bool:
+    """True when a full page of threads predates the window.
+
+    commentThreads is ordered newest-first, so once a page contains nothing new
+    every later page is older still and paginating further only spends quota.
+    """
+    if not from_date or not items:
+        return False
+    for item in items:
+        snippet = item.get("snippet") or {}
+        top_snippet = ((snippet.get("topLevelComment") or {}).get("snippet")) or {}
+        published_at = parse_rfc3339(top_snippet.get("publishedAt"))
+        if published_at is None or published_at >= from_date:
+            return False
+    return True
 
 
 def fetch_and_ingest_channel_comments(
@@ -1552,10 +1768,11 @@ def fetch_and_ingest_channel_comments(
     from_date: datetime | None,
     max_pages: int,
     max_results: int,
-) -> int:
+    cache: YouTubeIngestCache | None = None,
+) -> list[YouTubeMention]:
     if not source.channel_id:
-        return 0
-    comments_seen = 0
+        return []
+    ingested: list[YouTubeMention] = []
     page_token = None
     for _ in range(max_pages):
         try:
@@ -1564,12 +1781,13 @@ def fetch_and_ingest_channel_comments(
             if exc.status_code in {403, 404} and not exc.rate_limited:
                 break
             raise
-        for item in payload.get("items") or []:
-            comments_seen += ingest_youtube_comment_thread(session, source, item, from_date)
+        items = payload.get("items") or []
+        for item in items:
+            ingested.extend(ingest_youtube_comment_thread(session, source, item, from_date, cache=cache))
         page_token = payload.get("nextPageToken")
-        if not page_token:
+        if not page_token or comment_page_is_older_than(items, from_date):
             break
-    return comments_seen
+    return ingested
 
 
 def membership_status(api: TelegramBotApi, chat_id: int, bot_id: int, issues: list[str]) -> str | None:
@@ -1714,9 +1932,15 @@ def publish_source_event(session: Session, source: TelegramSource, event_type: s
     )
 
 
-def delete_source_and_notify(platform: str, source_id: uuid.UUID, session: Session) -> dict[str, Any]:
+def delete_source_and_notify(
+    platform: str,
+    source_id: uuid.UUID,
+    session: Session,
+    *,
+    purge_mentions: bool = True,
+) -> dict[str, Any]:
     try:
-        result = delete_monitored_source(session, platform, source_id)
+        result = delete_monitored_source(session, platform, source_id, purge_mentions=purge_mentions)
     except SourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     publish_realtime_event(
@@ -1727,6 +1951,7 @@ def delete_source_and_notify(platform: str, source_id: uuid.UUID, session: Sessi
             "deleted": True,
             "mentions_deleted": result["mentions_deleted"],
             "analyses_deleted": result["analyses_deleted"],
+            "mentions_retained": result["mentions_retained"],
         },
     )
     return result
@@ -2425,7 +2650,12 @@ def import_telegram_sources(payload: TelegramSourceImport, session: DbSession) -
 
 @app.get("/telegram/sources", response_model=list[TelegramSourceOut])
 def list_telegram_sources(session: DbSession) -> list[TelegramSource]:
-    return session.query(TelegramSource).order_by(TelegramSource.created_at.desc()).all()
+    return (
+        session.query(TelegramSource)
+        .filter(TelegramSource.deleted_at.is_(None))
+        .order_by(TelegramSource.created_at.desc())
+        .all()
+    )
 
 
 @app.patch("/telegram/sources/{source_id}", response_model=TelegramSourceOut)
@@ -2452,14 +2682,18 @@ def update_telegram_source(source_id: uuid.UUID, payload: TelegramSourceUpdate, 
 
 
 @app.delete("/telegram/sources/{source_id}", response_model=SourceDeleteResult)
-def delete_telegram_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
+def delete_telegram_source(
+    source_id: uuid.UUID,
+    session: DbSession,
+    purge_mentions: bool = True,
+) -> dict[str, Any]:
     source = session.get(TelegramSource, source_id)
     if source and source.source_role == "bot_inbox" and source.bot_connection_id:
         raise HTTPException(
             status_code=409,
             detail="Bot inboxni alohida o'chirib bo'lmaydi; avval bot connectionni uzing",
         )
-    return delete_source_and_notify("telegram", source_id, session)
+    return delete_source_and_notify("telegram", source_id, session, purge_mentions=purge_mentions)
 
 
 @app.post("/telegram/sources/{source_id}/refresh", response_model=TelegramSourceRefreshResult)
@@ -2598,7 +2832,12 @@ def youtube_source_categories(request: Request) -> list[dict[str, str]]:
 
 @app.get("/youtube/sources", response_model=list[YouTubeSourceOut])
 def list_youtube_sources(session: DbSession) -> list[YouTubeSource]:
-    return session.query(YouTubeSource).order_by(YouTubeSource.created_at.desc()).all()
+    return (
+        session.query(YouTubeSource)
+        .filter(YouTubeSource.deleted_at.is_(None))
+        .order_by(YouTubeSource.created_at.desc())
+        .all()
+    )
 
 
 @app.post("/youtube/sources/import", response_model=list[YouTubeSourceImportResult])
@@ -2668,8 +2907,12 @@ def update_youtube_source(source_id: uuid.UUID, payload: YouTubeSourceUpdate, se
 
 
 @app.delete("/youtube/sources/{source_id}", response_model=SourceDeleteResult)
-def delete_youtube_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
-    return delete_source_and_notify("youtube", source_id, session)
+def delete_youtube_source(
+    source_id: uuid.UUID,
+    session: DbSession,
+    purge_mentions: bool = True,
+) -> dict[str, Any]:
+    return delete_source_and_notify("youtube", source_id, session, purge_mentions=purge_mentions)
 
 
 @app.post("/youtube/sources/{source_id}/sync", response_model=YouTubeSourceSyncResult)
@@ -2721,7 +2964,7 @@ def list_youtube_mentions(
 
 @app.get("/youtube/summary", response_model=YouTubeSummary)
 def youtube_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> YouTubeSummary:
-    source_query = session.query(YouTubeSource)
+    source_query = session.query(YouTubeSource).filter(YouTubeSource.deleted_at.is_(None))
     mention_query = session.query(YouTubeMention)
     analysis_query = (
         session.query(YouTubeAnalysis)
@@ -3043,10 +3286,10 @@ def dashboard_analytics(
         func.coalesce(FacebookMention.published_at, FacebookMention.created_at) >= previous_start,
         func.coalesce(FacebookMention.published_at, FacebookMention.created_at) < start_at,
     )
-    telegram_sources_query = session.query(TelegramSource)
-    youtube_sources_query = session.query(YouTubeSource)
-    instagram_sources_query = session.query(InstagramSource)
-    facebook_sources_query = session.query(FacebookSource)
+    telegram_sources_query = session.query(TelegramSource).filter(TelegramSource.deleted_at.is_(None))
+    youtube_sources_query = session.query(YouTubeSource).filter(YouTubeSource.deleted_at.is_(None))
+    instagram_sources_query = session.query(InstagramSource).filter(InstagramSource.deleted_at.is_(None))
+    facebook_sources_query = session.query(FacebookSource).filter(FacebookSource.deleted_at.is_(None))
     analysis_query = session.query(Analysis).join(Mention).filter(func.coalesce(Mention.message_date, Mention.created_at) >= start_at)
     youtube_analysis_query = (
         session.query(YouTubeAnalysis)
@@ -3500,8 +3743,64 @@ def dashboard_timeseries(
 
 
 @app.get("/alerts/events", response_model=list[AlertEventOut])
-def list_alert_events(session: DbSession, limit: int = Query(default=100, le=500)) -> list[AlertEvent]:
-    return session.query(AlertEvent).order_by(AlertEvent.created_at.desc()).limit(limit).all()
+def list_alert_events(
+    session: DbSession,
+    limit: int = Query(default=100, le=500),
+    work_status: str | None = Query(default=None, description="open | checked | answered | unanswered"),
+    platform: str | None = None,
+    brand_id: uuid.UUID | None = None,
+) -> list[AlertEvent]:
+    query = session.query(AlertEvent)
+    if work_status == "unanswered":
+        query = query.filter(AlertEvent.work_status.in_(OPEN_WORK_STATUSES))
+    elif work_status:
+        query = query.filter(AlertEvent.work_status == work_status)
+    if platform:
+        query = query.filter(AlertEvent.payload["platform"].astext == platform)
+    if brand_id:
+        query = query.filter(AlertEvent.brand_id == brand_id)
+    return query.order_by(AlertEvent.created_at.desc()).limit(limit).all()
+
+
+@app.get("/alerts/summary", response_model=AlertSummaryOut)
+def alert_summary(session: DbSession) -> AlertSummaryOut:
+    """The same numbers the pinned Telegram message shows — how much work is still open."""
+    counts = open_alert_counts(session)
+    stats = today_stats(session)
+    return AlertSummaryOut(
+        open=counts["open"],
+        checked=counts["checked"],
+        oldest_created_at=counts["oldest_created_at"],
+        by_risk=counts["by_risk"],
+        by_source=counts["by_source"],
+        answered_today=stats["answered"],
+        avg_response_seconds=stats["avg_response_seconds"],
+        by_person=stats["by_person"],
+    )
+
+
+@app.post("/alerts/events/{event_id}/action", response_model=AlertEventOut)
+def act_on_alert_event(event_id: uuid.UUID, body: AlertActionIn, session: DbSession) -> AlertEvent:
+    """Dashboard twin of the Telegram buttons; the Telegram card is re-rendered to match."""
+    event = session.query(AlertEvent).filter(AlertEvent.id == event_id).with_for_update().one_or_none()
+    if event is None:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Alert event not found")
+    actor = Actor(name=(body.actor or "Dashboard").strip()[:255], user_id=None, source="dashboard")
+    changed, message = apply_alert_action(session, event, body.action, actor)
+    if not changed:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=message)
+    publish_alert_event(session, event, commit=False)
+    session.commit()
+    session.refresh(event)
+
+    settings = get_settings()
+    if settings.telegram_bot_token:
+        api = TelegramBotApi(settings.telegram_bot_token)
+        refresh_alert_card(api, event)
+        sync_summary_message(api, session, settings, force=True)
+    return event
 
 
 # ============================ Instagram ============================
@@ -3560,7 +3859,73 @@ def instagram_source_categories(request: Request) -> list[dict[str, str]]:
 
 @app.get("/instagram/sources", response_model=list[InstagramSourceOut])
 def list_instagram_sources(session: DbSession) -> list[InstagramSource]:
-    return session.query(InstagramSource).order_by(InstagramSource.created_at.asc()).all()
+    return (
+        session.query(InstagramSource)
+        .filter(InstagramSource.deleted_at.is_(None))
+        .order_by(InstagramSource.created_at.asc())
+        .all()
+    )
+
+
+def _upsert_instagram_account(
+    session: Session,
+    *,
+    brand_id: uuid.UUID | None,
+    detected: dict[str, Any],
+    fallback_token: str,
+    ig_user_id: str | None = None,
+    username: str | None = None,
+    account_name: str | None = None,
+    page_id: str | None = None,
+    conflict_on_existing: bool = True,
+    defaults: dict[str, Any] | None = None,
+) -> InstagramSource:
+    """Create, revive or re-authorize the source row for a detected Instagram account.
+
+    Shared by the paste-a-token endpoint and the OAuth callback; they differ only in what
+    an already-connected account means. Pasting a token for a live source is an operator
+    mistake (409), while re-running Business Login is exactly how a token is refreshed.
+    """
+    resolved_id = ig_user_id or str(detected["ig_user_id"])
+    token = detected.get("access_token") or fallback_token
+    status_detail = f"@{detected.get('username')} ({detected['api_base']})"
+    existing = session.query(InstagramSource).filter(InstagramSource.ig_user_id == resolved_id).one_or_none()
+    if existing is not None and existing.deleted_at is None and conflict_on_existing:
+        raise HTTPException(status_code=409, detail="Bu Instagram akkaunt allaqachon ulangan")
+    if existing is not None:
+        # Previously removed with its mentions kept — revive the same row so the retained
+        # mentions stay attached and are not re-ingested under a new id.
+        existing.deleted_at = None
+        existing.active = True
+        existing.brand_id = brand_id
+        existing.access_token = token
+        existing.api_base = detected["api_base"]
+        existing.token_status = "active"
+        existing.status_detail = status_detail
+        existing.username = existing.username or detected.get("username")
+        existing.last_checked_at = datetime.now(timezone.utc)
+        session.commit()
+        session.refresh(existing)
+        return existing
+    provided_username = (username or "").strip().lstrip("@") or None
+    source = InstagramSource(
+        brand_id=brand_id,
+        ig_user_id=resolved_id,
+        username=provided_username or detected.get("username"),
+        account_name=account_name or detected.get("username"),
+        page_id=page_id or detected.get("page_id"),
+        # Prefer the detected token (a long-lived Page token when we resolved one).
+        access_token=token,
+        api_base=detected["api_base"],
+        token_status="active",
+        status_detail=status_detail,
+        last_checked_at=datetime.now(timezone.utc),
+        **(defaults or {}),
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    return source
 
 
 @app.post("/instagram/sources", response_model=InstagramSourceOut)
@@ -3573,34 +3938,196 @@ def connect_instagram_source(payload: InstagramSourceCreate, session: DbSession)
         detected = detect_account(payload.access_token, graph_version=settings.ig_graph_version)
     except InstagramApiError as exc:
         raise HTTPException(status_code=400, detail=f"Token ishlamadi — {exc}")
-    ig_user_id = payload.ig_user_id or detected["ig_user_id"]
-    existing = session.query(InstagramSource).filter(InstagramSource.ig_user_id == ig_user_id).one_or_none()
-    if existing is not None:
-        raise HTTPException(status_code=409, detail="Bu Instagram akkaunt allaqachon ulangan")
-    provided_username = (payload.username or "").strip().lstrip("@") or None
-    source = InstagramSource(
+    return _upsert_instagram_account(
+        session,
         brand_id=payload.brand_id,
-        ig_user_id=ig_user_id,
-        username=provided_username or detected.get("username"),
-        account_name=payload.account_name or detected.get("username"),
-        page_id=payload.page_id or detected.get("page_id"),
-        # Prefer the detected token (a long-lived Page token when we resolved one).
-        access_token=detected.get("access_token") or payload.access_token,
-        api_base=detected["api_base"],
-        token_status="active",
-        status_detail=f"@{detected.get('username')} ({detected['api_base']})",
-        last_checked_at=datetime.now(timezone.utc),
-        source_category=payload.source_category,
-        monitoring_mode=payload.monitoring_mode,
-        collect_comments=payload.collect_comments,
-        collect_mentions=payload.collect_mentions,
-        hashtags=payload.hashtags,
-        notes=payload.notes,
+        detected=detected,
+        fallback_token=payload.access_token,
+        ig_user_id=payload.ig_user_id,
+        username=payload.username,
+        account_name=payload.account_name,
+        page_id=payload.page_id,
+        defaults={
+            "source_category": payload.source_category,
+            "monitoring_mode": payload.monitoring_mode,
+            "collect_comments": payload.collect_comments,
+            "collect_mentions": payload.collect_mentions,
+            "hashtags": payload.hashtags,
+            "notes": payload.notes,
+        },
     )
-    session.add(source)
+
+
+# ---- Business Login for Instagram (OAuth) --------------------------------------
+# The operator picks a brand, we send them to Meta's consent screen, and Meta returns an
+# authorization code we trade for a ~60-day token. This replaces asking a client to
+# generate and paste a token by hand, and it is also the flow App Review requires to see.
+
+
+def _public_urls(request: Request) -> tuple[str, str]:
+    """(api_base, site_base) as the public URLs a browser or Meta would use.
+
+    Behind nginx the API is mounted under /api on the same host as the SPA; a direct dev
+    hit has neither the prefix nor a SPA in front of it.
+    """
+    fwd_scheme = request.headers.get("x-forwarded-proto")
+    host = request.headers.get("x-forwarded-host") or request.url.netloc
+    site = f"{fwd_scheme or request.url.scheme}://{host}"
+    return (f"{site}/api" if fwd_scheme else site), site
+
+
+def _instagram_redirect_uri(request: Request) -> str:
+    settings = get_settings()
+    if settings.ig_oauth_redirect_uri:
+        return settings.ig_oauth_redirect_uri
+    api_base, _ = _public_urls(request)
+    return f"{api_base}/instagram/oauth/callback"
+
+
+@app.get("/instagram/oauth/start")
+def instagram_oauth_start(request: Request, session: DbSession, brand_id: uuid.UUID) -> dict[str, str]:
+    """Give the dashboard the Meta consent URL to send the operator to."""
+    settings = get_settings()
+    if not settings.ig_app_id or not settings.ig_app_secret:
+        raise HTTPException(status_code=503, detail="Serverda IG_APP_ID / IG_APP_SECRET sozlanmagan")
+    if session.get(Brand, brand_id) is None:
+        raise HTTPException(status_code=404, detail="Brend topilmadi")
+    redirect_uri = _instagram_redirect_uri(request)
+    try:
+        authorize_url = build_authorize_url(
+            settings.ig_app_id,
+            redirect_uri,
+            encode_state(settings, {"brand_id": str(brand_id)}),
+        )
+    except InstagramOAuthError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"authorize_url": authorize_url, "redirect_uri": redirect_uri}
+
+
+@app.get("/instagram/oauth/callback")
+def instagram_oauth_callback(request: Request, session: DbSession) -> RedirectResponse:
+    """Meta sends the operator back here with ``?code=`` — finish the exchange, connect
+    the account, then bounce to the dashboard with a readable result.
+
+    Every failure redirects rather than raising: this URL is opened by a browser, so a
+    JSON 400 would strand the operator on a blank page.
+    """
+    settings = get_settings()
+    _, site = _public_urls(request)
+    target = f"{(settings.app_public_base_url or site).rstrip('/')}/instagram-monitoring"
+    params = request.query_params
+
+    def _fail(reason: str) -> RedirectResponse:
+        return RedirectResponse(f"{target}?ig_connect=error&reason={quote(reason[:200])}", status_code=303)
+
+    if params.get("error"):
+        return _fail(params.get("error_description") or params.get("error") or "ruxsat berilmadi")
+    code = params.get("code")
+    if not code:
+        return _fail("Meta 'code' qaytarmadi")
+    try:
+        state = decode_state(settings, params.get("state"))
+        short_lived = exchange_code_for_token(
+            settings.ig_app_id,
+            settings.ig_app_secret,
+            _instagram_redirect_uri(request),
+            code,
+        )
+        token = exchange_for_long_lived(settings.ig_app_secret, short_lived["access_token"])["access_token"]
+    except InstagramOAuthError as exc:
+        return _fail(str(exc))
+    # Meta silently drops fields a token has no permission for (an empty `comments` edge
+    # instead of an error), so record what the consent screen actually granted — it is
+    # the only way to tell "no comments" apart from "not allowed to read comments".
+    granted = short_lived.get("permissions")
+    logging.getLogger("instagram-oauth").info("Instagram consent granted permissions=%s", granted)
+    try:
+        detected = detect_account(token, graph_version=settings.ig_graph_version)
+    except InstagramApiError as exc:
+        return _fail(f"Akkaunt aniqlanmadi — {exc}")
+    try:
+        source = _upsert_instagram_account(
+            session,
+            brand_id=uuid.UUID(state["brand_id"]),
+            detected=detected,
+            fallback_token=token,
+            conflict_on_existing=False,
+        )
+    except (HTTPException, ValueError, KeyError) as exc:
+        return _fail(getattr(exc, "detail", None) or str(exc))
+    return RedirectResponse(
+        f"{target}?ig_connect=ok&username={quote(source.username or '')}",
+        status_code=303,
+    )
+
+
+async def _verified_signed_request(request: Request) -> dict[str, Any]:
+    """Read and verify Meta's ``signed_request`` body field.
+
+    Parsed by hand instead of via ``request.form()``: Starlette's form parser insists on
+    python-multipart, and these callbacks only ever carry a single urlencoded field.
+    """
+    settings = get_settings()
+    if not settings.ig_app_secret:
+        raise HTTPException(status_code=503, detail="IG_APP_SECRET sozlanmagan — imzoni tekshirib bo'lmaydi")
+    raw = (await request.body()).decode("utf-8", "ignore")
+    signed: str | None = None
+    if raw.lstrip().startswith("{"):
+        try:
+            signed = (json.loads(raw) or {}).get("signed_request")
+        except json.JSONDecodeError:
+            signed = None
+    elif raw:
+        signed = (parse_qs(raw).get("signed_request") or [None])[0]
+    try:
+        return parse_signed_request(settings.ig_app_secret, signed or request.query_params.get("signed_request"))
+    except InstagramOAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/instagram/deauthorize")
+async def instagram_deauthorize(request: Request, session: DbSession) -> dict[str, object]:
+    """Meta calls this when someone removes our app from their Instagram account.
+
+    The token is dead at that point, so stop polling with it instead of letting the
+    worker rediscover the failure as an auth error.
+    """
+    payload = await _verified_signed_request(request)
+    ig_user_id = str(payload.get("user_id") or "")
+    source = (
+        session.query(InstagramSource).filter(InstagramSource.ig_user_id == ig_user_id).one_or_none()
+        if ig_user_id
+        else None
+    )
+    if source is None:
+        return {"ok": True, "matched": False}
+    source.token_status = "invalid"
+    source.status_detail = "Foydalanuvchi app ruxsatini bekor qildi (deauthorize)"
+    source.last_checked_at = datetime.now(timezone.utc)
     session.commit()
-    session.refresh(source)
-    return source
+    return {"ok": True, "matched": True}
+
+
+@app.post("/instagram/data-deletion")
+async def instagram_data_deletion(request: Request, session: DbSession) -> dict[str, str]:
+    """Meta's mandatory data-deletion callback — purge everything stored for the account
+    and answer with a status URL plus a confirmation code, as the spec requires."""
+    settings = get_settings()
+    payload = await _verified_signed_request(request)
+    ig_user_id = str(payload.get("user_id") or "")
+    source = (
+        session.query(InstagramSource).filter(InstagramSource.ig_user_id == ig_user_id).one_or_none()
+        if ig_user_id
+        else None
+    )
+    if source is not None:
+        delete_monitored_source(session, "instagram", source.id, purge_mentions=True)
+    _, site = _public_urls(request)
+    base = (settings.app_public_base_url or site).rstrip("/")
+    return {
+        "url": f"{base}/data-deletion?ig_user_id={quote(ig_user_id)}",
+        "confirmation_code": f"ig-{ig_user_id or 'unknown'}",
+    }
 
 
 @app.post("/instagram/sources/{source_id}/validate", response_model=InstagramSourceOut)
@@ -3682,8 +4209,12 @@ def update_instagram_source(source_id: uuid.UUID, payload: InstagramSourceUpdate
 
 
 @app.delete("/instagram/sources/{source_id}", response_model=SourceDeleteResult)
-def delete_instagram_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
-    return delete_source_and_notify("instagram", source_id, session)
+def delete_instagram_source(
+    source_id: uuid.UUID,
+    session: DbSession,
+    purge_mentions: bool = True,
+) -> dict[str, Any]:
+    return delete_source_and_notify("instagram", source_id, session, purge_mentions=purge_mentions)
 
 
 @app.get("/instagram/mentions", response_model=list[InstagramMentionOut])
@@ -3832,7 +4363,7 @@ def _analyze_instagram_mentions_now(mention_ids: list[uuid.UUID]) -> None:
 
 @app.get("/instagram/summary", response_model=InstagramSummary)
 def instagram_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> InstagramSummary:
-    source_q = session.query(InstagramSource)
+    source_q = session.query(InstagramSource).filter(InstagramSource.deleted_at.is_(None))
     mention_q = session.query(InstagramMention)
     if brand_id:
         source_q = source_q.filter(InstagramSource.brand_id == brand_id)
@@ -4008,7 +4539,12 @@ def facebook_source_categories(request: Request) -> list[dict[str, str]]:
 
 @app.get("/facebook/sources", response_model=list[FacebookSourceOut])
 def list_facebook_sources(session: DbSession) -> list[FacebookSource]:
-    return session.query(FacebookSource).order_by(FacebookSource.created_at.asc()).all()
+    return (
+        session.query(FacebookSource)
+        .filter(FacebookSource.deleted_at.is_(None))
+        .order_by(FacebookSource.created_at.asc())
+        .all()
+    )
 
 
 @app.post("/facebook/sources", response_model=FacebookSourceOut)
@@ -4020,8 +4556,20 @@ def connect_facebook_source(payload: FacebookSourceCreate, session: DbSession) -
         raise HTTPException(status_code=400, detail=f"Token ishlamadi — {exc}")
     page_id = payload.page_id or detected["page_id"]
     existing = session.query(FacebookSource).filter(FacebookSource.page_id == page_id).one_or_none()
-    if existing is not None:
+    if existing is not None and existing.deleted_at is None:
         raise HTTPException(status_code=409, detail="Bu Facebook Page allaqachon ulangan")
+    if existing is not None:
+        # Previously removed with its mentions kept — revive the same row so the retained
+        # mentions stay attached and are not re-ingested under a new id.
+        existing.deleted_at = None
+        existing.active = True
+        existing.brand_id = payload.brand_id
+        existing.access_token = detected.get("access_token") or payload.access_token
+        existing.token_status = "active"
+        existing.last_checked_at = datetime.now(timezone.utc)
+        session.commit()
+        session.refresh(existing)
+        return existing
     source = FacebookSource(
         brand_id=payload.brand_id,
         page_id=page_id,
@@ -4093,8 +4641,12 @@ def update_facebook_source(source_id: uuid.UUID, payload: FacebookSourceUpdate, 
 
 
 @app.delete("/facebook/sources/{source_id}", response_model=SourceDeleteResult)
-def delete_facebook_source(source_id: uuid.UUID, session: DbSession) -> dict[str, Any]:
-    return delete_source_and_notify("facebook", source_id, session)
+def delete_facebook_source(
+    source_id: uuid.UUID,
+    session: DbSession,
+    purge_mentions: bool = True,
+) -> dict[str, Any]:
+    return delete_source_and_notify("facebook", source_id, session, purge_mentions=purge_mentions)
 
 
 @app.get("/facebook/mentions", response_model=list[FacebookMentionOut])
@@ -4125,7 +4677,7 @@ def list_facebook_mentions(
 
 @app.get("/facebook/summary", response_model=FacebookSummary)
 def facebook_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> FacebookSummary:
-    source_q = session.query(FacebookSource)
+    source_q = session.query(FacebookSource).filter(FacebookSource.deleted_at.is_(None))
     mention_q = session.query(FacebookMention)
     if brand_id:
         source_q = source_q.filter(FacebookSource.brand_id == brand_id)

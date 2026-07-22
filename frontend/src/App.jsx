@@ -6,6 +6,8 @@ import { navigateTo, NAVIGATION_EVENT } from "./navigation";
 import { Dashboard } from "./pages/Dashboard";
 import { FacebookMonitoring } from "./pages/FacebookMonitoring";
 import { InstagramMonitoring } from "./pages/InstagramMonitoring";
+import { Landing } from "./pages/Landing";
+import { DataDeletion, PrivacyPolicy, TermsOfService } from "./pages/Legal";
 import { Login } from "./pages/Login";
 import { Profile } from "./pages/Profile";
 import { TelegramMonitoring } from "./pages/TelegramMonitoring";
@@ -45,6 +47,13 @@ export default function App() {
   }, []);
 
   if (path.startsWith("/login")) return <Login key={`${language}:login`} />;
+  // Legal pages must stay reachable logged out — Meta's reviewer opens them that way.
+  if (path.startsWith("/privacy")) return <PrivacyPolicy key={`${language}:privacy`} />;
+  if (path.startsWith("/terms")) return <TermsOfService key={`${language}:terms`} />;
+  if (path.startsWith("/data-deletion")) return <DataDeletion key={`${language}:data-deletion`} />;
+  // A signed-out visitor at the root gets the public company page, not a bare login box:
+  // Meta checks the website during business verification and App Review.
+  if (path === "/" && !isAuthed()) return <Landing key={`${language}:landing`} />;
   // Everything else is behind auth — no token means back to the login screen.
   if (!isAuthed()) {
     if (!window.location.pathname.startsWith("/login")) window.history.replaceState(null, "", "/login");

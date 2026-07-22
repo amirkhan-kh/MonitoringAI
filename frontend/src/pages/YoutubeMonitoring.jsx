@@ -25,6 +25,7 @@ import {
   saveSelectedBrandId,
 } from "../api/client";
 import { YouTubeIcon } from "../components/BrandIcons";
+import DeleteSourceModal from "../components/DeleteSourceModal";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
@@ -208,6 +209,9 @@ export function YoutubeMonitoring() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [syncingSourceId, setSyncingSourceId] = useState("");
   const realtimeRefreshTimer = useRef(null);
   const selectedBrandIdRef = useRef("");
   const lastLoadedBrandId = useRef("");
@@ -362,29 +366,60 @@ export function YoutubeMonitoring() {
   }
 
   async function handleToggleSource(source) {
-    await endpoints.youtubeUpdateSource(source.id, { active: !source.active });
-    await loadDashboard(selectedBrandId);
-  }
-
-  async function handleSyncSource(source) {
-    const sync = await endpoints.youtubeSyncSource(source.id, { max_pages: 1, comments_per_video: 100 });
-    setSourceResult({ source, sync });
-    await loadDashboard(selectedBrandId);
-  }
-
-  async function handleDeleteSource(source) {
-    const confirmed = window.confirm(translateUiText(
-      `“${sourceTitle(source)}” source butunlay o'chirilsinmi? Unga tegishli barcha video, comment va AI tahlillar ham o'chadi. Bu amalni ortga qaytarib bo'lmaydi.`,
-    ));
-    if (!confirmed) return;
     setError("");
     setNotice("");
     try {
-      const deleted = await endpoints.youtubeDeleteSource(source.id);
-      setNotice(`${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta video/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`);
+      await endpoints.youtubeUpdateSource(source.id, { active: !source.active });
+      await loadDashboard(selectedBrandId);
+    } catch (err) {
+      setError(err.message || "Source holatini o'zgartirib bo'lmadi.");
+    }
+  }
+
+  async function handleSyncSource(source) {
+    setError("");
+    setNotice("");
+    setSyncingSourceId(source.id);
+    try {
+      const sync = await endpoints.youtubeSyncSource(source.id, { max_pages: 1, comments_per_video: 100 });
+      // The row has no result panel of its own, so the outcome goes to the page
+      // banner — otherwise a quota failure here would be completely silent.
+      if (sync?.ok === false) {
+        setError(sync.error || "Sync bajarilmadi.");
+      } else {
+        setNotice(`Sync tugadi: ${sync?.videos_seen || 0} ta video, ${sync?.comments_seen || 0} ta comment tekshirildi.`);
+      }
+      await loadDashboard(selectedBrandId);
+    } catch (err) {
+      setError(err.message || "Sync bajarilmadi.");
+    } finally {
+      setSyncingSourceId("");
+    }
+  }
+
+  function handleDeleteSource(source) {
+    setPendingDelete(source);
+  }
+
+  async function confirmDeleteSource(purgeMentions) {
+    const source = pendingDelete;
+    if (!source) return;
+    setError("");
+    setNotice("");
+    setDeleteBusy(true);
+    try {
+      const deleted = await endpoints.youtubeDeleteSource(source.id, purgeMentions);
+      setNotice(
+        purgeMentions
+          ? `${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta video/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`
+          : `${deleted.sources_deleted} ta source o'chirildi. ${deleted.mentions_retained} ta tahlil qilingan mention saqlandi — bu kanalni qayta ulasangiz ular qayta tahlil qilinmaydi.`,
+      );
+      setPendingDelete(null);
       await loadDashboard(selectedBrandId);
     } catch (err) {
       setError(err.message || "Source o'chirishda xatolik yuz berdi.");
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -466,10 +501,19 @@ export function YoutubeMonitoring() {
             onToggleSource={handleToggleSource}
             onSyncSource={handleSyncSource}
             onDeleteSource={handleDeleteSource}
+            syncingSourceId={syncingSourceId}
             loading={isInitialLoading}
           />
           <YoutubeRecentMentions mentions={mentions} loading={isInitialLoading} />
         </section>
+
+        <DeleteSourceModal
+          open={Boolean(pendingDelete)}
+          sourceName={pendingDelete ? sourceTitle(pendingDelete) : ""}
+          busy={deleteBusy}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDeleteSource}
+        />
 
         {isAddModalOpen && (
           <div className="modalOverlay" role="presentation" onMouseDown={() => setIsAddModalOpen(false)}>
@@ -518,6 +562,7 @@ function YoutubeSourceBoard({
   onToggleSource,
   onSyncSource,
   onDeleteSource,
+  syncingSourceId = "",
   loading = false,
 }) {
   const orderedCategories = useMemo(
@@ -622,6 +667,7 @@ function YoutubeSourceBoard({
               onToggleSource={onToggleSource}
               onSyncSource={onSyncSource}
               onDeleteSource={onDeleteSource}
+              syncing={syncingSourceId === source.id}
             />
           ))
         ) : (
@@ -632,7 +678,7 @@ function YoutubeSourceBoard({
   );
 }
 
-function YoutubeSourceRow({ source, apiReady, onToggleSource, onSyncSource, onDeleteSource }) {
+function YoutubeSourceRow({ source, apiReady, onToggleSource, onSyncSource, onDeleteSource, syncing = false }) {
   const channelResolved = source.source_kind !== "channel"
     || Boolean(source.channel_id && source.uploads_playlist_id);
   const monitoringReady = source.active && apiReady && channelResolved;
@@ -663,9 +709,9 @@ function YoutubeSourceRow({ source, apiReady, onToggleSource, onSyncSource, onDe
       <HashtagBadges tags={source.hashtags || []} />
       <em className={`state ${stateClass}`}>{stateLabel}</em>
       <div className="rowActions">
-        <button className="miniButton" type="button" onClick={() => onSyncSource(source)}>
-          <RefreshCw size={15} />
-          <span>Sync</span>
+        <button className="miniButton" type="button" onClick={() => onSyncSource(source)} disabled={syncing}>
+          <RefreshCw size={15} className={syncing ? "spinning" : undefined} />
+          <span>{syncing ? "Sync..." : "Sync"}</span>
         </button>
         <a className="miniButton linkButton" href={sourceUrl(source)} target="_blank" rel="noreferrer">
           <DownloadCloud size={15} />
@@ -675,7 +721,7 @@ function YoutubeSourceRow({ source, apiReady, onToggleSource, onSyncSource, onDe
           {source.active ? <Pause size={15} /> : <Play size={15} />}
           <span>{source.active ? "Pauza" : "Davom"}</span>
         </button>
-        <button className="miniButton danger" type="button" onClick={() => onDeleteSource(source)} title="Source va unga tegishli barcha video, comment hamda AI tahlillarini o'chiradi">
+        <button className="miniButton danger" type="button" onClick={() => onDeleteSource(source)} title="Source o'chiriladi. Video, comment va AI tahlillarni saqlash yoki o'chirishni keyingi oynada tanlaysiz">
           <Trash2 size={15} />
           <span>O'chirish</span>
         </button>
@@ -728,23 +774,18 @@ function YoutubeSourceForm({ categories, brands, selectedBrandId, initialCategor
     setFormError("");
     if (field === "url") {
       setOfficialChannelUrl(value);
-      if (value.trim()) {
-        setOfficialHandle("");
-        setOfficialChannelId("");
-      }
     } else if (field === "handle") {
       setOfficialHandle(value);
-      if (value.trim()) {
-        setOfficialChannelUrl("");
-        setOfficialChannelId("");
-      }
     } else {
       setOfficialChannelId(value);
-      if (value.trim()) {
-        setOfficialChannelUrl("");
-        setOfficialHandle("");
-      }
     }
+  }
+
+  function clearOfficialFields() {
+    setFormError("");
+    setOfficialChannelUrl("");
+    setOfficialHandle("");
+    setOfficialChannelId("");
   }
 
   function addHashtags(value = hashtagInput) {
@@ -834,9 +875,13 @@ function YoutubeSourceForm({ categories, brands, selectedBrandId, initialCategor
     }
   }
 
-  const hasOfficialRef = Boolean(officialChannelUrl.trim() || officialHandle.trim() || officialChannelId.trim());
+  const officialFilledCount = [officialChannelUrl, officialHandle, officialChannelId].filter(
+    (value) => value.trim(),
+  ).length;
+  const tooManyOfficialRefs = officialFilledCount > 1;
   const hasAdvancedRef = Boolean(channelLink.trim() || hashtags.length || hashtagInput.trim());
-  const submitDisabled = !selectedBrandId || (sourceMode === "official" ? !hasOfficialRef : !hasAdvancedRef);
+  const submitDisabled =
+    !selectedBrandId || (sourceMode === "official" ? officialFilledCount !== 1 : !hasAdvancedRef);
 
   return (
     <form className="sourceForm" onSubmit={handleSubmit}>
@@ -921,6 +966,16 @@ function YoutubeSourceForm({ categories, brands, selectedBrandId, initialCategor
             />
             <p className="fieldHint">UC bilan boshlanadigan 24 belgili YouTube channel ID.</p>
           </label>
+          <p className={`fieldHint officialChannelPickOne${tooManyOfficialRefs ? " isWarning" : ""}`}>
+            {tooManyOfficialRefs
+              ? "Bir nechta maydon to'ldirildi. Kanalni aniqlash uchun faqat bittasini qoldiring, qolganini tozalang."
+              : "Bu uch maydon — bir kanalni ko'rsatishning uch xil usuli. Faqat bittasini to'ldirsangiz yetadi."}
+            {tooManyOfficialRefs && (
+              <button type="button" className="inlineClearButton" onClick={clearOfficialFields}>
+                Maydonlarni tozalash
+              </button>
+            )}
+          </p>
         </div>
       ) : (
         <>

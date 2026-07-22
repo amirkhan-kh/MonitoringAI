@@ -68,10 +68,58 @@ class TelegramBotApi:
         result = data.get("result")
         return result if isinstance(result, dict) else None
 
-    def send_message(self, chat_id: int | str, text: str) -> dict[str, Any]:
+    def send_message(
+        self,
+        chat_id: int | str,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        if reply_to_message_id is not None:
+            # The alert card may have been deleted by a staff member; a nudge must not fail then.
+            payload["reply_to_message_id"] = reply_to_message_id
+            payload["allow_sending_without_reply"] = True
+        return self._post("sendMessage", payload)
+
+    def edit_message_text(
+        self,
+        chat_id: int | str,
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._post("editMessageText", payload)
+
+    def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str | None = None,
+        *,
+        show_alert: bool = False,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id, "show_alert": show_alert}
+        if text:
+            # Telegram truncates toasts at 200 chars and rejects longer ones outright.
+            payload["text"] = text[:200]
+        return self._post("answerCallbackQuery", payload)
+
+    def pin_chat_message(self, chat_id: int | str, message_id: int, *, disable_notification: bool = True) -> dict[str, Any]:
         return self._post(
-            "sendMessage",
-            {"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+            "pinChatMessage",
+            {"chat_id": chat_id, "message_id": message_id, "disable_notification": disable_notification},
         )
 
     def _post(self, method: str, payload: dict[str, Any], timeout: int = 30) -> dict[str, Any]:

@@ -2043,6 +2043,59 @@ button {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.officialChannelFields {
+  align-items: start;
+}
+
+.officialChannelFields .field .input {
+  align-self: start;
+}
+
+.officialChannelFields .fieldHint {
+  min-height: 2.7em;
+}
+
+.officialChannelPickOne {
+  grid-column: 1 / -1;
+  min-height: 0;
+  margin-top: 2px;
+}
+
+.officialChannelPickOne.isWarning {
+  color: var(--danger);
+  font-weight: 640;
+}
+
+.inlineClearButton {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.inlineClearButton:hover {
+  opacity: 0.75;
+}
+
+@keyframes miniButtonSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.miniButton .spinning {
+  animation: miniButtonSpin 900ms linear infinite;
+}
+
+.miniButton:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .youtubeSourceModeTabs {
   justify-self: start;
   margin: 0 0 2px;
@@ -4966,4 +5019,1467 @@ button {
     width: 100%;
     margin-left: 0;
   }
+}
+
+/* Delete-source confirmation: the destructive option must never look like the default. */
+.deleteSourceModal {
+  width: min(600px, 100%);
+}
+
+.deleteSourceModal .modalHeader h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.deleteSourceModalIcon {
+  color: var(--danger);
+  flex: none;
+}
+
+.deleteSourceChoices {
+  gap: 10px;
+}
+
+.deleteSourceChoice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 15px;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  color: var(--ink);
+  transition:
+    transform 0.16s var(--ease-smooth),
+    border-color 0.16s var(--ease-smooth),
+    box-shadow 0.16s var(--ease-smooth);
+}
+
+.deleteSourceChoice:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow);
+}
+
+.deleteSourceChoice:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.deleteSourceChoice > svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.deleteSourceChoice.keep > svg {
+  color: var(--accent, #4f46e5);
+}
+
+.deleteSourceChoice.purge {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface-soft));
+}
+
+.deleteSourceChoice.purge > svg,
+.deleteSourceChoice.purge .deleteSourceChoiceTitle {
+  color: var(--danger);
+}
+
+.deleteSourceChoiceBody {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.deleteSourceChoiceTitle {
+  font-weight: 760;
+  font-size: 14px;
+}
+
+.deleteSourceChoiceHint {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.deleteSourceFooter {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 20px 18px;
+}
+
+.deleteSourceName {
+  margin: 6px 0 2px;
+  font-weight: 760;
+  font-size: 14px;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+
+/* Telegram connector row — three soft surfaces instead of three outlined boxes. Depth
+   comes from tint and spacing; the only ring left in this area is the device bezel. */
+.telegramConnectorInputCard {
+  gap: 14px;
+  padding: 16px;
+  border: 0;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.032);
+}
+
+.telegramConnectorInputCard.bot {
+  border-color: transparent;
+  background: rgba(42, 171, 238, 0.075);
+}
+
+.telegramConnectorInputHead {
+  gap: 9px;
+}
+
+.telegramConnectorStepBadge {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.1);
+  color: var(--caption);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.telegramConnectorInputCard.channel .telegramConnectorInputHead > svg { color: var(--teal); }
+.telegramConnectorInputCard.discussion .telegramConnectorInputHead > svg { color: var(--violet); }
+.telegramConnectorInputCard.bot .telegramConnectorInputHead > svg,
+.telegramBotAccordionHead > svg { color: var(--telegram); }
+
+/* --- bot accordion -------------------------------------------------- */
+.telegramConnectorInputCard.bot {
+  align-content: start;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.telegramBotAccordionHead {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.18s var(--ease-smooth);
+}
+
+.telegramBotAccordionHead:hover {
+  background: rgba(42, 171, 238, 0.07);
+}
+
+.telegramBotAccordionHead > svg {
+  flex: none;
+}
+
+.telegramBotAccordionTitle {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.telegramBotAccordionTitle strong {
+  font-size: 13.5px;
+  line-height: 1.25;
+}
+
+.telegramBotAccordionTitle > span {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+
+.telegramBotAccordionChevron {
+  flex: none;
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.24s var(--ease-smooth);
+}
+
+.telegramConnectorInputCard.bot.open .telegramBotAccordionChevron {
+  transform: rotate(180deg);
+}
+
+.telegramBotAccordionBody {
+  display: grid;
+  gap: 14px;
+  padding: 0 16px 16px;
+  animation: telegramBotUnfold 0.26s var(--ease-smooth);
+}
+
+@keyframes telegramBotUnfold {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.telegramBotChoice {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.telegramBotChoice legend {
+  padding: 0 0 7px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 780;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.telegramBotChoice.nested {
+  margin-left: 3px;
+  padding-left: 13px;
+}
+
+/* A fading hairline reads as "this follows from the answer above" without drawing a rule. */
+.telegramBotChoice.nested {
+  position: relative;
+}
+
+.telegramBotChoice.nested::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 8px;
+  left: 0;
+  width: 2px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(42, 171, 238, 0.4), transparent);
+}
+
+/* Choice chips: the native control is hidden and replaced by a dot, so selection reads
+   as fill and weight rather than an outline. */
+.telegramBotChoice label {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.045);
+  color: var(--caption);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.18s var(--ease-smooth), color 0.18s var(--ease-smooth);
+}
+
+.telegramBotChoice label::before {
+  content: "";
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.2);
+  transition: background 0.18s var(--ease-smooth), box-shadow 0.18s var(--ease-smooth);
+}
+
+.telegramBotChoice label:hover {
+  background: rgba(15, 23, 42, 0.07);
+}
+
+.telegramBotChoice label.checked {
+  background: rgba(42, 171, 238, 0.16);
+  color: #14688f;
+  font-weight: 720;
+}
+
+.telegramBotChoice label.checked::before {
+  background: var(--telegram);
+  box-shadow: 0 0 0 3.5px rgba(42, 171, 238, 0.24);
+}
+
+.telegramBotChoice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.telegramBotChoice label:has(input:focus-visible) {
+  outline: 2px solid var(--telegram);
+  outline-offset: 2px;
+}
+
+.telegramBotGuideLink {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(42, 171, 238, 0.14);
+  color: #14688f;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 740;
+  cursor: pointer;
+  transition: background 0.18s var(--ease-smooth);
+}
+
+.telegramBotGuideLink:hover {
+  background: rgba(42, 171, 238, 0.22);
+}
+
+.telegramBotFields {
+  display: grid;
+  gap: 14px;
+  animation: telegramBotUnfold 0.26s var(--ease-smooth);
+}
+
+/* BotFather walkthrough. Everything but the phone bezel is borderless: the device is the
+   only object meant to read as a physical thing, so it keeps the only hard edge. */
+.botGuideOverlay {
+  z-index: 1200;
+  align-items: center;
+}
+
+.botGuideModal {
+  width: min(880px, 100%);
+  border: 0;
+  border-radius: 22px;
+}
+
+.botGuideModal .modalHeader {
+  padding: 22px 24px 6px;
+  border-bottom: 0;
+}
+
+.botGuideContent {
+  gap: 16px;
+  padding: 14px 24px 22px;
+}
+
+/* --- tabs: a moving underline, not a boxed segmented control --------- */
+.botGuideTabs {
+  display: flex;
+  gap: 22px;
+  padding: 0 2px;
+}
+
+.botGuideTab {
+  position: relative;
+  padding: 6px 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color 0.2s var(--ease-smooth);
+}
+
+.botGuideTab::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--brand-gradient);
+  opacity: 0;
+  transform: scaleX(0.4);
+  transition: opacity 0.22s var(--ease-smooth), transform 0.22s var(--ease-smooth);
+}
+
+.botGuideTab:hover {
+  color: var(--ink);
+}
+
+.botGuideTab.active {
+  color: var(--ink);
+}
+
+.botGuideTab.active::after {
+  opacity: 1;
+  transform: none;
+}
+
+.botGuideStage {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 26px;
+  align-items: start;
+}
+
+.botGuidePhoneColumn {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
+/* --- the device ----------------------------------------------------- */
+.botGuidePhone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 256px;
+  height: 464px;
+  padding: 9px 5px 5px;
+  border: 5px solid #10151f;
+  border-radius: 38px;
+  background: #10151f;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.16) inset,
+    0 22px 48px -14px rgba(15, 23, 42, 0.42);
+  overflow: hidden;
+  user-select: none;
+}
+
+.botGuidePhoneNotch {
+  position: absolute;
+  top: 11px;
+  left: 50%;
+  z-index: 4;
+  width: 62px;
+  height: 15px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #10151f;
+}
+
+.botGuideStatusBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 14px 6px;
+  border-radius: 30px 30px 0 0;
+  background: #fff;
+  color: #10151f;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.botGuideStatusIcons {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  opacity: 0.85;
+}
+
+.botGuideStatusIcons i {
+  display: block;
+  background: #10151f;
+}
+
+.botGuideSignal { width: 11px; height: 8px; clip-path: polygon(0 100%, 22% 100%, 22% 62%, 0 62%, 0 100%, 39% 100%, 39% 40%, 61% 40%, 61% 100%, 78% 100%, 78% 16%, 100% 16%, 100% 100%); }
+.botGuideWifi { width: 10px; height: 8px; border-radius: 50% 50% 0 0 / 90% 90% 0 0; }
+.botGuideBattery { width: 16px; height: 8px; border-radius: 2px; }
+
+.botGuideAppBar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 12px 10px;
+  background: #fff;
+  color: #10151f;
+}
+
+.botGuideAppBar > svg {
+  flex: none;
+  color: var(--telegram);
+}
+
+.botGuideAppAvatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: linear-gradient(145deg, #43bdf5, #1c8ecb);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.botGuideAppTitle {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.botGuideAppTitle strong {
+  font-size: 12.5px;
+  line-height: 1.15;
+}
+
+.botGuideAppTitle em {
+  color: #9aa4b4;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.botGuideScreen {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  padding: 10px;
+  overflow: hidden;
+  background:
+    radial-gradient(130px 100px at 16% 10%, rgba(42, 171, 238, 0.16), transparent 70%),
+    radial-gradient(150px 110px at 88% 82%, rgba(255, 91, 189, 0.11), transparent 72%),
+    #eff3f8;
+}
+
+.botGuideComposer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px 11px;
+  background: #fff;
+}
+
+.botGuideComposerField {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.05);
+  color: #a3adbb;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.botGuideComposerField.filled {
+  color: #10151f;
+}
+
+.botGuideCaret {
+  display: inline-block;
+  width: 1.5px;
+  height: 11px;
+  margin-left: 1px;
+  vertical-align: -2px;
+  background: var(--telegram);
+  animation: botGuideBlink 1s steps(2, start) infinite;
+}
+
+@keyframes botGuideBlink {
+  to { opacity: 0; }
+}
+
+.botGuideSendButton {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 29px;
+  height: 29px;
+  border-radius: 999px;
+  background: linear-gradient(145deg, #43bdf5, #1c8ecb);
+  color: #fff;
+  transition: transform 0.16s var(--ease-smooth);
+}
+
+.botGuideSendButton.sending {
+  transform: scale(0.8);
+}
+
+/* --- search screen -------------------------------------------------- */
+.botGuideSearchBar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px;
+  border-radius: 999px;
+  background: #fff;
+  color: #a3adbb;
+  font-size: 11.5px;
+  box-shadow: 0 4px 14px -6px rgba(15, 23, 42, 0.22);
+}
+
+.botGuideSearchBar .filled {
+  color: #10151f;
+  font-weight: 650;
+}
+
+.botGuideSearchResult {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 9px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 4px 14px -6px rgba(15, 23, 42, 0.22);
+  animation: botGuidePop 0.24s var(--ease-smooth);
+  transition: background 0.14s var(--ease-smooth), transform 0.14s var(--ease-smooth);
+}
+
+.botGuideSearchResult.tapped {
+  background: rgba(42, 171, 238, 0.15);
+  transform: scale(0.975);
+}
+
+.botGuideSearchResultBody {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+  color: #10151f;
+}
+
+.botGuideSearchResultBody strong {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.botGuideSearchResultBody em {
+  color: #9aa4b4;
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+.botGuideVerified {
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--telegram);
+  color: #fff;
+}
+
+/* --- chat ----------------------------------------------------------- */
+.botGuideChat {
+  display: grid;
+  gap: 6px;
+  align-content: end;
+  height: 100%;
+  overflow: hidden;
+}
+
+.botGuideBubble {
+  max-width: 86%;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 14px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #10151f;
+  animation: botGuidePop 0.22s var(--ease-smooth);
+  overflow-wrap: anywhere;
+}
+
+.botGuideBubble.in {
+  justify-self: start;
+  border-bottom-left-radius: 5px;
+  background: #fff;
+  box-shadow: 0 3px 10px -6px rgba(15, 23, 42, 0.3);
+}
+
+.botGuideBubble.out {
+  justify-self: end;
+  border-bottom-right-radius: 5px;
+  background: #e7f8d4;
+  font-weight: 650;
+}
+
+.botGuideBubble.success {
+  background: linear-gradient(180deg, #fff, rgba(20, 184, 166, 0.1));
+  font-weight: 700;
+}
+
+.botGuideBubble.typing {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  padding: 10px;
+}
+
+.botGuideBubble.typing i {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #a3adbb;
+  animation: botGuideTyping 0.9s infinite;
+}
+
+.botGuideBubble.typing i:nth-child(2) { animation-delay: 0.15s; }
+.botGuideBubble.typing i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes botGuideTyping {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+@keyframes botGuidePop {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+.botGuideCredentials {
+  display: grid;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.botGuideCredLine {
+  display: block;
+}
+
+.botGuideCredLine.warn {
+  color: #b4741a;
+  font-size: 9.5px;
+}
+
+.botGuideCopyable {
+  position: relative;
+  display: block;
+  padding: 5px 7px;
+  border-radius: 8px;
+  background: rgba(42, 171, 238, 0.13);
+  color: #14688f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  overflow-wrap: anywhere;
+  transition: background 0.2s var(--ease-smooth), color 0.2s var(--ease-smooth), transform 0.2s var(--ease-smooth);
+}
+
+.botGuideCopyable.active {
+  background: rgba(42, 171, 238, 0.28);
+  transform: scale(1.02);
+}
+
+.botGuideCopyable.copied {
+  background: rgba(20, 184, 166, 0.22);
+  color: #0f766e;
+  transform: none;
+}
+
+.botGuideCopyMenu {
+  position: absolute;
+  right: 4px;
+  bottom: calc(100% + 6px);
+  z-index: 3;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #10151f;
+  color: #fff;
+  font-family: inherit;
+  font-size: 9.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: 0 8px 18px -8px rgba(15, 23, 42, 0.6);
+  animation: botGuidePop 0.16s var(--ease-smooth);
+}
+
+/* --- fingertip ------------------------------------------------------ */
+.botGuideFinger {
+  position: absolute;
+  z-index: 5;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.5), rgba(16, 21, 31, 0.26));
+  box-shadow: 0 4px 12px -4px rgba(15, 23, 42, 0.5);
+  pointer-events: none;
+  transition: transform 0.14s var(--ease-smooth), background 0.14s var(--ease-smooth);
+}
+
+.botGuideFinger.pressing {
+  transform: scale(0.7);
+  background: radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.6), rgba(42, 171, 238, 0.62));
+}
+
+/* --- transport controls --------------------------------------------- */
+.botGuideControls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0 2px;
+}
+
+.botGuideControlButton {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--caption);
+  cursor: pointer;
+  transition: background 0.18s var(--ease-smooth), color 0.18s var(--ease-smooth);
+}
+
+.botGuideControlButton:hover {
+  background: rgba(42, 171, 238, 0.18);
+  color: #14688f;
+}
+
+.botGuideProgressTrack {
+  flex: 1;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+}
+
+.botGuideProgressFill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand-gradient);
+}
+
+.botGuideTimecode {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- step list + paste target --------------------------------------- */
+.botGuideAside {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  min-height: 464px;
+}
+
+.botGuideAsideTitle {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.botGuideSteps {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.botGuideStep {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 11px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+  transition: background 0.24s var(--ease-smooth), color 0.24s var(--ease-smooth);
+}
+
+.botGuideStep.done {
+  color: var(--caption);
+}
+
+.botGuideStep.active {
+  background: rgba(42, 171, 238, 0.13);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.botGuideStepMark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 800;
+  transition: background 0.24s var(--ease-smooth), color 0.24s var(--ease-smooth);
+}
+
+.botGuideStep.active .botGuideStepMark {
+  background: var(--telegram);
+  color: #fff;
+  box-shadow: 0 0 0 4px rgba(42, 171, 238, 0.18);
+}
+
+.botGuideStep.done .botGuideStepMark {
+  background: rgba(20, 184, 166, 0.22);
+  color: #0f766e;
+}
+
+.botGuidePasteTarget {
+  display: grid;
+  gap: 10px;
+  margin-top: auto;
+  padding: 14px;
+  border: 0;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.035);
+  transition: background 0.3s var(--ease-smooth);
+}
+
+.botGuidePasteTarget.done {
+  background: rgba(20, 184, 166, 0.11);
+}
+
+.botGuidePasteTargetTitle {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 780;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.botGuidePasteField {
+  display: grid;
+  gap: 5px;
+}
+
+.botGuidePasteField > span {
+  color: var(--caption);
+  font-size: 11.5px;
+  font-weight: 700;
+  transition: color 0.24s var(--ease-smooth);
+}
+
+.botGuidePasteField.filled > span {
+  color: #14688f;
+}
+
+.botGuidePasteField > em {
+  min-height: 32px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--input-placeholder);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  font-style: normal;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  transition: background 0.24s var(--ease-smooth), color 0.24s var(--ease-smooth);
+}
+
+.botGuidePasteField.filled > em {
+  background: rgba(42, 171, 238, 0.14);
+  color: var(--ink);
+}
+
+.botGuidePasteDone {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 740;
+  animation: botGuidePop 0.24s var(--ease-smooth);
+}
+
+.botGuideFootnote {
+  margin: 0;
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.botGuideFooter {
+  padding: 0 24px 22px;
+}
+
+@media (max-width: 760px) {
+  .botGuideStage {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+  }
+
+  .botGuideAside {
+    min-height: 0;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .botGuideBubble,
+  .botGuideSearchResult,
+  .botGuideCopyMenu,
+  .botGuidePasteDone,
+  .botGuideCaret,
+  .botGuideBubble.typing i,
+  .telegramBotAccordionBody,
+  .telegramBotFields {
+    animation: none;
+  }
+}
+
+/* Inputs inside the connector cards sit on a tinted surface, so they read as filled
+   wells rather than outlined boxes; focus is carried by a soft ring alone. */
+.telegramConnectorInputCard .input {
+  border: 0;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.telegramConnectorInputCard .input:hover:not(:disabled):not(:focus) {
+  background-color: var(--surface);
+  box-shadow: 0 2px 6px -2px rgba(15, 23, 42, 0.14);
+}
+
+.telegramConnectorInputCard .input:focus {
+  background-color: var(--surface);
+  box-shadow: 0 0 0 3px rgba(42, 171, 238, 0.26);
+}
+
+.botGuideModal .iconButton {
+  border: 0;
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--caption);
+}
+
+.botGuideModal .iconButton:hover {
+  background: rgba(15, 23, 42, 0.1);
+}
+
+/* Business Login for Instagram — the primary connect path, with the manual token form
+   kept below as a fallback. */
+.igOauthCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.igOauthText {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+  flex: 1 1 260px;
+}
+
+.igOauthText strong {
+  font-size: 15px;
+}
+
+.igOauthText span {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.igOrDivider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.igOrDivider::before,
+.igOrDivider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* Public legal pages (privacy / terms / data deletion) — plain document layout, no
+   sidebar, readable while logged out. */
+.legalPage {
+  min-height: 100vh;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.legalHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.legalBrand {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.legalNav {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+}
+
+.legalNav a {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.legalNav a:hover {
+  color: var(--text);
+}
+
+.legalBody {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+  line-height: 1.6;
+}
+
+.legalBody h1 {
+  font-size: 26px;
+  margin-bottom: 6px;
+}
+
+.legalBody h2 {
+  font-size: 17px;
+  margin: 28px 0 8px;
+}
+
+.legalBody p,
+.legalBody li {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.legalBody ul {
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.legalUpdated {
+  font-size: 12px !important;
+  margin-bottom: 8px;
+}
+
+.legalContact {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+/* --- Signal inbox: the work queue mirrored from the staff Telegram group --- */
+.signalInbox {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  margin-bottom: 18px;
+}
+
+.signalStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.signalStat {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 2px 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-gradient-quiet);
+}
+
+.signalStat strong {
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.signalStat span {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.signalStat svg {
+  grid-row: span 2;
+  color: var(--muted);
+}
+
+.signalStat.danger {
+  border-color: rgba(216, 91, 106, 0.45);
+}
+
+.signalStat.danger strong,
+.signalStat.danger svg {
+  color: #d85b6a;
+}
+
+.signalStat.ok strong,
+.signalStat.ok svg {
+  color: var(--green);
+}
+
+.signalSources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.signalList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.signalRow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-gradient-quiet);
+}
+
+.signalRow.high,
+.signalRow.critical {
+  border-left-color: #d85b6a;
+}
+
+.signalRow.medium {
+  border-left-color: var(--amber);
+}
+
+.signalRow.low {
+  border-left-color: var(--green);
+}
+
+.signalMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.signalRisk {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 820;
+  color: #fff;
+  background: var(--green);
+}
+
+.signalRisk.high,
+.signalRisk.critical {
+  background: #d85b6a;
+}
+
+.signalRisk.medium {
+  background: var(--amber);
+}
+
+.signalDim {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.signalText {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.signalAction {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.signalFooter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.signalActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.signalActions .button {
+  padding: 7px 12px;
+  font-size: 13px;
+}
+
+/* Public landing page — the company/product page an anonymous visitor sees at "/". */
+.landingPage {
+  min-height: 100vh;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.landingLoginLink {
+  font-weight: 600;
+  color: var(--text) !important;
+}
+
+.landingBody {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 40px 24px 56px;
+}
+
+.landingHero {
+  max-width: 700px;
+}
+
+.landingEyebrow {
+  display: inline-block;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.landingHero h1 {
+  font-size: clamp(26px, 4vw, 38px);
+  line-height: 1.2;
+  margin-bottom: 14px;
+}
+
+.landingHero p {
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.landingCta {
+  display: inline-flex;
+  margin-top: 22px;
+  text-decoration: none;
+}
+
+.landingFeatures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin: 44px 0;
+}
+
+.landingCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.landingCard strong {
+  font-size: 15px;
+}
+
+.landingCard span {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.landingSteps,
+.landingAbout,
+.landingContact {
+  margin-top: 40px;
+}
+
+.landingSteps h2,
+.landingAbout h2,
+.landingContact h2 {
+  font-size: 19px;
+  margin-bottom: 12px;
+}
+
+.landingSteps ol {
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.landingSteps li,
+.landingAbout p,
+.landingContact p {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.landingAbout p + p {
+  margin-top: 10px;
+}
+
+.landingFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 20px 24px 40px;
+  border-top: 1px solid var(--line);
+  color: var(--text-muted);
+  font-size: 13px;
 }

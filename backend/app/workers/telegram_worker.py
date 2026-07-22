@@ -14,6 +14,7 @@ from sqlalchemy import or_
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import TelegramSource
+from app.services.alert_workflow import handle_alert_group_message, handle_callback_query
 from app.services.telegram_api import TelegramBotApi, TelegramPollingConflictError
 from app.services.telegram_command_agent import handle_command_update
 from app.services.telegram_ingestion import get_message_from_update, ingest_telegram_update
@@ -50,9 +51,10 @@ def polling_transport_available(api: TelegramBotApi) -> bool:
 def poll_updates(api: TelegramBotApi) -> None:
     settings = get_settings()
     offset: int | None = None
+    allowed_updates = allowed_update_types(settings.telegram_allowed_updates)
     logger.info(
         "Telegram worker started with allowed_updates=%s command_allowlist_size=%s",
-        settings.telegram_allowed_updates,
+        allowed_updates,
         len(settings.telegram_command_allowed_user_ids),
     )
 
@@ -61,7 +63,7 @@ def poll_updates(api: TelegramBotApi) -> None:
             updates = api.get_updates(
                 offset=offset,
                 timeout=settings.telegram_poll_timeout_seconds,
-                allowed_updates=settings.telegram_allowed_updates,
+                allowed_updates=allowed_updates,
             )
             for update in updates:
                 offset = max(offset or 0, int(update["update_id"]) + 1)
@@ -103,8 +105,19 @@ def exclusive_polling_lock(lock_file: str):
             handle.close()
 
 
+def allowed_update_types(configured: list[str]) -> list[str]:
+    """Never let an env override drop callback_query — the alert buttons depend on it."""
+    return list(dict.fromkeys([*configured, "callback_query"]))
+
+
 def handle_update(api: TelegramBotApi, update: dict[str, Any]) -> None:
     with SessionLocal() as session:
+        # Alert-button presses and the staff group's read-only commands come first: they
+        # are never monitoring content and must not fall through to ingestion.
+        if handle_callback_query(api, session, update):
+            return
+        if handle_alert_group_message(api, session, update):
+            return
         if handle_command_update(api, session, update):
             return
 

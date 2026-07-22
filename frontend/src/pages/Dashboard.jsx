@@ -19,6 +19,7 @@ import {
 import { endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
+import { SignalInbox } from "../components/SignalInbox";
 import { StatsBar } from "../components/StatsBar";
 import { TelegramIcon, YouTubeIcon } from "../components/BrandIcons";
 
@@ -467,61 +468,6 @@ function PlatformChartCard({ platform, rows, period, mentions, engagement, sourc
   );
 }
 
-function DashboardOperations({ mentions, sources, ai, forecast }) {
-  const platformCount = ["telegram", "youtube", "instagram", "facebook"].filter((platform) => (mentions[platform] || sources[platform] || 0) > 0).length;
-  const pendingAi = Math.max(0, (mentions.total || 0) - (ai.processed_mentions || 0));
-  const metaReady = (sources.instagram || 0) + (sources.facebook || 0);
-  const tokenIssue = sources.invalid_meta_tokens || 0;
-
-  const rows = [
-    {
-      title: "Coverage nazorati",
-      value: `${platformCount}/4`,
-      text: "Brand signali nechta platformadan kelayotganini ko'rsatadi.",
-      Icon: Activity,
-      tone: "total",
-    },
-    {
-      title: "AI navbati",
-      value: compactNumber(pendingAi),
-      text: pendingAi ? "Tahlil qilinmagan mentionlar bor, worker navbati tekshiriladi." : "Yangi mentionlar AI tahlildan o'tgan.",
-      Icon: Brain,
-      tone: "ai",
-    },
-    {
-      title: "Meta tayyorgarlik",
-      value: tokenIssue ? `${tokenIssue} token` : compactNumber(metaReady),
-      text: tokenIssue
-        ? "Instagram/Facebook tokenlaridan biri yaroqsiz. Avval token yangilanadi."
-        : "Meta source mavjud bo'lsa poller/webhook orqali oqim kuzatiladi.",
-      Icon: ShieldAlert,
-      tone: tokenIssue ? "risk" : "source",
-    },
-    {
-      title: "Action prognoz",
-      value: compactNumber(forecast.next_7d_mentions || 0),
-      text: "Keyingi 7 kunda kelishi mumkin bo'lgan mention hajmi.",
-      Icon: TrendingUp,
-      tone: "source",
-    },
-  ];
-
-  return (
-    <section className="dashboardOpsGrid">
-      {rows.map((item) => (
-        <article className={`opsPanel ${item.tone}`} key={item.title}>
-          <span className="opsIcon"><item.Icon size={18} /></span>
-          <div>
-            <strong>{item.title}</strong>
-            <b>{item.value}</b>
-            <p>{item.text}</p>
-          </div>
-        </article>
-      ))}
-    </section>
-  );
-}
-
 function SectionHeaderSkeleton({ pill = false } = {}) {
   return (
     <div className="sectionHeader skeletonHeader">
@@ -799,8 +745,9 @@ export function Dashboard() {
           </div>
         </section>
 
+        <SignalInbox />
+
         <OfficialSourceSetup sources={sources} filter={filter} />
-        <DashboardOperations mentions={mentions} sources={sources} ai={ai} forecast={forecast} />
 
         <section className="analyticsHero">
           <article className="dashboardPanel panel">

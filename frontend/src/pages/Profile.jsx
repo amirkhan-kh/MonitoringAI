@@ -36,6 +36,7 @@ import {
   saveSelectedBrandId,
 } from "../api/client";
 import { TelegramIcon, YouTubeIcon } from "../components/BrandIcons";
+import DeleteSourceModal from "../components/DeleteSourceModal";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
 import { SmartSelect } from "../components/SmartSelect";
@@ -1466,6 +1467,7 @@ export function Profile() {
   const [modal, setModal] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
 
@@ -1658,15 +1660,16 @@ export function Profile() {
     if (platform === "telegram") await reloadTelegramConnection(source.brand_id || selectedBrandId);
   }
 
-  async function handleDeleteSource(platform, source) {
+  function handleDeleteSource(platform, source) {
     const display = platform === "telegram" || platform === "youtube"
       ? sourceDisplay(platform, source)
       : metaSourceDisplay(platform, source);
-    const confirmed = window.confirm(translateUiText(
-      `“${display.title}” source butunlay o'chirilsinmi? Unga tegishli barcha post, comment va AI tahlillar ham o'chadi. Bu amalni ortga qaytarib bo'lmaydi.`,
-    ));
-    if (!confirmed) return;
+    setPendingDelete({ platform, source, title: display.title });
+  }
 
+  async function confirmDeleteSource(purgeMentions) {
+    if (!pendingDelete) return;
+    const { platform, source } = pendingDelete;
     const deleteEndpoint = {
       telegram: endpoints.deleteSource,
       youtube: endpoints.youtubeDeleteSource,
@@ -1678,11 +1681,14 @@ export function Profile() {
     setSaving(true);
     setResult(null);
     try {
-      const deleted = await deleteEndpoint(source.id);
+      const deleted = await deleteEndpoint(source.id, purgeMentions);
       setResult({
         ok: true,
-        message: `${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil butunlay o'chirildi.`,
+        message: purgeMentions
+          ? `${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil butunlay o'chirildi.`
+          : `${deleted.sources_deleted} ta source o'chirildi. ${deleted.mentions_retained} ta tahlil qilingan mention saqlandi — bu manbani qayta ulasangiz ular qayta tahlil qilinmaydi.`,
       });
+      setPendingDelete(null);
       await loadProfile();
       if (platform === "telegram") await reloadTelegramConnection(source.brand_id || selectedBrandId);
     } catch (err) {
@@ -1984,6 +1990,14 @@ export function Profile() {
             result={result}
           />
         )}
+
+        <DeleteSourceModal
+          open={Boolean(pendingDelete)}
+          sourceName={pendingDelete?.title || ""}
+          busy={saving}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDeleteSource}
+        />
       </main>
     </div>
   );

@@ -385,7 +385,8 @@ export const endpoints = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
-  deleteSource: (sourceId) => api(uuidPath("/telegram/sources", sourceId), { method: "DELETE" }),
+  deleteSource: (sourceId, purgeMentions = true) =>
+    api(`${uuidPath("/telegram/sources", sourceId)}?purge_mentions=${purgeMentions}`, { method: "DELETE" }),
   refreshSource: (sourceId) =>
     api(`/telegram/sources/${sourceId}/refresh`, {
       method: "POST",
@@ -413,7 +414,8 @@ export const endpoints = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
-  youtubeDeleteSource: (sourceId) => api(uuidPath("/youtube/sources", sourceId), { method: "DELETE" }),
+  youtubeDeleteSource: (sourceId, purgeMentions = true) =>
+    api(`${uuidPath("/youtube/sources", sourceId)}?purge_mentions=${purgeMentions}`, { method: "DELETE" }),
   youtubeSyncSource: (sourceId, payload = { max_pages: 1, comments_per_video: 100 }) =>
     api(`/youtube/sources/${sourceId}/sync`, {
       method: "POST",
@@ -425,13 +427,17 @@ export const endpoints = {
   instagramSourceCategories: () => cachedApi("/instagram/source-categories", 60000),
   instagramSources: () => cachedApi("/instagram/sources", 5000),
   instagramConnect: (payload) => api("/instagram/sources", { method: "POST", body: JSON.stringify(payload) }),
+  // Business Login for Instagram: the backend signs a state blob and hands back Meta's
+  // consent URL, which the page then navigates to.
+  instagramOauthStart: (brandId) => api(`/instagram/oauth/start?brand_id=${encodeURIComponent(brandId)}`),
   instagramUpdateSource: (sourceId, payload) =>
     api(`/instagram/sources/${sourceId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   instagramValidateSource: (sourceId) =>
     api(`/instagram/sources/${sourceId}/validate`, { method: "POST", body: JSON.stringify({}) }),
   instagramSyncSource: (sourceId) =>
     api(`/instagram/sources/${sourceId}/sync`, { method: "POST", body: JSON.stringify({}) }),
-  instagramDeleteSource: (sourceId) => api(`/instagram/sources/${sourceId}`, { method: "DELETE" }),
+  instagramDeleteSource: (sourceId, purgeMentions = true) =>
+    api(`/instagram/sources/${sourceId}?purge_mentions=${purgeMentions}`, { method: "DELETE" }),
   instagramMentions: (brandId, limit = 500) => cachedApi(brandLimitPath("/instagram/mentions", brandId, limit), 4000),
   instagramSummary: (brandId) => cachedApi(brandPath("/instagram/summary", brandId), 5000),
   instagramManualIngest: (payload) =>
@@ -443,10 +449,20 @@ export const endpoints = {
     api(`/facebook/sources/${sourceId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   facebookValidateSource: (sourceId) =>
     api(`/facebook/sources/${sourceId}/validate`, { method: "POST", body: JSON.stringify({}) }),
-  facebookDeleteSource: (sourceId) => api(`/facebook/sources/${sourceId}`, { method: "DELETE" }),
+  facebookDeleteSource: (sourceId, purgeMentions = true) =>
+    api(`/facebook/sources/${sourceId}?purge_mentions=${purgeMentions}`, { method: "DELETE" }),
   facebookMentions: (brandId, limit = 100) => cachedApi(brandLimitPath("/facebook/mentions", brandId, limit), 4000),
   facebookSummary: (brandId) => cachedApi(brandPath("/facebook/summary", brandId), 5000),
   facebookManualIngest: (payload) =>
     api("/facebook/mentions/manual", { method: "POST", body: JSON.stringify(payload) }),
+  // Signal inbox — the dashboard twin of the staff-group Telegram cards.
+  alertSummary: () => cachedApi("/alerts/summary", 5000),
+  alertEvents: (params = {}) =>
+    cachedApi(withQuery("/alerts/events", { limit: 50, ...params }), 4000),
+  alertAction: (eventId, action, actor) =>
+    api(`${uuidPath("/alerts/events", eventId)}/action`, {
+      method: "POST",
+      body: JSON.stringify({ action, actor }),
+    }),
   eventsStream: () => openEventStream(),
 };

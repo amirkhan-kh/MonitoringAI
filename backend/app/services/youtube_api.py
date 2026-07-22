@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Iterable, Iterator
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 
 
+logger = logging.getLogger("youtube-api")
+
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
+# videos.list accepts up to 50 comma-separated ids for the same 1-unit cost as one id.
+VIDEO_DETAIL_BATCH = 50
+# The daily quota window resets at midnight US/Pacific, not UTC.
+QUOTA_RESET_UTC_OFFSET_HOURS = 8
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 LEGACY_USERNAME_PREFIX = "user:"
@@ -20,6 +28,9 @@ RATE_LIMIT_REASONS = {
     "rateLimitExceeded",
     "userRateLimitExceeded",
 }
+# These burn the whole daily allowance — backing off for an hour just re-fails.
+# The only thing that clears them is the midnight-Pacific quota reset.
+DAILY_QUOTA_REASONS = {"dailyLimitExceeded", "quotaExceeded"}
 
 
 class YouTubeApiError(RuntimeError):
@@ -39,6 +50,40 @@ class YouTubeApiError(RuntimeError):
     @property
     def rate_limited(self) -> bool:
         return self.status_code == 429 or self.reason in RATE_LIMIT_REASONS
+
+    @property
+    def quota_exceeded(self) -> bool:
+        """The daily unit allowance is gone; nothing works until the quota resets."""
+        return self.reason in DAILY_QUOTA_REASONS
+
+    @property
+    def retryable(self) -> bool:
+        """Transient: a network blip or a server-side 5xx, worth another attempt."""
+        return self.status_code is None or self.status_code >= 500
+
+
+def seconds_until_quota_reset(now: datetime | None = None) -> int:
+    """Seconds until the next midnight US/Pacific, when the daily quota resets.
+
+    Uses a fixed -8 offset rather than a tz database lookup: during daylight saving
+    the estimate is an hour late, which only ever means waiting slightly longer than
+    necessary — never retrying too early and burning the fresh allowance on 403s.
+    """
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    pacific = moment - timedelta(hours=QUOTA_RESET_UTC_OFFSET_HOURS)
+    next_midnight = (pacific + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(60, int((next_midnight - pacific).total_seconds()))
+
+
+def chunked(values: Iterable[str], size: int) -> Iterator[list[str]]:
+    batch: list[str] = []
+    for value in values:
+        batch.append(value)
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 @dataclass
@@ -122,27 +167,85 @@ def parse_rfc3339(value: str | None) -> datetime | None:
 
 
 class YouTubeApi:
-    def __init__(self, api_key: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        timeout: float = 25.0,
+        max_attempts: int = 3,
+        backoff_seconds: float = 1.0,
+    ) -> None:
         self.api_key = api_key
+        self.timeout = timeout
+        self.max_attempts = max(1, max_attempts)
+        self.backoff_seconds = backoff_seconds
+        self._client: httpx.Client | None = None
 
     @property
     def configured(self) -> bool:
         return bool(self.api_key)
 
+    @property
+    def client(self) -> httpx.Client:
+        """One pooled client per instance — a cycle makes dozens of calls and a
+        fresh TCP+TLS handshake for each is pure latency."""
+        if self._client is None:
+            self._client = httpx.Client(
+                base_url=YOUTUBE_API_BASE,
+                timeout=self.timeout,
+                limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+            )
+        return self._client
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    def __enter__(self) -> "YouTubeApi":
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.close()
+
     def get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
-            raise RuntimeError("YOUTUBE_API_KEY sozlanmagan")
+            raise YouTubeApiError("YOUTUBE_API_KEY sozlanmagan")
         merged_params = {**params, "key": self.api_key}
-        try:
-            response = httpx.get(f"{YOUTUBE_API_BASE}/{path}", params=merged_params, timeout=25)
-        except httpx.RequestError:
-            raise YouTubeApiError(f"YouTube API {path} request failed (network error)") from None
-        if response.is_error:
-            raise build_youtube_api_error(path, response, api_key=self.api_key)
-        try:
-            return response.json()
-        except ValueError:
-            raise YouTubeApiError(f"YouTube API {path} returned invalid JSON") from None
+        last_error: YouTubeApiError | None = None
+
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                response = self.client.get(f"/{path}", params=merged_params)
+            except httpx.RequestError as exc:
+                last_error = YouTubeApiError(
+                    f"YouTube API {path} request failed (network error: {type(exc).__name__})"
+                )
+            else:
+                if not response.is_error:
+                    try:
+                        return response.json()
+                    except ValueError:
+                        raise YouTubeApiError(f"YouTube API {path} returned invalid JSON") from None
+                last_error = build_youtube_api_error(path, response, api_key=self.api_key)
+                # Quota/rate limits are not transient at this timescale, and 4xx
+                # means the request itself is wrong — retrying either just wastes units.
+                if not last_error.retryable:
+                    raise last_error
+
+            if attempt < self.max_attempts:
+                delay = self.backoff_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    "YouTube API %s attempt %s/%s failed (%s); retrying in %.1fs",
+                    path,
+                    attempt,
+                    self.max_attempts,
+                    last_error,
+                    delay,
+                )
+                time.sleep(delay)
+
+        raise last_error or YouTubeApiError(f"YouTube API {path} request failed")
 
     def channel_by_handle(self, handle: str) -> dict[str, Any] | None:
         if handle.lower().startswith(LEGACY_USERNAME_PREFIX):
@@ -168,11 +271,30 @@ class YouTubeApi:
         return first_item(payload)
 
     def video_by_id(self, video_id: str) -> dict[str, Any] | None:
-        payload = self.get(
-            "videos",
-            {"part": "snippet,statistics,contentDetails", "id": video_id, "maxResults": 1},
-        )
-        return first_item(payload)
+        return self.videos_by_ids([video_id]).get(video_id)
+
+    def videos_by_ids(self, video_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Fetch details for many videos in 50-id batches, keyed by video id.
+
+        One batched call costs the same single unit as one id, so this turns the
+        per-video N+1 into ceil(n/50) calls.
+        """
+        unique_ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+        details: dict[str, dict[str, Any]] = {}
+        for batch in chunked(unique_ids, VIDEO_DETAIL_BATCH):
+            payload = self.get(
+                "videos",
+                {
+                    "part": "snippet,statistics,contentDetails",
+                    "id": ",".join(batch),
+                    "maxResults": len(batch),
+                },
+            )
+            for item in payload.get("items") or []:
+                item_id = item.get("id")
+                if isinstance(item_id, str):
+                    details[item_id] = item
+        return details
 
     def search_videos(
         self,

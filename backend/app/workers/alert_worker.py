@@ -3,6 +3,9 @@
 Detection (in ai_worker) only queues pending AlertEvents; this worker is the single
 place that talks to Telegram, so delivery has retry + rate-limiting and survives a
 missing chat id / bot outage without losing alerts. Idempotent and safe to restart.
+
+It also owns the two follow-up duties of the staff-group workflow: nudging signals that
+crossed the SLA, and keeping the pinned "still unanswered" counter current.
 """
 
 from __future__ import annotations
@@ -12,7 +15,9 @@ import time
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
-from app.services.alerts import dispatch_pending_alerts
+from app.services.alert_workflow import sync_summary_message
+from app.services.alerts import dispatch_pending_alerts, send_sla_reminders
+from app.services.telegram_api import TelegramBotApi
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("alert-worker")
@@ -41,6 +46,13 @@ def main() -> None:
                     sent = dispatch_pending_alerts(session, settings)
                     if sent:
                         logger.info("Delivered %s alert(s) to Telegram", sent)
+                    api = TelegramBotApi(settings.telegram_bot_token)
+                    nudged = send_sla_reminders(session, settings, api)
+                    if nudged:
+                        logger.info("Nudged %s unanswered alert(s) past the %sm SLA", nudged, settings.alert_sla_minutes)
+                    # A new card or a nudge changes the open count, so refresh immediately;
+                    # otherwise the throttle inside decides.
+                    sync_summary_message(api, session, settings, force=bool(sent or nudged))
         except Exception:
             logger.exception("Alert dispatch loop failed")
         time.sleep(settings.alert_poll_interval_seconds)

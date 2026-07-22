@@ -5,6 +5,12 @@ Telegram-first monitoring workspace for brand source cataloging, post/comment in
 Client brandning Telegram va YouTube profilini ulash bo'yicha sodda qo'llanma:
 [`docs/brand-platform-ulash-qollanmasi.md`](docs/brand-platform-ulash-qollanmasi.md).
 
+Instagram + Meta App Review ni oxirigacha yopish bo'yicha to'liq yo'l:
+[`docs/instagram-meta-toliq-yol.md`](docs/instagram-meta-toliq-yol.md).
+
+Signal inbox (xodimlar guruhi):
+[`docs/signal-inbox-xodimlar-guruhi.md`](docs/signal-inbox-xodimlar-guruhi.md).
+
 ## Structure
 
 ```text

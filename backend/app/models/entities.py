@@ -139,6 +139,11 @@ class TelegramSource(Base):
     last_backfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    # Set when the operator removed the source but chose to keep its analysed mentions.
+    # The row is kept (hidden everywhere) so mentions retain a stable source_id: that id
+    # is part of the mention uniqueness key, so reviving this row on re-add dedupes the
+    # old messages instead of re-ingesting and re-analysing them.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     brand: Mapped[Brand | None] = relationship(back_populates="telegram_sources")
     bot_connection: Mapped[TelegramBotConnection | None] = relationship(back_populates="sources")
@@ -182,6 +187,7 @@ class YouTubeSource(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class YouTubeMention(Base):
@@ -315,8 +321,20 @@ class Analysis(Base):
 
 
 class AlertEvent(Base):
+    """A reputation-risk signal: delivered to the staff Telegram group, then worked on there.
+
+    Two independent state machines live on this row:
+      * ``status`` — *delivery* (pending → sent / failed / abandoned), owned by alert_worker.
+      * ``work_status`` — *support workflow* (open → checked → answered), driven by the
+        inline buttons in the staff group. ``answered`` is the only terminal state, and it
+        always carries the name of the person who replied to the customer.
+    """
+
     __tablename__ = "alert_events"
-    __table_args__ = (Index("ix_alert_events_brand_created", "brand_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_alert_events_brand_created", "brand_id", "created_at"),
+        Index("ix_alert_events_work_status", "work_status", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     brand_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("brands.id"), nullable=True)
@@ -329,6 +347,30 @@ class AlertEvent(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- support workflow (inline buttons in the staff group) ---
+    work_status: Mapped[str] = mapped_column(String(32), default="open", server_default="open")
+    checked_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    checked_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    answered_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    answered_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Where the alert card lives, so a button press can edit it in place.
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reminder_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+
+
+class AppState(Base):
+    """Tiny key/value store for singleton bot state (e.g. the pinned summary message id)."""
+
+    __tablename__ = "app_state"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class InstagramSource(Base):
@@ -368,6 +410,7 @@ class InstagramSource(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class InstagramMention(Base):
@@ -457,6 +500,7 @@ class FacebookSource(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class FacebookMention(Base):

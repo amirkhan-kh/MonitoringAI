@@ -19,6 +19,7 @@ import {
   Webhook,
 } from "lucide-react";
 import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId, saveSelectedBrandId } from "../api/client";
+import DeleteSourceModal from "../components/DeleteSourceModal";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
@@ -75,6 +76,8 @@ export function FacebookMonitoring() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [copied, setCopied] = useState("");
   const brandRef = useRef("");
   const refreshTimer = useRef(null);
@@ -231,20 +234,29 @@ export function FacebookMonitoring() {
     }
   };
 
-  const handleDelete = async (source) => {
-    const name = source.page_name || source.username || source.page_id;
-    const confirmed = window.confirm(translateUiText(
-      `“${name}” sahifasi butunlay o'chirilsinmi? Unga tegishli barcha post, comment, reply va AI tahlillar ham o'chadi. Bu amalni ortga qaytarib bo'lmaydi.`,
-    ));
-    if (!confirmed) return;
+  const handleDelete = (source) => {
+    setPendingDelete(source);
+  };
+
+  const confirmDelete = async (purgeMentions) => {
+    const source = pendingDelete;
+    if (!source) return;
     setError("");
     setNotice("");
+    setDeleteBusy(true);
     try {
-      const deleted = await endpoints.facebookDeleteSource(source.id);
-      setNotice(`${deleted.sources_deleted} ta sahifa, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`);
+      const deleted = await endpoints.facebookDeleteSource(source.id, purgeMentions);
+      setNotice(
+        purgeMentions
+          ? `${deleted.sources_deleted} ta sahifa, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`
+          : `${deleted.sources_deleted} ta sahifa o'chirildi. ${deleted.mentions_retained} ta tahlil qilingan mention saqlandi — bu sahifani qayta ulasangiz ular qayta tahlil qilinmaydi.`,
+      );
+      setPendingDelete(null);
       await loadData(brandRef.current);
     } catch (err) {
       setError(err.message || "O'chirishda xatolik");
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -568,6 +580,14 @@ export function FacebookMonitoring() {
             </div>
           </section>
         </section>
+
+        <DeleteSourceModal
+          open={Boolean(pendingDelete)}
+          sourceName={pendingDelete ? pendingDelete.page_name || pendingDelete.username || pendingDelete.page_id : ""}
+          busy={deleteBusy}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
       </main>
     </div>
   );

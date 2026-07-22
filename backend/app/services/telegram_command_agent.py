@@ -173,6 +173,11 @@ def help_text() -> str:
         "/resume @channel - monitoringni yoqish\n"
         "/remove @channel - source'ni active=false qilish\n"
         "/status - bot, Telethon va source status\n\n"
+        "Xodimlar guruhida (bot admin bo'lishi kerak):\n"
+        "/id - guruh chat id (ALERT_TELEGRAM_CHAT_ID uchun)\n"
+        "/ochiq - javob kutayotgan signallar ro'yxati\n"
+        "/statistika - bugungi javoblar va xodimlar kesimi\n"
+        "/jamlanma - pin qilingan hisoblagichni yangilash\n\n"
         "Category: owned, competitor, news, community, risk, bot, industry.\n"
         "Mode: all_messages yoki brand_matches_only.\n"
         "Sana berilmasa bugundan kuzatadi. Masalan: /add @channel owned all_messages 2026-07-01\n"
@@ -419,6 +424,10 @@ def upsert_telegram_source_from_chat(
     source.collect_comments = collect_comments
     source.monitor_from = monitor_from or source.monitor_from or datetime.now(timezone.utc)
     source.active = True
+    # Re-adding a source that was removed with its mentions kept revives the same row, so
+    # last_seen_message_id survives: catch-up imports only the gap and the AI worker only
+    # analyses what still has no verdict.
+    source.deleted_at = None
     return source
 
 
@@ -506,6 +515,10 @@ def upsert_catalog_source(
     source.collect_comments = collect_comments
     source.monitor_from = monitor_from or source.monitor_from or datetime.now(timezone.utc)
     source.active = True
+    # Re-adding a source that was removed with its mentions kept revives the same row, so
+    # last_seen_message_id survives: catch-up imports only the gap and the AI worker only
+    # analyses what still has no verdict.
+    source.deleted_at = None
     return source
 
 

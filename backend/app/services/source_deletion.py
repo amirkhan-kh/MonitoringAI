@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -46,7 +47,26 @@ def _source_ids(session: Session, platform: str, source: Any) -> list[uuid.UUID]
     return list(dict.fromkeys(source_ids))
 
 
-def delete_monitored_source(session: Session, platform: str, source_id: uuid.UUID) -> dict[str, Any]:
+def delete_monitored_source(
+    session: Session,
+    platform: str,
+    source_id: uuid.UUID,
+    *,
+    purge_mentions: bool = True,
+) -> dict[str, Any]:
+    """Remove a monitored source, optionally keeping the mentions it already collected.
+
+    ``purge_mentions=True`` wipes the source and everything derived from it, which is
+    what you want when the source was added by mistake or its data is no longer wanted
+    on disk.
+
+    ``purge_mentions=False`` keeps every mention, analysis and alert and only soft-deletes
+    the source row (``deleted_at`` set, ``active`` cleared). The row must survive because
+    a mention's uniqueness key includes ``source_id``: dropping it would make a later
+    re-add re-ingest the same messages under a fresh id and pay for a second AI analysis.
+    Reviving this row instead keeps ingestion deduplicating against what is already stored,
+    so only messages missed while the source was gone get analysed.
+    """
     if platform not in SOURCE_DELETE_CONFIG:
         raise ValueError(f"Unsupported platform: {platform}")
 
@@ -57,6 +77,30 @@ def delete_monitored_source(session: Session, platform: str, source_id: uuid.UUI
     session.flush()
 
     source_ids = _source_ids(session, platform, source)
+
+    if not purge_mentions:
+        mentions_retained = (
+            session.query(mention_model.id).filter(mention_model.source_id.in_(source_ids)).count()
+        )
+        now = datetime.now(timezone.utc)
+        sources_deleted = (
+            session.query(source_model)
+            .filter(source_model.id.in_(source_ids))
+            .update({"deleted_at": now, "active": False}, synchronize_session=False)
+        )
+        session.commit()
+        return {
+            "ok": True,
+            "platform": platform,
+            "source_id": source_id,
+            "sources_deleted": sources_deleted,
+            "mentions_deleted": 0,
+            "analyses_deleted": 0,
+            "alerts_deleted": 0,
+            "mentions_retained": mentions_retained,
+            "soft_deleted": True,
+        }
+
     mention_ids = [
         row[0]
         for row in session.query(mention_model.id).filter(mention_model.source_id.in_(source_ids)).all()
@@ -89,4 +133,6 @@ def delete_monitored_source(session: Session, platform: str, source_id: uuid.UUI
         "mentions_deleted": mentions_deleted,
         "analyses_deleted": analyses_deleted,
         "alerts_deleted": alerts_deleted,
+        "mentions_retained": 0,
+        "soft_deleted": False,
     }

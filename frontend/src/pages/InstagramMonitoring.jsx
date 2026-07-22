@@ -19,6 +19,7 @@ import {
   MessageCircle,
 } from "lucide-react";
 import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId, saveSelectedBrandId } from "../api/client";
+import DeleteSourceModal from "../components/DeleteSourceModal";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
@@ -73,10 +74,13 @@ export function InstagramMonitoring() {
   const [demoSubmitting, setDemoSubmitting] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState(false);
   const [syncingSourceId, setSyncingSourceId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [copied, setCopied] = useState("");
   const brandRef = useRef("");
   const refreshTimer = useRef(null);
@@ -134,6 +138,21 @@ export function InstagramMonitoring() {
     loadInitial();
   }, [loadInitial]);
 
+  // Coming back from Meta's consent screen: the backend redirects here with the outcome
+  // in the query string. Show it, then strip the params so a refresh doesn't repeat it.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("ig_connect");
+    if (!outcome) return;
+    if (outcome === "ok") {
+      const username = params.get("username");
+      setNotice(username ? `@${username} muvaffaqiyatli ulandi.` : "Instagram akkaunt ulandi.");
+    } else {
+      setError(`Instagram ulanmadi: ${params.get("reason") || "noma'lum xato"}`);
+    }
+    window.history.replaceState(null, "", window.location.pathname);
+  }, []);
+
   useEffect(() => {
     loadData(selectedBrandId);
   }, [selectedBrandId, loadData]);
@@ -172,6 +191,25 @@ export function InstagramMonitoring() {
     ],
     [summary],
   );
+
+  // Preferred path: the account owner approves us on Meta's own consent screen and the
+  // token never touches anyone's clipboard. Falls back to the paste-a-token form below
+  // for accounts whose token was generated elsewhere.
+  const handleOauthConnect = async () => {
+    if (!form.brand_id) {
+      setError("Avval brand tanlang.");
+      return;
+    }
+    setOauthBusy(true);
+    setError("");
+    try {
+      const { authorize_url: authorizeUrl } = await endpoints.instagramOauthStart(form.brand_id);
+      window.location.assign(authorizeUrl);
+    } catch (err) {
+      setError(err.message || "Instagram ulanish havolasini olib bo'lmadi");
+      setOauthBusy(false);
+    }
+  };
 
   const handleConnect = async (event) => {
     event.preventDefault();
@@ -244,21 +282,30 @@ export function InstagramMonitoring() {
     }
   };
 
-  const handleDelete = async (source) => {
-    const name = source.username ? `@${source.username}` : source.account_name || source.ig_user_id;
-    const confirmed = window.confirm(translateUiText(
-      `“${name}” akkaunti butunlay o'chirilsinmi? Unga tegishli barcha post, comment, @mention va AI tahlillar ham o'chadi. Bu amalni ortga qaytarib bo'lmaydi.`,
-    ));
-    if (!confirmed) return;
+  const handleDelete = (source) => {
+    setPendingDelete(source);
+  };
+
+  const confirmDelete = async (purgeMentions) => {
+    const source = pendingDelete;
+    if (!source) return;
     setError("");
     setNotice("");
+    setDeleteBusy(true);
     try {
-      const deleted = await endpoints.instagramDeleteSource(source.id);
-      setNotice(`${deleted.sources_deleted} ta akkaunt, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`);
+      const deleted = await endpoints.instagramDeleteSource(source.id, purgeMentions);
+      setNotice(
+        purgeMentions
+          ? `${deleted.sources_deleted} ta akkaunt, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`
+          : `${deleted.sources_deleted} ta akkaunt o'chirildi. ${deleted.mentions_retained} ta tahlil qilingan mention saqlandi — bu akkauntni qayta ulasangiz ular qayta tahlil qilinmaydi.`,
+      );
+      setPendingDelete(null);
       clearApiCache("/instagram/");
       await loadData(brandRef.current);
     } catch (err) {
       setError(err.message || "O'chirishda xatolik");
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -422,6 +469,27 @@ export function InstagramMonitoring() {
                 ))}
               </div>
             </div>
+
+            <div className="igOauthCard">
+              <div className="igOauthText">
+                <strong>Instagram bilan ulanish</strong>
+                <span>
+                  Akkaunt egasi Meta'ning rasmiy oynasida ruxsat beradi — token qo'lda nusxalanmaydi va
+                  60 kunlik uzoq muddatli token avtomatik olinadi.
+                </span>
+              </div>
+              <button
+                className="button primary"
+                type="button"
+                disabled={oauthBusy}
+                onClick={handleOauthConnect}
+              >
+                <Instagram size={17} />
+                <span>{oauthBusy ? "Yo'naltirilmoqda..." : "Instagram bilan ulanish"}</span>
+              </button>
+            </div>
+
+            <div className="igOrDivider"><span>yoki tokenni qo'lda kiritish</span></div>
 
             <form className="loginForm" onSubmit={handleConnect} style={{ marginBottom: 18 }}>
               <label className="field">
@@ -666,6 +734,20 @@ export function InstagramMonitoring() {
             </div>
           </section>
         </section>
+
+        <DeleteSourceModal
+          open={Boolean(pendingDelete)}
+          sourceName={
+            pendingDelete
+              ? pendingDelete.username
+                ? `@${pendingDelete.username}`
+                : pendingDelete.account_name || pendingDelete.ig_user_id
+              : ""
+          }
+          busy={deleteBusy}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
       </main>
     </div>
   );

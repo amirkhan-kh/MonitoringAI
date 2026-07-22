@@ -1,15 +1,18 @@
 import {
   Bot,
   CheckCircle2,
+  ChevronDown,
   Eye,
   EyeOff,
   MessageSquareText,
+  PlayCircle,
   RadioTower,
   Save,
   ShieldAlert,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import BotFatherGuideModal from "./BotFatherGuideModal.jsx";
 
 function todayInputValue() {
   const now = new Date();
@@ -207,6 +210,13 @@ export function TelegramConnectionForm({
   const [collectComments, setCollectComments] = useState(true);
   const [showToken, setShowToken] = useState(false);
   const [validationError, setValidationError] = useState("");
+  // The bot is the optional third step: an operator who only watches a channel and its
+  // discussion group never has to look at it, so it stays folded until asked for.
+  const [botPanelOpen, setBotPanelOpen] = useState(false);
+  const [botOwnership, setBotOwnership] = useState("");
+  const [botSkill, setBotSkill] = useState("");
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [guideSeen, setGuideSeen] = useState(false);
 
   useEffect(() => {
     const bot = connectorNode(initialConnection, "bot");
@@ -224,6 +234,12 @@ export function TelegramConnectionForm({
     setCollectComments(initialConnection?.collect_comments ?? source?.collect_comments ?? true);
     setShowToken(false);
     setValidationError("");
+    // A brand that already has a bot skips the questionnaire and shows its saved values.
+    const alreadyConnected = Boolean(bot);
+    setBotPanelOpen(alreadyConnected);
+    setBotOwnership(alreadyConnected ? "yes" : "");
+    setBotSkill("");
+    setGuideSeen(false);
   }, [initialConnection, selectedBrandId]);
 
   const statusData = result?.ok === false ? initialConnection : result || initialConnection;
@@ -235,6 +251,21 @@ export function TelegramConnectionForm({
     const bot = connectorNode(initialConnection, "bot");
     return Boolean(bot?.token_configured || nestedSource(bot)?.token_configured);
   }, [initialConnection]);
+
+  // Credentials appear once the operator has a bot, or has been shown how to make one.
+  const showBotFields = botOwnership === "yes"
+    || (botOwnership === "no" && (botSkill === "yes" || (botSkill === "no" && guideSeen)));
+
+  function chooseOwnership(value) {
+    setBotOwnership(value);
+    setBotSkill("");
+    if (value === "yes") setGuideSeen(false);
+  }
+
+  function chooseSkill(value) {
+    setBotSkill(value);
+    if (value === "no" && !guideSeen) setGuideOpen(true);
+  }
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -287,74 +318,9 @@ export function TelegramConnectionForm({
       </div>
 
       <div className="telegramConnectorInputs full">
-        <section className="telegramConnectorInputCard bot">
-          <div className="telegramConnectorInputHead">
-            <Bot size={18} />
-            <div>
-              <strong>Telegram bot</strong>
-              <span>Link va tokendan biri yoki ikkalasi</span>
-            </div>
-          </div>
-          <label className="field">
-            <span>Bot link yoki username</span>
-            <input
-              className="input"
-              value={botLink}
-              onChange={(event) => setBotLink(event.target.value)}
-              placeholder="https://t.me/brand_bot"
-              autoComplete="off"
-              spellCheck="false"
-            />
-          </label>
-          <label className="field">
-            <span>Bot token</span>
-            <div className="tokenInputWrap">
-              <input
-                className="input"
-                type={showToken ? "text" : "password"}
-                value={botToken}
-                onChange={(event) => setBotToken(event.target.value)}
-                placeholder={hasBotConnection ? "Yangi token bilan almashtirish" : "123456:ABC…"}
-                autoComplete="off"
-                spellCheck="false"
-              />
-              <button
-                className="eyeBtn"
-                type="button"
-                onClick={() => setShowToken((current) => !current)}
-                aria-label={showToken ? "Tokenni yashirish" : "Tokenni ko'rsatish"}
-              >
-                {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-            <p className="fieldHint">Token faqat serverga yuboriladi; brauzer xotirasida saqlanmaydi.</p>
-          </label>
-          <label className="field">
-            <span>Bot ishlash rejimi</span>
-            <select
-              className="input select"
-              value={botMode}
-              onChange={(event) => {
-                setBotMode(event.target.value);
-                setBotModeTouched(true);
-              }}
-            >
-              <option value="reference">Reference — faqat rasmiy bot profili</option>
-              <option value="polling">Dedicated polling — xabarlarni olish</option>
-            </select>
-          </label>
-          <div className={`telegramBotModeWarning ${botMode}`}>
-            <ShieldAlert size={16} />
-            <span>
-              {botMode === "polling"
-                ? "Faqat MonitoringAI uchun ajratilgan botni ulang. Production bot webhooki yoki boshqa poller bilan bir token bir vaqtda ishlamaydi."
-                : "Reference rejimi bot profilini registrga qo'shadi; private bot suhbatlari olinmaydi."}
-            </span>
-          </div>
-        </section>
-
         <section className="telegramConnectorInputCard channel">
           <div className="telegramConnectorInputHead">
+            <span className="telegramConnectorStepBadge" aria-hidden="true">1</span>
             <RadioTower size={18} />
             <div>
               <strong>Rasmiy kanal</strong>
@@ -377,6 +343,7 @@ export function TelegramConnectionForm({
 
         <section className="telegramConnectorInputCard discussion">
           <div className="telegramConnectorInputHead">
+            <span className="telegramConnectorStepBadge" aria-hidden="true">2</span>
             <MessageSquareText size={18} />
             <div>
               <strong>Discussion group</strong>
@@ -395,6 +362,141 @@ export function TelegramConnectionForm({
             />
             <p className="fieldHint">Kanal bo'lmasa ham group comment/chat oqimi alohida ulanadi.</p>
           </label>
+        </section>
+
+        <section className={`telegramConnectorInputCard bot ${botPanelOpen ? "open" : ""}`}>
+          <button
+            className="telegramBotAccordionHead"
+            type="button"
+            aria-expanded={botPanelOpen}
+            onClick={() => setBotPanelOpen((current) => !current)}
+          >
+            <span className="telegramConnectorStepBadge" aria-hidden="true">3</span>
+            <Bot size={18} aria-hidden="true" />
+            <span className="telegramBotAccordionTitle">
+              <strong>Sizning Telegram botingiz bormi?</strong>
+              <span>Ixtiyoriy — kanal va group busiz ham kuzatiladi</span>
+            </span>
+            <ChevronDown size={17} className="telegramBotAccordionChevron" aria-hidden="true" />
+          </button>
+
+          {botPanelOpen && (
+            <div className="telegramBotAccordionBody">
+              <fieldset className="telegramBotChoice">
+                <legend>Botingiz bormi?</legend>
+                <label className={botOwnership === "yes" ? "checked" : ""}>
+                  <input
+                    type="radio"
+                    name="telegram-bot-ownership"
+                    checked={botOwnership === "yes"}
+                    onChange={() => chooseOwnership("yes")}
+                  />
+                  <span>Ha, botim bor</span>
+                </label>
+                <label className={botOwnership === "no" ? "checked" : ""}>
+                  <input
+                    type="radio"
+                    name="telegram-bot-ownership"
+                    checked={botOwnership === "no"}
+                    onChange={() => chooseOwnership("no")}
+                  />
+                  <span>Yo'q, botim yo'q</span>
+                </label>
+              </fieldset>
+
+              {botOwnership === "no" && (
+                <fieldset className="telegramBotChoice nested">
+                  <legend>Bot yaratishni bilasizmi?</legend>
+                  <label className={botSkill === "yes" ? "checked" : ""}>
+                    <input
+                      type="radio"
+                      name="telegram-bot-skill"
+                      checked={botSkill === "yes"}
+                      onChange={() => chooseSkill("yes")}
+                    />
+                    <span>Ha, bilaman</span>
+                  </label>
+                  <label className={botSkill === "no" ? "checked" : ""}>
+                    <input
+                      type="radio"
+                      name="telegram-bot-skill"
+                      checked={botSkill === "no"}
+                      onChange={() => chooseSkill("no")}
+                    />
+                    <span>Yo'q, ko'rsating</span>
+                  </label>
+                </fieldset>
+              )}
+
+              {botOwnership === "no" && botSkill === "no" && (
+                <button className="telegramBotGuideLink" type="button" onClick={() => setGuideOpen(true)}>
+                  <PlayCircle size={16} aria-hidden="true" />
+                  <span>Bot yaratish qo'llanmasini ko'rish</span>
+                </button>
+              )}
+
+              {showBotFields && (
+                <div className="telegramBotFields">
+                  <label className="field">
+                    <span>Bot link yoki username</span>
+                    <input
+                      className="input"
+                      value={botLink}
+                      onChange={(event) => setBotLink(event.target.value)}
+                      placeholder="https://t.me/brand_bot"
+                      autoComplete="off"
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Bot token</span>
+                    <div className="tokenInputWrap">
+                      <input
+                        className="input"
+                        type={showToken ? "text" : "password"}
+                        value={botToken}
+                        onChange={(event) => setBotToken(event.target.value)}
+                        placeholder={hasBotConnection ? "Yangi token bilan almashtirish" : "123456:ABC…"}
+                        autoComplete="off"
+                        spellCheck="false"
+                      />
+                      <button
+                        className="eyeBtn"
+                        type="button"
+                        onClick={() => setShowToken((current) => !current)}
+                        aria-label={showToken ? "Tokenni yashirish" : "Tokenni ko'rsatish"}
+                      >
+                        {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </div>
+                    <p className="fieldHint">Token faqat serverga yuboriladi; brauzer xotirasida saqlanmaydi.</p>
+                  </label>
+                  <label className="field">
+                    <span>Bot ishlash rejimi</span>
+                    <select
+                      className="input select"
+                      value={botMode}
+                      onChange={(event) => {
+                        setBotMode(event.target.value);
+                        setBotModeTouched(true);
+                      }}
+                    >
+                      <option value="reference">Reference — faqat rasmiy bot profili</option>
+                      <option value="polling">Dedicated polling — xabarlarni olish</option>
+                    </select>
+                  </label>
+                  <div className={`telegramBotModeWarning ${botMode}`}>
+                    <ShieldAlert size={16} />
+                    <span>
+                      {botMode === "polling"
+                        ? "Faqat MonitoringAI uchun ajratilgan botni ulang. Production bot webhooki yoki boshqa poller bilan bir token bir vaqtda ishlamaydi."
+                        : "Reference rejimi bot profilini registrga qo'shadi; private bot suhbatlari olinmaydi."}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </section>
       </div>
 
@@ -448,6 +550,14 @@ export function TelegramConnectionForm({
           <span>{saving ? "Saqlanmoqda..." : submitLabel}</span>
         </button>
       </div>
+
+      <BotFatherGuideModal
+        open={guideOpen}
+        onClose={() => {
+          setGuideOpen(false);
+          setGuideSeen(true);
+        }}
+      />
     </form>
   );
 }

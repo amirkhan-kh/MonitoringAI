@@ -105,6 +105,8 @@ class SourceDeleteResult(BaseModel):
     mentions_deleted: int = 0
     analyses_deleted: int = 0
     alerts_deleted: int = 0
+    mentions_retained: int = 0
+    soft_deleted: bool = False
 
 
 class TelegramSourceCreate(BaseModel):
@@ -362,6 +364,7 @@ class YouTubeSourceSyncResult(BaseModel):
     imported: int = 0
     error: str | None = None
     rate_limited: bool = False
+    quota_exceeded: bool = False
     retry_after_seconds: int | None = None
 
 
@@ -541,8 +544,41 @@ class AlertEventOut(BaseModel):
     error: str | None
     created_at: datetime
     sent_at: datetime | None
+    work_status: str = "open"
+    checked_by: str | None = None
+    checked_at: datetime | None = None
+    answered_by: str | None = None
+    answered_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+
+class AlertActionIn(BaseModel):
+    """Same transitions the Telegram buttons trigger, for the dashboard."""
+
+    action: Literal["check", "answer", "reopen"]
+    actor: str | None = None
+
+
+class AlertSourceCount(BaseModel):
+    source: str
+    count: int
+
+
+class AlertPersonCount(BaseModel):
+    name: str
+    count: int
+
+
+class AlertSummaryOut(BaseModel):
+    open: int
+    checked: int
+    oldest_created_at: datetime | None
+    by_risk: dict[str, int]
+    by_source: list[AlertSourceCount]
+    answered_today: int
+    avg_response_seconds: float | None
+    by_person: list[AlertPersonCount]
 
 
 # --- Instagram ---

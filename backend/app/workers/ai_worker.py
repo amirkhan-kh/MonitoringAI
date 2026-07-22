@@ -11,8 +11,10 @@ from app.models import (
     Brand,
     FacebookAnalysis,
     FacebookMention,
+    FacebookSource,
     InstagramAnalysis,
     InstagramMention,
+    InstagramSource,
     Mention,
     YouTubeAnalysis,
     YouTubeMention,
@@ -186,6 +188,20 @@ def _brand_name(session, brand_id) -> str | None:
     return brand.name if brand else None
 
 
+def _instagram_source_name(session, mention: InstagramMention) -> str | None:
+    source = session.get(InstagramSource, mention.source_id) if mention.source_id else None
+    if source:
+        return source.account_name or (f"@{source.username}" if source.username else source.ig_user_id)
+    return mention.author_username
+
+
+def _facebook_source_name(session, mention: FacebookMention) -> str | None:
+    source = session.get(FacebookSource, mention.source_id) if mention.source_id else None
+    if source:
+        return source.page_name or source.username or source.page_id
+    return mention.post_id
+
+
 def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableError | None:
     """Analyze one mention in its own DB session (safe to run across threads).
 
@@ -217,7 +233,7 @@ def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableEr
                     record_alert(
                         session, settings, platform="instagram", brand_id=mention.brand_id,
                         mention_id=mention.id, brand_name=_brand_name(session, mention.brand_id),
-                        source=mention.author_username, author=mention.author_username,
+                        source=_instagram_source_name(session, mention), author=mention.author_username,
                         text=mention.text, permalink=mention.permalink, analysis=analysis,
                     )
             elif kind == "facebook":
@@ -229,7 +245,9 @@ def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableEr
                     record_alert(
                         session, settings, platform="facebook", brand_id=mention.brand_id,
                         mention_id=mention.id, brand_name=_brand_name(session, mention.brand_id),
-                        source=mention.post_id, author=mention.author_name,
+                        # The staff group groups open signals by source name, so a raw
+                        # post id would make the Facebook rows unreadable there.
+                        source=_facebook_source_name(session, mention), author=mention.author_name,
                         text=mention.text, permalink=mention.permalink, analysis=analysis,
                     )
             else:

@@ -1,6 +1,7 @@
 from app.models.entities import (
     AlertEvent,
     Analysis,
+    AppState,
     Brand,
     FacebookAnalysis,
     FacebookMention,
@@ -19,6 +20,7 @@ from app.models.entities import (
 __all__ = [
     "AlertEvent",
     "Analysis",
+    "AppState",
     "Brand",
     "FacebookAnalysis",
     "FacebookMention",

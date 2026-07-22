@@ -78,7 +78,7 @@ class YouTubeApiErrorTests(unittest.TestCase):
             json={"error": {"errors": [{"reason": "quotaExceeded"}]}},
         )
 
-        with patch("app.services.youtube_api.httpx.get", return_value=response):
+        with patch("httpx.Client.get", return_value=response):
             with self.assertRaises(YouTubeApiError) as raised:
                 YouTubeApi(api_key).get("search", {"part": "snippet"})
 
@@ -97,13 +97,16 @@ class YouTubeApiErrorTests(unittest.TestCase):
         )
 
         with patch(
-            "app.services.youtube_api.httpx.get",
+            "httpx.Client.get",
             side_effect=httpx.ConnectTimeout("timed out", request=request),
         ):
             with self.assertRaises(YouTubeApiError) as raised:
-                YouTubeApi(api_key).get("videos", {"id": "abcdefghijk"})
+                YouTubeApi(api_key, max_attempts=1).get("videos", {"id": "abcdefghijk"})
 
-        self.assertEqual(str(raised.exception), "YouTube API videos request failed (network error)")
+        self.assertEqual(
+            str(raised.exception),
+            "YouTube API videos request failed (network error: ConnectTimeout)",
+        )
         self.assertNotIn(api_key, str(raised.exception))
 
     def test_api_key_is_not_echoed_if_remote_reason_contains_it(self) -> None:
@@ -115,7 +118,7 @@ class YouTubeApiErrorTests(unittest.TestCase):
             json={"error": {"errors": [{"reason": api_key}]}},
         )
 
-        with patch("app.services.youtube_api.httpx.get", return_value=response):
+        with patch("httpx.Client.get", return_value=response):
             with self.assertRaises(YouTubeApiError) as raised:
                 YouTubeApi(api_key).get("search", {"part": "snippet"})
 

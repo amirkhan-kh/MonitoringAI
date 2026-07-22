@@ -16,13 +16,27 @@ REALTIME_CHANNEL = "monitoring_realtime"
 logger = logging.getLogger("realtime")
 
 
-def publish_realtime_event(session: Session, event_type: str, payload: dict[str, Any]) -> None:
+def publish_realtime_event(
+    session: Session,
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    commit: bool = True,
+) -> None:
+    """Queue a realtime event on the session.
+
+    Postgres delivers NOTIFY at COMMIT, so callers that are mid-transaction should
+    pass ``commit=False`` and let their own commit publish the batch — committing
+    here would break their atomicity by making partial work durable.
+    """
     message = json.dumps({"type": event_type, "payload": payload}, ensure_ascii=False, default=json_default)
     try:
         session.execute(text("select pg_notify(:channel, :payload)"), {"channel": REALTIME_CHANNEL, "payload": message})
-        session.commit()
+        if commit:
+            session.commit()
     except Exception:
-        session.rollback()
+        if commit:
+            session.rollback()
         logger.debug("Could not publish realtime event type=%s", event_type, exc_info=True)
 
 

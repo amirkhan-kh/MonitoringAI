@@ -7,6 +7,7 @@ import {
   resolveSelectedBrandId,
   saveSelectedBrandId,
 } from "../api/client";
+import DeleteSourceModal from "../components/DeleteSourceModal";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
 import { RecentMentions } from "../components/RecentMentions";
@@ -15,7 +16,6 @@ import { SmartSelect } from "../components/SmartSelect";
 import { SourceBoard } from "../components/SourceBoard";
 import { StatsBar } from "../components/StatsBar";
 import { TelegramConnectionForm } from "../components/TelegramConnectionForm";
-import { translateUiText } from "../i18n";
 
 export function TelegramMonitoring() {
   const [botStatus, setBotStatus] = useState(null);
@@ -29,6 +29,8 @@ export function TelegramMonitoring() {
   const [setupResult, setSetupResult] = useState(null);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("owned");
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [connectionLoading, setConnectionLoading] = useState(false);
   const [setupSaving, setSetupSaving] = useState(false);
@@ -294,20 +296,29 @@ export function TelegramMonitoring() {
     }
   }
 
-  async function handleDeleteSource(source) {
-    const name = source.title || (source.username ? `@${source.username}` : source.chat_id) || "Telegram source";
-    const confirmed = window.confirm(translateUiText(
-      `“${name}” source butunlay o'chirilsinmi? Unga tegishli barcha post, comment, AI tahlil va alertlar ham o'chadi. Bu amalni ortga qaytarib bo'lmaydi.`,
-    ));
-    if (!confirmed) return;
+  function handleDeleteSource(source) {
+    setPendingDelete(source);
+  }
+
+  async function confirmDeleteSource(purgeMentions) {
+    const source = pendingDelete;
+    if (!source) return;
     setError("");
     setNotice("");
+    setDeleteBusy(true);
     try {
-      const deleted = await endpoints.deleteSource(source.id);
-      setNotice(`${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`);
+      const deleted = await endpoints.deleteSource(source.id, purgeMentions);
+      setNotice(
+        purgeMentions
+          ? `${deleted.sources_deleted} ta source, ${deleted.mentions_deleted} ta post/comment va ${deleted.analyses_deleted} ta AI tahlil o'chirildi.`
+          : `${deleted.sources_deleted} ta source o'chirildi. ${deleted.mentions_retained} ta tahlil qilingan mention saqlandi — bu kanalni qayta ulasangiz ular qayta tahlil qilinmaydi.`,
+      );
+      setPendingDelete(null);
       await Promise.all([loadDashboard(selectedBrandId), loadConnection(selectedBrandId)]);
     } catch (err) {
       setError(err.message || "Source o'chirishda xatolik yuz berdi.");
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -366,6 +377,20 @@ export function TelegramMonitoring() {
 
           <RecentMentions mentions={mentions} loading={isInitialLoading} />
         </section>
+
+        <DeleteSourceModal
+          open={Boolean(pendingDelete)}
+          sourceName={
+            pendingDelete
+              ? pendingDelete.title ||
+                (pendingDelete.username ? `@${pendingDelete.username}` : pendingDelete.chat_id) ||
+                "Telegram source"
+              : ""
+          }
+          busy={deleteBusy}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDeleteSource}
+        />
 
         {isAddModalOpen && (
           <div className="modalOverlay" role="presentation" onMouseDown={() => setIsAddModalOpen(false)}>
