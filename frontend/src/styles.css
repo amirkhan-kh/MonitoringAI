@@ -250,6 +250,7 @@
   --chart-area-mid: rgba(99, 102, 241, 0.16);
   --chart-area-to: rgba(99, 102, 241, 0);
   --chart-line: #6366f1;
+  --chart-total: #6d3ff0;
   --chart-line-2: #06b6d4;
   --chart-tooltip-bg: rgba(17, 24, 39, 0.94);
   --chart-tooltip-ink: #ffffff;
@@ -288,6 +289,7 @@
   --chart-area-mid: rgba(124, 131, 255, 0.20);
   --chart-area-to: rgba(124, 131, 255, 0);
   --chart-line: #8b8fff;
+  --chart-total: #9f86ff;
   --chart-line-2: #22d3ee;
   --chart-tooltip-bg: rgba(26, 27, 32, 0.96);
   --chart-tooltip-ink: #f2f3f5;
@@ -7450,4 +7452,13 @@ textarea:focus-visible {
 }
 :root[data-theme="light"] .chartShell--hero .recharts-area-curve {
   filter: drop-shadow(0 6px 14px rgba(99, 102, 241, 0.22));
+}
+
+/* Keep the "Jami/Total" key consistent with the vivid chart wave color */
+.chartLegend i.total,
+.chartLegend span.total i {
+  background: var(--chart-total);
+}
+.chartSummary .total strong {
+  color: var(--chart-total);
 }

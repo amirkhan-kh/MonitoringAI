@@ -35,6 +35,7 @@ function useChartColors() {
       areaMid: read("--chart-area-mid", "rgba(124,131,255,0.18)"),
       areaTo: read("--chart-area-to", "rgba(124,131,255,0)"),
       line: read("--chart-line", "#8b8fff"),
+      total: read("--chart-total", "#9f86ff"),
       grid: read("--chart-grid", "rgba(255,255,255,0.06)"),
       axis: read("--chart-axis", "#6b7280"),
       telegram: read("--telegram", "#2aabee"),
@@ -53,7 +54,7 @@ function BreakdownTooltip({ active, payload, label, colors }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload || {};
   const items = [
-    { key: "total", name: "Jami", color: colors.line },
+    { key: "total", name: "Jami", color: colors.total },
     { key: "telegram", name: "Telegram", color: colors.telegram },
     { key: "youtube", name: "YouTube", color: colors.youtube },
     { key: "instagram", name: "Instagram", color: colors.instagram },
@@ -100,9 +101,9 @@ export function MentionTrendChart({ rows, height = 268 }) {
         <AreaChart data={data} margin={{ top: 16, right: 16, bottom: 4, left: -6 }}>
           <defs>
             <linearGradient id="mtAreaTotal" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={c.areaFrom} />
-              <stop offset="52%" stopColor={c.areaMid} />
-              <stop offset="100%" stopColor={c.areaTo} />
+              <stop offset="0%" stopColor={c.total} stopOpacity={0.55} />
+              <stop offset="55%" stopColor={c.total} stopOpacity={0.16} />
+              <stop offset="100%" stopColor={c.total} stopOpacity={0} />
             </linearGradient>
           </defs>
           <CartesianGrid vertical={false} strokeDasharray="4 7" stroke={c.grid} />
@@ -123,17 +124,17 @@ export function MentionTrendChart({ rows, height = 268 }) {
           />
           <Tooltip
             content={<BreakdownTooltip colors={c} />}
-            cursor={{ stroke: c.line, strokeOpacity: 0.35, strokeWidth: 1 }}
+            cursor={{ stroke: c.total, strokeOpacity: 0.4, strokeWidth: 1 }}
           />
           <Area
             type="monotone"
             dataKey="total"
             name="Jami"
-            stroke={c.line}
+            stroke={c.total}
             strokeWidth={2.8}
             fill="url(#mtAreaTotal)"
             dot={false}
-            activeDot={{ r: 5, strokeWidth: 0, fill: c.line }}
+            activeDot={{ r: 5, strokeWidth: 0, fill: c.total }}
             isAnimationActive
             animationDuration={750}
           />
