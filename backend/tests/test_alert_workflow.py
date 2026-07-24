@@ -160,14 +160,16 @@ class CardRenderingTests(AlertWorkflowTestCase):
             text = build_alert_text(event.payload, event)
             keyboard = build_alert_keyboard(event)
 
-        self.assertIn("Tekshirilmadi", text)
-        self.assertIn("Link: https://t.me/uzummarket_chat/361937", text)
+        self.assertIn("Yangi", text)
+        self.assertIn("hali olinmagan", text)
         rows = keyboard["inline_keyboard"]
         self.assertEqual(len(rows[0]), 2)
         self.assertEqual(rows[0][0]["callback_data"], f"alert:check:{event.id}")
         self.assertEqual(rows[0][1]["callback_data"], f"alert:answer:{event.id}")
-        # The deep link is what turns "we saw it" into "we replied" in one tap.
-        self.assertEqual(rows[1][0]["url"], "https://t.me/uzummarket_chat/361937")
+        # Claim-via-link then platform URL — deep link lands on the original comment.
+        self.assertEqual(rows[1][0]["callback_data"], f"alert:open:{event.id}")
+        self.assertEqual(rows[2][0]["url"], "https://t.me/uzummarket_chat/361937")
+        self.assertIn("Telegram", rows[2][0]["text"])
 
     def test_answered_card_names_the_support_agent_and_offers_reopen(self) -> None:
         with SessionLocal() as session:
@@ -177,15 +179,41 @@ class CardRenderingTests(AlertWorkflowTestCase):
             text = build_alert_text(event.payload, event)
             keyboard = build_alert_keyboard(event)
 
-        self.assertIn("✅ Javob berildi", text)
+        self.assertIn("Javob berildi", text)
         self.assertIn("Aziz Karimov", text)
+        self.assertIn("Javob bergan xodim", text)
         self.assertEqual(keyboard["inline_keyboard"][0][0]["callback_data"], f"alert:reopen:{event.id}")
 
     def test_card_without_permalink_has_no_link_button(self) -> None:
         with SessionLocal() as session:
             event = self.make_event(session, payload={"permalink": None})
             keyboard = build_alert_keyboard(event)
+        # Only the workflow row (check + answer) when there is nowhere to deep-link.
         self.assertEqual(len(keyboard["inline_keyboard"]), 1)
+
+    def test_open_via_link_marks_checking_status(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            changed, message = apply_alert_action(
+                session, event, "open", Actor(name="Dildora (@dildora)", user_id=1)
+            )
+            session.commit()
+            text = build_alert_text(event.payload, event)
+
+        self.assertTrue(changed)
+        self.assertEqual(event.work_status, "checked")
+        self.assertIn("Tekshirilyapti", text)
+        self.assertIn("Dildora", text)
+        self.assertIn("Tekshirilyapti", message)
+
+    def test_russian_locale_buttons(self) -> None:
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            keyboard = build_alert_keyboard(event, lang="ru")
+            text = build_alert_text(event.payload, event, lang="ru")
+        self.assertIn("Проверил", keyboard["inline_keyboard"][0][0]["text"])
+        self.assertIn("Ответил", keyboard["inline_keyboard"][0][1]["text"])
+        self.assertIn("Сигнал репутационного риска", text)
 
 
 class TransitionTests(AlertWorkflowTestCase):

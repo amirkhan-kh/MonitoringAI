@@ -29,6 +29,15 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.models import AlertEvent, AppState
+from app.services.alert_i18n import (
+    DEFAULT_LANG,
+    LANG_STATE_CHAT_PREFIX,
+    LANG_STATE_GLOBAL,
+    SUPPORTED_LANGS,
+    lang_display_name,
+    normalize_lang,
+    t,
+)
 from app.services.alerts import (
     LOCAL_TZ,
     OPEN_WORK_STATUSES,
@@ -41,6 +50,7 @@ from app.services.alerts import (
     build_alert_text,
     duration_text,
     local_time_text,
+    resolve_alert_lang,
 )
 from app.services.realtime import publish_realtime_event
 from app.services.telegram_api import TelegramBotApi, TelegramBotApiError
@@ -49,15 +59,40 @@ logger = logging.getLogger(__name__)
 
 CALLBACK_NAMESPACE = "alert"
 SUMMARY_STATE_KEY = "alert_summary_message"
-SUMMARY_KEYBOARD = {
-    "inline_keyboard": [
-        [
-            {"text": "🔄 Yangilash", "callback_data": "alert:summary"},
-            {"text": "📋 Ochiq ro'yxat", "callback_data": "alert:list"},
-        ]
-    ]
-}
 OPEN_LIST_LIMIT = 10
+
+
+def summary_keyboard(lang: str | None = None) -> dict:
+    lang = lang or DEFAULT_LANG
+    return {
+        "inline_keyboard": [
+            [
+                {"text": f"🔄 {t('btn_refresh', lang)}", "callback_data": "alert:summary"},
+                {"text": f"📋 {t('btn_open_list', lang)}", "callback_data": "alert:list"},
+            ],
+            [
+                {"text": f"👥 {t('btn_staff_table', lang)}", "callback_data": "alert:leaderboard"},
+                {"text": f"🌐 {t('btn_lang', lang)}", "callback_data": "alert:langmenu"},
+            ],
+        ]
+    }
+
+
+def language_keyboard(lang: str | None = None) -> dict:
+    lang = lang or DEFAULT_LANG
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🇺🇿 O'zbekcha", "callback_data": "alert:setlang:uz"},
+                {"text": "🇷🇺 Русский", "callback_data": "alert:setlang:ru"},
+                {"text": "🇬🇧 English", "callback_data": "alert:setlang:en"},
+            ]
+        ]
+    }
+
+
+# Backward-compatible name used by older code paths / tests.
+SUMMARY_KEYBOARD = summary_keyboard(DEFAULT_LANG)
 
 
 def _utcnow() -> datetime:
@@ -95,39 +130,73 @@ def actor_from_telegram_user(user: dict[str, Any] | None) -> Actor:
 # --------------------------------------------------------------------------- transitions
 
 
-def apply_alert_action(session: Session, event: AlertEvent, action: str, actor: Actor) -> tuple[bool, str]:
+def apply_alert_action(
+    session: Session,
+    event: AlertEvent,
+    action: str,
+    actor: Actor,
+    *,
+    lang: str | None = None,
+) -> tuple[bool, str]:
     """Apply one workflow transition. Returns ``(state_changed, message_for_actor)``.
 
     Two people tapping at the same moment is the normal case in a busy group, so the
     caller locks the row first and every branch here is written to be safe to lose:
     the first press wins and the second gets told who beat them to it.
+
+    Actions:
+      * ``check``  — toggle reviewed ("Tekshirdim")
+      * ``open``   — claim review (tekshirilyapti) when staff opens the deep link
+      * ``answer`` — mark customer replied ("Javob berdim") with staff name/username
+      * ``reopen`` — undo a mistaken close
     """
+    lang = lang or DEFAULT_LANG
     now = _utcnow()
     status = event.work_status or WORK_STATUS_OPEN
 
-    if action == "check":
+    if action in {"check", "open"}:
         if status == WORK_STATUS_ANSWERED:
-            return False, f"Bu signal yopilgan — javobni {event.answered_by or '-'} bergan."
+            return False, t("toast_closed_cannot_check", lang, name=event.answered_by or "-")
         if status == WORK_STATUS_CHECKED:
+            # "open" (via link) keeps the existing reviewer; "check" toggles for same person.
+            if action == "open":
+                return False, t(
+                    "toast_already_checked_by",
+                    lang,
+                    name=event.checked_by or "-",
+                    time=local_time_text(event.checked_at),
+                )
             if event.checked_by_user_id and actor.user_id and event.checked_by_user_id != actor.user_id:
-                return False, f"{event.checked_by} allaqachon tekshirgan ({local_time_text(event.checked_at)})."
+                return False, t(
+                    "toast_already_checked_by",
+                    lang,
+                    name=event.checked_by or "-",
+                    time=local_time_text(event.checked_at),
+                )
             event.work_status = WORK_STATUS_OPEN
             event.checked_by = None
             event.checked_by_user_id = None
             event.checked_at = None
-            return True, "Belgi olib tashlandi — signal yana tekshirilmagan holatda."
+            return True, t("toast_check_cleared", lang)
         event.work_status = WORK_STATUS_CHECKED
         event.checked_by = actor.name
         event.checked_by_user_id = actor.user_id
         event.checked_at = now
-        return True, "Tekshirildi deb belgilandi. Mijozga javob bergach «💬 Javob berdim»ni bosing."
+        if action == "open":
+            return True, t("toast_opening_link", lang)
+        return True, t("toast_check_ok", lang)
 
     if action == "answer":
         if status == WORK_STATUS_ANSWERED:
             same_person = event.answered_by_user_id and actor.user_id and event.answered_by_user_id == actor.user_id
             if same_person:
-                return False, "Siz bu signalni allaqachon yopgansiz."
-            return False, f"{event.answered_by} allaqachon javob bergan ({local_time_text(event.answered_at)})."
+                return False, t("toast_already_closed_self", lang)
+            return False, t(
+                "toast_already_answered_by",
+                lang,
+                name=event.answered_by or "-",
+                time=local_time_text(event.answered_at),
+            )
         event.work_status = WORK_STATUS_ANSWERED
         event.answered_by = actor.name
         event.answered_by_user_id = actor.user_id
@@ -138,11 +207,11 @@ def apply_alert_action(session: Session, event: AlertEvent, action: str, actor: 
             event.checked_by = actor.name
             event.checked_by_user_id = actor.user_id
             event.checked_at = now
-        return True, "Rahmat! Signal yopildi."
+        return True, t("toast_closed", lang)
 
     if action == "reopen":
         if status != WORK_STATUS_ANSWERED:
-            return False, "Bu signal allaqachon ochiq."
+            return False, t("toast_already_open", lang)
         event.work_status = WORK_STATUS_CHECKED if event.checked_by else WORK_STATUS_OPEN
         event.answered_by = None
         event.answered_by_user_id = None
@@ -150,9 +219,9 @@ def apply_alert_action(session: Session, event: AlertEvent, action: str, actor: 
         # Give the SLA clock a fresh start instead of instantly re-nudging a reopened card.
         event.reminder_count = 0
         event.reminded_at = None
-        return True, f"Qayta ochildi ({actor.name})."
+        return True, t("toast_reopened", lang, name=actor.name)
 
-    return False, "Noma'lum amal."
+    return False, t("toast_unknown_action", lang)
 
 
 def publish_alert_event(session: Session, event: AlertEvent, *, commit: bool = True) -> None:
@@ -175,16 +244,17 @@ def publish_alert_event(session: Session, event: AlertEvent, *, commit: bool = T
     )
 
 
-def refresh_alert_card(api: TelegramBotApi, event: AlertEvent) -> None:
+def refresh_alert_card(api: TelegramBotApi, event: AlertEvent, *, lang: str | None = None) -> None:
     """Re-render the Telegram card from the row. Never raises."""
     if not event.telegram_chat_id or not event.telegram_message_id:
         return
+    lang = lang or (event.payload or {}).get("lang") or DEFAULT_LANG
     try:
         api.edit_message_text(
             event.telegram_chat_id,
             event.telegram_message_id,
-            build_alert_text(event.payload or {}, event),
-            reply_markup=build_alert_keyboard(event),
+            build_alert_text(event.payload or {}, event, lang=lang),
+            reply_markup=build_alert_keyboard(event, lang=lang),
         )
     except TelegramBotApiError as exc:
         if "not modified" not in (exc.description or "").lower():
@@ -209,27 +279,82 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
     message = callback.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
     settings = get_settings()
-    parts = data.split(":", 2)
+    parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
+    lang = resolve_alert_lang(session, chat_id=str(chat_id) if chat_id is not None else None)
 
-    if not _is_staff_chat(settings, chat_id):
-        _safe_answer(api, callback_id, "Bu tugmalar faqat xodimlar guruhida ishlaydi.", show_alert=True)
+    if not _is_staff_chat(session, settings, chat_id):
+        _safe_answer(api, callback_id, t("toast_staff_only", lang), show_alert=True)
         return True
 
     if action == "summary":
         sync_summary_message(api, session, settings, force=True)
-        _safe_answer(api, callback_id, "Yangilandi.")
+        _safe_answer(api, callback_id, t("toast_refreshed", lang))
         return True
     if action == "list":
         _safe_answer(api, callback_id)
-        _safe_send(api, chat_id, open_alerts_text(session), reply_markup=None)
+        _safe_send(api, chat_id, open_alerts_text(session, lang=lang), reply_markup=None)
+        return True
+    if action == "leaderboard":
+        _safe_answer(api, callback_id)
+        _safe_send(api, chat_id, leaderboard_text(session, lang=lang), reply_markup=None)
+        return True
+    if action == "langmenu":
+        _safe_answer(api, callback_id)
+        _safe_send(
+            api,
+            chat_id,
+            t("lang_pick", lang) + f"\n{t('lang_help', lang, current=lang_display_name(lang))}",
+            reply_markup=language_keyboard(lang),
+        )
+        return True
+    if action == "setlang":
+        next_lang = normalize_lang(parts[2] if len(parts) > 2 else DEFAULT_LANG)
+        _set_chat_language(session, str(chat_id), next_lang)
+        _safe_answer(api, callback_id, t("toast_lang_set", next_lang, name=lang_display_name(next_lang)))
+        sync_summary_message(api, session, settings, force=True)
         return True
 
+    # Event actions: alert:check|open|answer|reopen:<uuid>
     event_id = parts[2] if len(parts) > 2 else ""
     try:
         event_uuid = UUID(event_id)
     except (ValueError, AttributeError):
-        _safe_answer(api, callback_id, "Signal aniqlanmadi.")
+        _safe_answer(api, callback_id, t("toast_not_found", lang))
+        return True
+
+    if action == "open":
+        # Deep-link claim: mark "tekshirilyapti" then guide staff to the URL button.
+        actor = actor_from_telegram_user(callback.get("from"))
+        try:
+            event = (
+                session.query(AlertEvent)
+                .filter(AlertEvent.id == event_uuid)
+                .with_for_update()
+                .one_or_none()
+            )
+            if event is None:
+                session.rollback()
+                _safe_answer(api, callback_id, t("toast_not_found", lang))
+                return True
+            permalink = (event.payload or {}).get("permalink")
+            if not permalink:
+                session.rollback()
+                _safe_answer(api, callback_id, t("toast_no_link", lang), show_alert=True)
+                return True
+            changed, response = apply_alert_action(session, event, "open", actor, lang=lang)
+            if changed:
+                publish_alert_event(session, event, commit=False)
+            session.commit()
+        except Exception:  # noqa: BLE001
+            session.rollback()
+            logger.exception("Alert open callback failed data=%s", data)
+            _safe_answer(api, callback_id, t("toast_error", lang))
+            return True
+        _safe_answer(api, callback_id, response, show_alert=True)
+        if changed:
+            refresh_alert_card(api, event, lang=lang)
+            sync_summary_message(api, session, settings, force=True)
         return True
 
     actor = actor_from_telegram_user(callback.get("from"))
@@ -242,28 +367,69 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
         )
         if event is None:
             session.rollback()
-            _safe_answer(api, callback_id, "Signal topilmadi (o'chirilgan bo'lishi mumkin).")
+            _safe_answer(api, callback_id, t("toast_not_found", lang))
             return True
-        changed, response = apply_alert_action(session, event, action, actor)
+        changed, response = apply_alert_action(session, event, action, actor, lang=lang)
         if changed:
             publish_alert_event(session, event, commit=False)
         session.commit()
     except Exception:  # noqa: BLE001 - a failed press must not kill the poller
         session.rollback()
         logger.exception("Alert callback failed data=%s", data)
-        _safe_answer(api, callback_id, "Xatolik yuz berdi, qayta urinib ko'ring.")
+        _safe_answer(api, callback_id, t("toast_error", lang))
         return True
 
     _safe_answer(api, callback_id, response)
     if changed:
-        refresh_alert_card(api, event)
+        refresh_alert_card(api, event, lang=lang)
         sync_summary_message(api, session, settings, force=True)
     return True
 
 
-def _is_staff_chat(settings: Settings, chat_id: Any) -> bool:
+def _is_staff_chat(session: Session | None, settings: Settings, chat_id: Any) -> bool:
+    """Accept the global ALERT_TELEGRAM_CHAT_ID or any brand profile_config alert_chat_id."""
+    if chat_id is None:
+        return False
+    chat = str(chat_id).strip()
     configured = str(settings.alert_telegram_chat_id or "").strip()
-    return bool(configured) and str(chat_id) == configured
+    if configured and chat == configured:
+        return True
+    if session is None:
+        return False
+    try:
+        from app.models import Brand
+
+        for brand in session.query(Brand).filter(Brand.active.is_(True)).all():
+            profile = brand.profile_config or {}
+            for key in ("alert_chat_id", "support_chat_id"):
+                if str(profile.get(key) or "").strip() == chat:
+                    return True
+    except Exception:  # noqa: BLE001
+        return bool(configured) and chat == configured
+    return False
+
+
+def _set_chat_language(session: Session, chat_id: str, lang: str) -> None:
+    lang = normalize_lang(lang)
+    key = f"{LANG_STATE_CHAT_PREFIX}{chat_id}"
+    value = {"lang": lang, "updated_at": _utcnow().isoformat()}
+    state = session.get(AppState, key)
+    if state is None:
+        session.add(AppState(key=key, value=value))
+    else:
+        state.value = value
+        state.updated_at = _utcnow()
+    # Also keep a global default so new groups inherit the last choice until overridden.
+    global_state = session.get(AppState, LANG_STATE_GLOBAL)
+    if global_state is None:
+        session.add(AppState(key=LANG_STATE_GLOBAL, value={"lang": lang}))
+    else:
+        global_state.value = {"lang": lang}
+        global_state.updated_at = _utcnow()
+    try:
+        session.commit()
+    except Exception:  # noqa: BLE001
+        session.rollback()
 
 
 def _safe_answer(api: TelegramBotApi, callback_id: str, text: str | None = None, *, show_alert: bool = False) -> None:
@@ -297,6 +463,7 @@ def handle_alert_group_message(api: TelegramBotApi, session: Session, update: di
     if not text.startswith("/"):
         return False
     command = text.split()[0].split("@", 1)[0].lstrip("/").lower()
+    args = text.split()[1:] if len(text.split()) > 1 else []
 
     # /id needs no configuration — it is how the operator discovers the chat id to put in
     # ALERT_TELEGRAM_CHAT_ID right after adding the bot to the group.
@@ -305,16 +472,35 @@ def handle_alert_group_message(api: TelegramBotApi, session: Session, update: di
         return True
 
     settings = get_settings()
-    if not _is_staff_chat(settings, chat_id):
+    if not _is_staff_chat(session, settings, chat_id):
         return False
+    lang = resolve_alert_lang(session, chat_id=str(chat_id))
+
     if command in {"ochiq", "open"}:
-        _safe_send(api, chat_id, open_alerts_text(session))
+        _safe_send(api, chat_id, open_alerts_text(session, lang=lang))
         return True
     if command in {"statistika", "stats", "hisobot"}:
-        _safe_send(api, chat_id, stats_text(session))
+        _safe_send(api, chat_id, stats_text(session, lang=lang))
         return True
     if command in {"jamlanma", "summary"}:
         sync_summary_message(api, session, settings, force=True)
+        return True
+    if command in {"xodimlar", "leaderboard", "jadval"}:
+        _safe_send(api, chat_id, leaderboard_text(session, lang=lang))
+        return True
+    if command in {"til", "lang", "language"}:
+        if args and normalize_lang(args[0]) in SUPPORTED_LANGS:
+            next_lang = normalize_lang(args[0])
+            _set_chat_language(session, str(chat_id), next_lang)
+            _safe_send(api, chat_id, t("toast_lang_set", next_lang, name=lang_display_name(next_lang)))
+            sync_summary_message(api, session, settings, force=True)
+        else:
+            _safe_send(
+                api,
+                chat_id,
+                t("lang_help", lang, current=lang_display_name(lang)),
+                reply_markup=language_keyboard(lang),
+            )
         return True
     return False
 
@@ -372,7 +558,7 @@ def today_stats(session: Session) -> dict[str, Any]:
         .filter(*answered_filter)
         .group_by(AlertEvent.answered_by)
         .order_by(func.count(AlertEvent.id).desc())
-        .limit(5)
+        .limit(20)
         .all()
     )
     avg_seconds = float(row[1]) if row[1] is not None else None
@@ -383,12 +569,16 @@ def today_stats(session: Session) -> dict[str, Any]:
     }
 
 
-def render_summary_text(session: Session) -> str:
+def render_summary_text(session: Session, *, lang: str | None = None, chat_id: str | None = None) -> str:
+    lang = lang or resolve_alert_lang(session, chat_id=chat_id)
     counts = open_alert_counts(session)
     stats = today_stats(session)
     now = _utcnow()
 
-    header = "✅ Javobsiz signal yo'q — hammasi yopilgan" if counts["open"] == 0 else f"📌 Javob kutayotgan signallar: {counts['open']}"
+    if counts["open"] == 0:
+        header = f"✅ {t('summary_all_clear', lang)}"
+    else:
+        header = f"📌 {t('summary_waiting', lang, n=counts['open'])}"
     lines = [header]
 
     risk_bits = [
@@ -401,23 +591,29 @@ def render_summary_text(session: Session) -> str:
     if counts["open"]:
         oldest = _as_utc(counts["oldest_created_at"])
         if oldest:
-            lines.append(f"⏳ Eng eskisi: {duration_text(now - oldest)} kutmoqda")
-        lines.append(f"👀 Tekshirilgan, javob kutmoqda: {counts['checked']}")
+            lines.append(f"⏳ {t('summary_oldest', lang, d=duration_text(now - oldest))}")
+        lines.append(f"👀 {t('summary_checked_waiting', lang, n=counts['checked'])}")
         lines.append("")
-        lines.append("Manbalar bo'yicha:")
+        lines.append(t("summary_by_source", lang))
         lines.extend(f"• {row['source']} — {row['count']}" for row in counts["by_source"])
 
     lines.append("")
     avg = stats["avg_response_seconds"]
     avg_text = duration_text(timedelta(seconds=avg)) if avg is not None else "-"
-    lines.append(f"Bugun yopildi: {stats['answered']} · O'rtacha javob vaqti: {avg_text}")
+    lines.append(t("summary_today_closed", lang, n=stats["answered"], avg=avg_text))
     if stats["by_person"]:
-        lines.append("Xodimlar: " + " · ".join(f"{row['name']} {row['count']}" for row in stats["by_person"]))
-    lines.append(f"Yangilandi: {local_time_text(now)}")
+        lines.append(
+            t("summary_staff", lang)
+            + " "
+            + " · ".join(f"{row['name']} {row['count']}" for row in stats["by_person"])
+        )
+    lines.append(f"{t('summary_updated', lang)} {local_time_text(now)}")
+    lines.append(f"🌐 {lang_display_name(lang)}")
     return "\n".join(lines)
 
 
-def open_alerts_text(session: Session, limit: int = OPEN_LIST_LIMIT) -> str:
+def open_alerts_text(session: Session, limit: int = OPEN_LIST_LIMIT, *, lang: str | None = None) -> str:
+    lang = lang or DEFAULT_LANG
     events = (
         session.query(AlertEvent)
         .filter(AlertEvent.work_status.in_(OPEN_WORK_STATUSES), AlertEvent.status != "abandoned")
@@ -426,7 +622,7 @@ def open_alerts_text(session: Session, limit: int = OPEN_LIST_LIMIT) -> str:
         .all()
     )
     if not events:
-        return "✅ Ochiq signal yo'q — barcha mijozlarga javob berilgan."
+        return f"✅ {t('open_list_empty', lang)}"
 
     total = (
         session.query(func.count(AlertEvent.id))
@@ -435,7 +631,7 @@ def open_alerts_text(session: Session, limit: int = OPEN_LIST_LIMIT) -> str:
         or 0
     )
     now = _utcnow()
-    lines = [f"📋 Javob kutayotgan signallar: {total}"]
+    lines = [f"📋 {t('open_list_title', lang, n=total)}"]
     for index, event in enumerate(events, start=1):
         payload = event.payload or {}
         emoji = RISK_EMOJI.get((payload.get("risk_level") or "").lower(), "⚠️")
@@ -448,24 +644,45 @@ def open_alerts_text(session: Session, limit: int = OPEN_LIST_LIMIT) -> str:
         if payload.get("permalink"):
             lines.append(f"   {payload['permalink']}")
     if total > len(events):
-        lines.append(f"\n... yana {total - len(events)} ta")
+        lines.append(f"\n{t('open_list_more', lang, n=total - len(events))}")
     return "\n".join(lines)
 
 
-def stats_text(session: Session) -> str:
+def stats_text(session: Session, *, lang: str | None = None) -> str:
+    lang = lang or DEFAULT_LANG
     counts = open_alert_counts(session)
     stats = today_stats(session)
     avg = stats["avg_response_seconds"]
     lines = [
-        "📊 Bugungi hisobot",
-        f"Yopilgan: {stats['answered']}",
-        f"O'rtacha javob vaqti: {duration_text(timedelta(seconds=avg)) if avg is not None else '-'}",
-        f"Ochiq qolgan: {counts['open']} (tekshirilgan: {counts['checked']})",
+        f"📊 {t('stats_title', lang)}",
+        t("stats_closed", lang, n=stats["answered"]),
+        t("stats_avg", lang, avg=duration_text(timedelta(seconds=avg)) if avg is not None else "-"),
+        t("stats_open", lang, open=counts["open"], checked=counts["checked"]),
     ]
     if stats["by_person"]:
         lines.append("")
-        lines.append("Xodimlar:")
+        lines.append(t("summary_staff", lang))
         lines.extend(f"• {row['name']} — {row['count']}" for row in stats["by_person"])
+    return "\n".join(lines)
+
+
+def leaderboard_text(session: Session, *, lang: str | None = None) -> str:
+    """Table of who closed how many signals today — pinned-summary companion button."""
+    lang = lang or DEFAULT_LANG
+    stats = today_stats(session)
+    lines = [f"👥 {t('leaderboard_title', lang)}", ""]
+    if not stats["by_person"]:
+        lines.append(t("leaderboard_empty", lang))
+        return "\n".join(lines)
+    for rank, row in enumerate(stats["by_person"], start=1):
+        lines.append(
+            t("leaderboard_row", lang, rank=rank, name=row["name"], count=row["count"])
+        )
+    lines.append("")
+    lines.append(t("leaderboard_total", lang, n=stats["answered"]))
+    avg = stats["avg_response_seconds"]
+    if avg is not None:
+        lines.append(t("stats_avg", lang, avg=duration_text(timedelta(seconds=avg))))
     return "\n".join(lines)
 
 
@@ -481,14 +698,16 @@ def sync_summary_message(api: TelegramBotApi, session: Session, settings: Settin
     state = session.get(AppState, SUMMARY_STATE_KEY)
     value = dict(state.value or {}) if state else {}
     same_chat = value.get("chat_id") == chat_id
+    lang = resolve_alert_lang(session, chat_id=chat_id)
+    keyboard = summary_keyboard(lang)
 
     try:
-        text = render_summary_text(session)
+        text = render_summary_text(session, lang=lang, chat_id=chat_id)
     except Exception:  # noqa: BLE001
         logger.exception("Could not render alert summary")
         return
 
-    if same_chat and value.get("text") == text:
+    if same_chat and value.get("text") == text and value.get("lang") == lang:
         return
     if not force and same_chat:
         last = value.get("updated_at")
@@ -503,7 +722,7 @@ def sync_summary_message(api: TelegramBotApi, session: Session, settings: Settin
     message_id = value.get("message_id") if same_chat else None
     if message_id:
         try:
-            api.edit_message_text(chat_id, int(message_id), text, reply_markup=SUMMARY_KEYBOARD)
+            api.edit_message_text(chat_id, int(message_id), text, reply_markup=keyboard)
         except TelegramBotApiError as exc:
             if "not modified" in (exc.description or "").lower():
                 pass
@@ -515,7 +734,7 @@ def sync_summary_message(api: TelegramBotApi, session: Session, settings: Settin
             return
 
     if not message_id:
-        response = _safe_send(api, chat_id, text, reply_markup=SUMMARY_KEYBOARD)
+        response = _safe_send(api, chat_id, text, reply_markup=keyboard)
         if not response:
             return
         message_id = (response.get("result") or {}).get("message_id")
@@ -529,7 +748,13 @@ def sync_summary_message(api: TelegramBotApi, session: Session, settings: Settin
     _save_state(
         session,
         SUMMARY_STATE_KEY,
-        {"chat_id": chat_id, "message_id": int(message_id), "text": text, "updated_at": _utcnow().isoformat()},
+        {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "text": text,
+            "lang": lang,
+            "updated_at": _utcnow().isoformat(),
+        },
     )
 
 
