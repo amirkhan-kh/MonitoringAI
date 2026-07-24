@@ -278,9 +278,26 @@ function ProgressRows({ rows }) {
   );
 }
 
+const sentimentIcons = {
+  positive: TrendingUp,
+  neutral: Activity,
+  negative: TrendingDown,
+  mixed: Sparkles,
+  unknown: Activity,
+};
+
+const riskIcons = {
+  low: ShieldAlert,
+  medium: ShieldAlert,
+  high: ShieldAlert,
+  critical: ShieldAlert,
+  unknown: Activity,
+};
+
 function Distribution({ rows, type }) {
   const total = rows.reduce((sum, item) => sum + item.value, 0);
   if (!total) return <div className="empty">Hali AI tahlil natijasi yo'q</div>;
+  const iconMap = type === "sentiment" ? sentimentIcons : riskIcons;
 
   return (
     <div className="distribution">
@@ -295,12 +312,16 @@ function Distribution({ rows, type }) {
         ))}
       </div>
       <div className="distributionList">
-        {rows.map((item) => (
-          <span key={item.key}>
-            <i className={`${type}-${item.key}`} />
-            {item.label} <strong>{item.value}</strong>
-          </span>
-        ))}
+        {rows.map((item) => {
+          const Icon = iconMap[item.key] || Activity;
+          return (
+            <span key={item.key}>
+              <i className={`${type}-${item.key}`} />
+              <Icon size={13} strokeWidth={2} aria-hidden="true" />
+              {item.label} <strong className="tabular-nums">{item.value}</strong>
+            </span>
+          );
+        })}
       </div>
     </div>
   );
