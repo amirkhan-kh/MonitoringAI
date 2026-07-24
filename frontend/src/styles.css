@@ -1125,17 +1125,17 @@ button {
   height: 38px;
   min-height: 38px;
   padding: 0;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   background: var(--button-bg);
-  color: var(--ink);
+  color: var(--text);
   box-shadow: var(--shadow-soft);
 }
 
 .button.secondary,
 .miniButton {
-  border: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.82));
-  color: var(--ink);
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text);
   box-shadow: var(--shadow-soft);
 }
 
