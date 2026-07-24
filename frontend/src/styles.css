@@ -231,8 +231,9 @@
   /* Signature gradients — hero / CTA / stat tints (used sparingly) */
   --gradient-hero: linear-gradient(135deg, #6366f1 0%, #7c6cf6 42%, #a855f7 100%);
   --gradient-violet: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-  --gradient-aurora: radial-gradient(120% 120% at 0% 0%, rgba(99,102,241,0.16), transparent 55%),
-                     radial-gradient(120% 120% at 100% 0%, rgba(168,85,247,0.12), transparent 52%);
+  --gradient-aurora: radial-gradient(85% 58% at 6% -8%, rgba(99, 102, 241, 0.20), transparent 56%),
+                     radial-gradient(78% 54% at 100% -5%, rgba(168, 85, 247, 0.15), transparent 52%),
+                     radial-gradient(70% 60% at 60% 108%, rgba(6, 182, 212, 0.08), transparent 55%);
   --gradient-stat-1: linear-gradient(150deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0) 64%);
   --gradient-stat-2: linear-gradient(150deg, rgba(6, 182, 212, 0.15), rgba(6, 182, 212, 0) 64%);
   --gradient-stat-3: linear-gradient(150deg, rgba(236, 72, 153, 0.14), rgba(236, 72, 153, 0) 64%);
@@ -245,8 +246,8 @@
   /* Chart tokens (Recharts) */
   --chart-grid: rgba(15, 23, 42, 0.06);
   --chart-axis: #8b93a1;
-  --chart-area-from: rgba(99, 102, 241, 0.34);
-  --chart-area-mid: rgba(99, 102, 241, 0.12);
+  --chart-area-from: rgba(99, 102, 241, 0.44);
+  --chart-area-mid: rgba(99, 102, 241, 0.16);
   --chart-area-to: rgba(99, 102, 241, 0);
   --chart-line: #6366f1;
   --chart-line-2: #06b6d4;
@@ -270,8 +271,9 @@
 
   --gradient-hero: linear-gradient(135deg, #6d5cf5 0%, #8b5cf6 46%, #b06ef8 100%);
   --gradient-violet: linear-gradient(135deg, #6d5cf5 0%, #9061f9 100%);
-  --gradient-aurora: radial-gradient(120% 120% at 0% 0%, rgba(124,131,255,0.20), transparent 55%),
-                     radial-gradient(120% 120% at 100% 0%, rgba(176,110,248,0.14), transparent 52%);
+  --gradient-aurora: radial-gradient(85% 58% at 6% -8%, rgba(124, 131, 255, 0.28), transparent 55%),
+                     radial-gradient(78% 54% at 100% -4%, rgba(176, 110, 248, 0.20), transparent 52%),
+                     radial-gradient(72% 62% at 62% 108%, rgba(34, 211, 238, 0.09), transparent 55%);
   --gradient-stat-1: linear-gradient(150deg, rgba(124, 131, 255, 0.22), rgba(124, 131, 255, 0) 64%);
   --gradient-stat-2: linear-gradient(150deg, rgba(34, 211, 238, 0.16), rgba(34, 211, 238, 0) 64%);
   --gradient-stat-3: linear-gradient(150deg, rgba(244, 114, 182, 0.16), rgba(244, 114, 182, 0) 64%);
@@ -282,14 +284,23 @@
 
   --chart-grid: rgba(255, 255, 255, 0.06);
   --chart-axis: #6b7280;
-  --chart-area-from: rgba(124, 131, 255, 0.44);
-  --chart-area-mid: rgba(124, 131, 255, 0.14);
+  --chart-area-from: rgba(124, 131, 255, 0.60);
+  --chart-area-mid: rgba(124, 131, 255, 0.20);
   --chart-area-to: rgba(124, 131, 255, 0);
   --chart-line: #8b8fff;
   --chart-line-2: #22d3ee;
   --chart-tooltip-bg: rgba(26, 27, 32, 0.96);
   --chart-tooltip-ink: #f2f3f5;
   --chart-cursor: rgba(124, 131, 255, 0.16);
+
+  /* Dark inputs — lighter fill + clearer border so EMPTY fields read well */
+  --input-bg: #1b1d24;
+  --input-bg-hover: #202430;
+  --input-bg-focus: #21252f;
+  --input-border: #363a44;
+  --input-placeholder: #767c88;
+  --button-bg: #1b1d24;
+  --chip-bg: #1c1e26;
 }
 
 :root[data-sidebar="collapsed"] {
@@ -7386,4 +7397,57 @@ body::before {
   .mentionItem {
     transition: none;
   }
+}
+
+/* --- Inputs: visible fill + clear border + accent focus (fixes dark empty fields) --- */
+.field input,
+.field select,
+.field textarea,
+input[type="text"],
+input[type="url"],
+input[type="search"],
+input[type="password"],
+input[type="email"],
+input[type="number"],
+input:not([type]),
+select,
+textarea {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-md);
+  transition:
+    border-color var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-fast) var(--ease-smooth),
+    background var(--duration-fast) var(--ease-smooth);
+}
+.field input:hover,
+.field select:hover,
+.field textarea:hover,
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: var(--border-strong);
+  background: var(--input-bg-hover);
+}
+.field input:focus,
+.field select:focus,
+.field textarea:focus,
+input:focus,
+select:focus,
+textarea:focus,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--input-bg-focus);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* --- Chart wave: soft accent glow under the line (premium #8 feel) --- */
+.chartShell--hero .recharts-area-curve {
+  filter: drop-shadow(0 6px 16px rgba(124, 131, 255, 0.34));
+}
+:root[data-theme="light"] .chartShell--hero .recharts-area-curve {
+  filter: drop-shadow(0 6px 14px rgba(99, 102, 241, 0.22));
 }
