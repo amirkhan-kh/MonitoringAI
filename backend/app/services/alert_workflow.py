@@ -46,10 +46,13 @@ from app.services.alerts import (
     WORK_STATUS_ANSWERED,
     WORK_STATUS_CHECKED,
     WORK_STATUS_OPEN,
+    bind_staff_chat,
     build_alert_keyboard,
     build_alert_text,
     duration_text,
+    get_bound_staff_chat,
     local_time_text,
+    resolve_alert_chat_id,
     resolve_alert_lang,
 )
 from app.services.realtime import publish_realtime_event
@@ -387,7 +390,7 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
 
 
 def _is_staff_chat(session: Session | None, settings: Settings, chat_id: Any) -> bool:
-    """Accept the global ALERT_TELEGRAM_CHAT_ID or any brand profile_config alert_chat_id."""
+    """Accept bound support group, env ALERT_TELEGRAM_CHAT_ID, or brand alert_chat_id."""
     if chat_id is None:
         return False
     chat = str(chat_id).strip()
@@ -397,6 +400,9 @@ def _is_staff_chat(session: Session | None, settings: Settings, chat_id: Any) ->
     if session is None:
         return False
     try:
+        bound = get_bound_staff_chat(session)
+        if bound and str(bound.get("chat_id") or "").strip() == chat:
+            return True
         from app.models import Brand
 
         for brand in session.query(Brand).filter(Brand.active.is_(True)).all():
@@ -450,8 +456,50 @@ def _safe_send(api: TelegramBotApi, chat_id: Any, text: str, **kwargs: Any) -> d
 # --------------------------------------------------------------------------- group commands
 
 
+def handle_my_chat_member(api: TelegramBotApi, session: Session, update: dict[str, Any]) -> bool:
+    """When the bot is added as admin/member to a group, bind it as the support inbox."""
+    event = update.get("my_chat_member")
+    if not event:
+        return False
+    chat = event.get("chat") or {}
+    chat_type = chat.get("type")
+    if chat_type not in {"group", "supergroup"}:
+        return False
+    new_member = event.get("new_chat_member") or {}
+    status = (new_member.get("status") or "").lower()
+    if status not in {"administrator", "member", "restricted"}:
+        # left / kicked — do not unbind automatically (group id still valid if re-added)
+        return True
+
+    chat_id = chat.get("id")
+    title = chat.get("title") or "Support"
+    if chat_id is None:
+        return True
+
+    bind_staff_chat(session, chat_id, title=title, source="my_chat_member")
+    settings = get_settings()
+    lang = resolve_alert_lang(session, chat_id=str(chat_id))
+    _safe_send(
+        api,
+        chat_id,
+        (
+            f"✅ Support guruh ulandi: {title}\n"
+            f"Chat ID: {chat_id}\n\n"
+            "AI tahlildan o'tgan riskli mentionlar (Telegram, YouTube, Instagram, Facebook) "
+            "shu guruhga kartochka bo'lib tushadi.\n\n"
+            "Komandalar: /ochiq · /xodimlar · /statistika · /til · /jamlanma"
+        ),
+    )
+    try:
+        sync_summary_message(api, session, settings, force=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not pin summary after staff bind", exc_info=True)
+    logger.info("Bound staff alert chat id=%s title=%s", chat_id, title)
+    return True
+
+
 def handle_alert_group_message(api: TelegramBotApi, session: Session, update: dict[str, Any]) -> bool:
-    """Read-only helper commands the staff can run inside the group."""
+    """Staff-group commands: bind, list open signals, leaderboard, language, summary."""
     message = update.get("message")
     if not message:
         return False
@@ -464,14 +512,31 @@ def handle_alert_group_message(api: TelegramBotApi, session: Session, update: di
         return False
     command = text.split()[0].split("@", 1)[0].lstrip("/").lower()
     args = text.split()[1:] if len(text.split()) > 1 else []
+    settings = get_settings()
+    title = chat.get("title") or "Support"
 
-    # /id needs no configuration — it is how the operator discovers the chat id to put in
-    # ALERT_TELEGRAM_CHAT_ID right after adding the bot to the group.
-    if command == "id":
-        _safe_send(api, chat_id, f"Chat ID: {chat_id}\nTuri: {chat.get('type')}\nNomi: {chat.get('title') or '-'}")
+    # /id and /staff work in any group where the bot can see messages — they bind this
+    # group as the destination for AI risk cards (Supports-style staff inbox).
+    if command in {"id", "staff", "support", "guruh"}:
+        bind_staff_chat(session, chat_id, title=title, source=f"command_{command}")
+        _safe_send(
+            api,
+            chat_id,
+            (
+                f"✅ Support guruh sifatida saqlandi\n"
+                f"Chat ID: {chat_id}\n"
+                f"Nomi: {title}\n"
+                f"Turi: {chat.get('type')}\n\n"
+                "Endi botga kelgan AI risk mentionlari shu guruhga yuboriladi.\n"
+                "Pin hisoblagich: /jamlanma"
+            ),
+        )
+        try:
+            sync_summary_message(api, session, settings, force=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("summary after /staff failed", exc_info=True)
         return True
 
-    settings = get_settings()
     if not _is_staff_chat(session, settings, chat_id):
         return False
     lang = resolve_alert_lang(session, chat_id=str(chat_id))
@@ -692,9 +757,12 @@ def sync_summary_message(api: TelegramBotApi, session: Session, settings: Settin
     Edits are skipped when the rendered text is unchanged, and otherwise throttled, so a
     busy day cannot spend the group's message-edit budget on cosmetic refreshes.
     """
-    if not settings.alert_summary_enabled or not settings.alert_telegram_chat_id:
+    if not settings.alert_summary_enabled:
         return
-    chat_id = str(settings.alert_telegram_chat_id)
+    chat_id = resolve_alert_chat_id(session, settings, brand_id=None)
+    if not chat_id:
+        return
+    chat_id = str(chat_id)
     state = session.get(AppState, SUMMARY_STATE_KEY)
     value = dict(state.value or {}) if state else {}
     same_chat = value.get("chat_id") == chat_id

@@ -135,6 +135,8 @@ def record_alert(
             "permalink": permalink,
             "attempts": 0,
         }
+        # Prefer the live-bound Supports group over a stale personal chat id in env.
+        delivery_target = resolve_alert_chat_id(session, settings, brand_id)
         event = AlertEvent(
             brand_id=brand_id,
             # mention_id FK only exists for telegram mentions; others live in payload.
@@ -142,7 +144,7 @@ def record_alert(
             event_type="reputation_risk",
             status="pending",
             delivery_channel="telegram",
-            delivery_target=settings.alert_telegram_chat_id or None,
+            delivery_target=delivery_target,
             payload=payload,
         )
         session.add(event)
@@ -311,14 +313,73 @@ def resolve_delivery_bot_token(session: Session, settings: Settings, brand_id) -
     return settings.telegram_bot_token
 
 
+STAFF_CHAT_STATE_KEY = "alert_staff_chat"
+
+
+def get_bound_staff_chat(session: Session) -> dict | None:
+    """Runtime-bound support group (from /staff, /id, or bot-added-to-group)."""
+    from app.models import AppState
+
+    state = session.get(AppState, STAFF_CHAT_STATE_KEY)
+    if not state or not isinstance(state.value, dict):
+        return None
+    chat_id = str(state.value.get("chat_id") or "").strip()
+    if not chat_id:
+        return None
+    return state.value
+
+
+def bind_staff_chat(
+    session: Session,
+    chat_id: int | str,
+    *,
+    title: str | None = None,
+    source: str = "manual",
+) -> dict:
+    """Persist the support group that should receive AI risk cards."""
+    from app.models import AppState
+
+    value = {
+        "chat_id": str(chat_id),
+        "title": (title or "").strip() or None,
+        "source": source,
+        "bound_at": _utcnow().isoformat(),
+    }
+    state = session.get(AppState, STAFF_CHAT_STATE_KEY)
+    if state is None:
+        session.add(AppState(key=STAFF_CHAT_STATE_KEY, value=value))
+    else:
+        state.value = value
+        state.updated_at = _utcnow()
+    # Pending cards should retarget to the new group on next dispatch.
+    session.query(AlertEvent).filter(
+        AlertEvent.delivery_channel == "telegram",
+        AlertEvent.status.in_(["pending", "failed"]),
+    ).update(
+        {AlertEvent.delivery_target: str(chat_id)},
+        synchronize_session=False,
+    )
+    session.commit()
+    return value
+
+
 def resolve_alert_chat_id(session: Session, settings: Settings, brand_id) -> str | None:
-    """Staff group chat id: brand profile override, else global ALERT_TELEGRAM_CHAT_ID."""
+    """Staff group chat id priority: brand profile → bound support group → env.
+
+    A positive env id is often a private user chat from early setup; a bound group
+    (negative id) always wins so Supports-style groups receive the cards.
+    """
     if brand_id is not None:
         brand = session.get(Brand, brand_id)
         profile = (brand.profile_config if brand else None) or {}
         override = str(profile.get("alert_chat_id") or profile.get("support_chat_id") or "").strip()
         if override:
             return override
+
+    bound = get_bound_staff_chat(session)
+    if bound and bound.get("chat_id"):
+        return str(bound["chat_id"])
+
     return str(settings.alert_telegram_chat_id or "").strip() or None
 
 

@@ -23,6 +23,8 @@ class Settings(BaseSettings):
             # Required for the staff-group alert buttons; the worker force-adds it too, so
             # an older env override cannot silently disable the workflow.
             "callback_query",
+            # Bot added/removed from a group → auto-bind Supports-style staff inbox.
+            "my_chat_member",
         ]
     )
     telegram_command_allowed_user_ids: list[int] = Field(default_factory=list)

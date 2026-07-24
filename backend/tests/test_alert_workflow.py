@@ -31,12 +31,16 @@ from app.services.alert_workflow import (
     today_stats,
 )
 from app.services.alerts import (
+    bind_staff_chat,
     build_alert_keyboard,
     build_alert_text,
     deliver_one,
     due_reminder_alerts,
+    get_bound_staff_chat,
+    resolve_alert_chat_id,
     send_sla_reminders,
 )
+from app.services.alert_workflow import handle_my_chat_member
 
 STAFF_CHAT_ID = "-1009999999999"
 
@@ -116,6 +120,12 @@ class AlertWorkflowTestCase(unittest.TestCase):
         with SessionLocal() as session:
             session.query(AlertEvent).filter(AlertEvent.brand_id == self.brand_id).delete()
             session.query(Brand).filter(Brand.id == self.brand_id).delete()
+            # Staff-bind tests write a global AppState row — clear so later cases
+            # still resolve ALERT_TELEGRAM_CHAT_ID from settings.
+            from app.services.alerts import STAFF_CHAT_STATE_KEY
+
+            session.query(AppState).filter(AppState.key == STAFF_CHAT_STATE_KEY).delete()
+            session.query(AppState).filter(AppState.key.like("alert_lang%")).delete()
             session.commit()
 
     def make_event(self, session, **overrides: Any) -> AlertEvent:
@@ -358,6 +368,47 @@ class CallbackTests(AlertWorkflowTestCase):
             )
         self.assertTrue(handled)
         self.assertIn("-100777", api.sent[0]["text"])
+
+
+class StaffGroupBindTests(AlertWorkflowTestCase):
+    def test_bind_staff_chat_overrides_env_personal_chat(self) -> None:
+        settings = staff_settings(alert_telegram_chat_id="7834215608")  # personal id
+        with SessionLocal() as session:
+            bind_staff_chat(session, -1001234567890, title="Supports", source="test")
+            self.assertEqual(get_bound_staff_chat(session)["chat_id"], "-1001234567890")
+            self.assertEqual(resolve_alert_chat_id(session, settings, None), "-1001234567890")
+
+    def test_my_chat_member_admin_bind_registers_support_group(self) -> None:
+        api = FakeTelegramApi()
+        update = {
+            "my_chat_member": {
+                "chat": {"id": -100555666777, "title": "Supports", "type": "supergroup"},
+                "new_chat_member": {"status": "administrator", "user": {"id": 1, "is_bot": True}},
+            }
+        }
+        with SessionLocal() as session:
+            handled = handle_my_chat_member(api, session, update)
+            self.assertTrue(handled)
+            self.assertEqual(get_bound_staff_chat(session)["chat_id"], "-100555666777")
+        self.assertTrue(api.sent)
+        self.assertIn("Support guruh ulandi", api.sent[0]["text"])
+
+    def test_staff_command_in_group_binds_without_prior_env(self) -> None:
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            handled = handle_alert_group_message(
+                api,
+                session,
+                {
+                    "message": {
+                        "text": "/staff",
+                        "chat": {"id": -100999888777, "type": "supergroup", "title": "Supports"},
+                    }
+                },
+            )
+            self.assertTrue(handled)
+            self.assertEqual(get_bound_staff_chat(session)["title"], "Supports")
+        self.assertIn("Support guruh sifatida saqlandi", api.sent[0]["text"])
 
 
 class DeliveryTests(AlertWorkflowTestCase):
