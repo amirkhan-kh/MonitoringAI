@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Bot, ChevronsLeft, ChevronsRight, Facebook, Instagram, Languages, LayoutDashboard, LogOut, UserCog } from "lucide-react";
+import { Bot, ChevronsLeft, ChevronsRight, Facebook, Instagram, Languages, LayoutDashboard, LogOut, Moon, Sun, UserCog } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { clearApiCache, logout } from "../api/client";
+import { applyTheme, resolveTheme, toggleTheme } from "../theme";
 import { TelegramIcon, YouTubeIcon } from "./BrandIcons";
 
 const SIDEBAR_STATE_KEY = "monitoring_sidebar_collapsed";
@@ -15,6 +16,7 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
       return false;
     }
   });
+  const [theme, setTheme] = useState(() => resolveTheme());
   const language = i18n.resolvedLanguage || i18n.language || "uz";
   const botLabel = botStatus?.ok && botStatus.username ? `@${botStatus.username}` : t("Bot ulanmagan");
   const navItems = [
@@ -32,6 +34,11 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
     i18n.changeLanguage(nextLanguage);
   }
 
+  function handleThemeToggle() {
+    const next = toggleTheme();
+    setTheme(next);
+  }
+
   useEffect(() => {
     document.documentElement.dataset.sidebar = collapsed ? "collapsed" : "expanded";
     try {
@@ -41,6 +48,10 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
     }
   }, [collapsed]);
 
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
   return (
     <aside className={collapsed ? "sidebar isCollapsed" : "sidebar"}>
       <div className="sidebarHeader">
@@ -48,15 +59,26 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
           <span className="brandPulse" />
           <span className="brandText">MonitoringAI</span>
         </div>
-        <button
-          className="sidebarToggle"
-          type="button"
-          onClick={() => setCollapsed((value) => !value)}
-          aria-label={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
-          title={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
-        >
-          {collapsed ? <ChevronsRight size={18} /> : <ChevronsLeft size={18} />}
-        </button>
+        <div className="sidebarHeaderActions">
+          <button
+            className="themeToggle"
+            type="button"
+            onClick={handleThemeToggle}
+            aria-label={theme === "dark" ? "Yorug' rejim" : "Qorong'u rejim"}
+            title={theme === "dark" ? "Yorug' rejim" : "Qorong'u rejim"}
+          >
+            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          </button>
+          <button
+            className="sidebarToggle"
+            type="button"
+            onClick={() => setCollapsed((value) => !value)}
+            aria-label={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
+            title={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
+          >
+            {collapsed ? <ChevronsRight size={18} /> : <ChevronsLeft size={18} />}
+          </button>
+        </div>
       </div>
 
       <nav className="nav">

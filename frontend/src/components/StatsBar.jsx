@@ -28,9 +28,14 @@ export function StatsBar({ sources = [], summary, items: providedItems, loading 
           <article className={`statCard ${item.tone || ""}`} key={item.label}>
             <div>
               <span>{item.label}</span>
-              <strong>{item.value}</strong>
+              <strong className="tabular-nums">{item.value}</strong>
+              {item.delta != null && (
+                <em className={`statDelta ${item.delta > 0 ? "up" : item.delta < 0 ? "down" : "flat"}`}>
+                  {item.delta > 0 ? `+${item.delta}%` : `${item.delta}%`}
+                </em>
+              )}
             </div>
-            <Icon size={22} />
+            {Icon ? <Icon size={20} strokeWidth={1.75} /> : null}
           </article>
         );
       })}

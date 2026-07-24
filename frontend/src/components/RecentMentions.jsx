@@ -1,4 +1,13 @@
-import { MessageSquareText, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  MessageSquareText,
+  MinusCircle,
+  ShieldAlert,
+  ThumbsDown,
+  ThumbsUp,
+  X,
+} from "lucide-react";
 import { useState } from "react";
 import { formatUiDate } from "../i18n";
 
@@ -63,6 +72,19 @@ function mediaTypeLabel(value) {
   return mediaTypeLabels[value] || value;
 }
 
+function SentimentIcon({ sentiment }) {
+  if (sentiment === "positive") return <ThumbsUp size={11} aria-hidden="true" />;
+  if (sentiment === "negative") return <ThumbsDown size={11} aria-hidden="true" />;
+  if (sentiment === "mixed") return <AlertTriangle size={11} aria-hidden="true" />;
+  return <MinusCircle size={11} aria-hidden="true" />;
+}
+
+function RiskIcon({ level }) {
+  if (level === "critical" || level === "high") return <ShieldAlert size={11} aria-hidden="true" />;
+  if (level === "medium") return <AlertTriangle size={11} aria-hidden="true" />;
+  return <CheckCircle2 size={11} aria-hidden="true" />;
+}
+
 export function RecentMentions({ mentions, loading = false }) {
   const [selectedMention, setSelectedMention] = useState(null);
 
@@ -120,6 +142,7 @@ export function RecentMentions({ mentions, loading = false }) {
                     <div className="mentionBadgeRow">
                       {mention.analysis.sentiment && (
                         <span className={`sentimentBadge ${mention.analysis.sentiment}`}>
+                          <SentimentIcon sentiment={mention.analysis.sentiment} />
                           {sentimentLabels[mention.analysis.sentiment] || mention.analysis.sentiment}
                           {typeof mention.analysis.sentiment_score === "number"
                             ? ` · ${mention.analysis.sentiment_score.toFixed(2)}`
@@ -128,6 +151,7 @@ export function RecentMentions({ mentions, loading = false }) {
                       )}
                       {mention.analysis.risk_level && (
                         <span className={`riskBadge ${mention.analysis.risk_level}`}>
+                          <RiskIcon level={mention.analysis.risk_level} />
                           {riskLabels[mention.analysis.risk_level] || mention.analysis.risk_level}
                         </span>
                       )}
