@@ -20,3 +20,6 @@ postgres_data/
 .obsidian/workspace-mobile.json
 .obsidian/cache/
 .trash/
+
+# macOS
+.DS_Store
