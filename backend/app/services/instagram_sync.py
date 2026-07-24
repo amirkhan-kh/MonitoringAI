@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +13,8 @@ from app.models import InstagramMention, InstagramSource
 from app.services.instagram_api import InstagramApi, InstagramApiError
 from app.services.instagram_ingestion import ingest_instagram_comment, ingest_instagram_media
 
+log = logging.getLogger("instagram-sync")
+
 
 @dataclass
 class InstagramSyncStats:
@@ -20,6 +23,9 @@ class InstagramSyncStats:
     posts_created: int = 0
     comments_created: int = 0
     records_updated: int = 0
+    # Media that report a non-zero comments_count but whose comment TEXT we could
+    # not read — the Meta Advanced Access / App Review gate (or a permission error).
+    comments_blocked_media: int = 0
     created_ids: list[UUID] = field(default_factory=list)
 
     def as_response(self) -> dict[str, Any]:
@@ -112,7 +118,41 @@ def sync_instagram_source(
         _ingest_and_count(session, source, media, item_type="post", stats=stats)
         if not source.collect_comments:
             continue
-        comments = api.get_media_comments(media_id, limit=settings.instagram_comments_per_media)
+        # Skip the per-media /comments call when Meta already reports zero comments on
+        # this post. The engagement counts above come from the single /media page, so
+        # metrics for every post stay fresh cheaply; only posts that actually have
+        # comments cost an extra call. Keeps the API volume bounded even with a large
+        # instagram_media_per_poll window.
+        if int(media.get("comments_count") or 0) == 0:
+            continue
+        try:
+            comments = api.get_media_comments(media_id, limit=settings.instagram_comments_per_media)
+        except InstagramApiError as exc:
+            # A token-level failure must still bubble up so the caller can mark the
+            # source invalid; but a comment-scope/permission error on one media
+            # (common in Development mode before App Review) must NOT abort the whole
+            # sync — the posts and engagement metrics above are already committed.
+            if exc.status_code == 401 or exc.error_code == 190:
+                raise
+            stats.comments_blocked_media += 1
+            log.warning(
+                "IG comment read failed media=%s source=%s: %s",
+                media_id,
+                source.username or source.ig_user_id,
+                exc,
+            )
+            continue
+        # Meta reports an aggregate comments_count on the media object but returns no
+        # comment text: this is the Advanced Access / App Review gate, not an empty
+        # thread. Surface it so the "N comments / 0 imported" banner is diagnosable.
+        if not comments and int(media.get("comments_count") or 0) > 0:
+            stats.comments_blocked_media += 1
+            log.info(
+                "IG media=%s reports %s comment(s) but text is unreadable "
+                "(Advanced Access for instagram_manage_comments / App Review required)",
+                media_id,
+                media.get("comments_count"),
+            )
         for comment in comments:
             enriched = {
                 **comment,

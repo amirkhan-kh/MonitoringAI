@@ -56,7 +56,11 @@ def _is_auth_error(exc: InstagramApiError) -> bool:
 def _poll_source(settings, source_id) -> None:
     with SessionLocal() as session:
         source = session.get(InstagramSource, source_id)
-        if source is None or not source.active or not source.collect_comments:
+        # Note: we intentionally do NOT gate on collect_comments here. Post discovery
+        # and engagement-metric refresh must keep running even when comment collection
+        # is disabled — sync_instagram_source() itself skips only the comment-text
+        # fetch when source.collect_comments is False.
+        if source is None or not source.active:
             return
         # Don't hammer a token we already know is bad — the dashboard will show it red
         # and the operator swaps it. It resumes automatically once re-validated to active.
