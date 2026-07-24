@@ -22,6 +22,7 @@ import { Sidebar } from "../components/Sidebar";
 import { SignalInbox } from "../components/SignalInbox";
 import { StatsBar } from "../components/StatsBar";
 import { TelegramIcon, YouTubeIcon } from "../components/BrandIcons";
+import { MentionTrendChart, PlatformTrendChart } from "../components/TrendChart";
 
 const periodOptions = [
   { key: "day", label: "Kun", value: 1, interval: "hour" },
@@ -146,7 +147,6 @@ function buildChartModel(rows, seriesList = chartSeries) {
 
 function DashboardLineChart({ rows, period }) {
   const safeRows = rows || [];
-  const model = buildChartModel(safeRows);
   const totals = chartSeries.reduce((acc, series) => {
     acc[series.key] = safeRows.reduce((sum, row) => sum + (row[series.key] || 0), 0);
     return acc;
@@ -158,46 +158,7 @@ function DashboardLineChart({ rows, period }) {
 
   return (
     <div className="analyticsChart" aria-label="Mention trend chart">
-      <svg viewBox={`0 0 ${model.width} ${model.height}`} preserveAspectRatio="none">
-        {model.yTicks.map((tick) => (
-          <g className="chartGrid" key={tick.y}>
-            <line x1={model.pad.left} x2={model.width - model.pad.right} y1={tick.y} y2={tick.y} />
-            <text x={model.pad.left - 12} y={tick.y + 4}>{compactNumber(tick.value)}</text>
-          </g>
-        ))}
-        <line
-          className="chartAxis"
-          x1={model.pad.left}
-          x2={model.pad.left}
-          y1={model.pad.top}
-          y2={model.pad.top + model.plotHeight}
-        />
-        <line
-          className="chartAxis"
-          x1={model.pad.left}
-          x2={model.width - model.pad.right}
-          y1={model.pad.top + model.plotHeight}
-          y2={model.pad.top + model.plotHeight}
-        />
-        {chartSeries.map((series) => (
-          <polyline key={series.key} className={`chartLine ${series.tone}`} points={model.points(series.key)} />
-        ))}
-        {chartSeries.map((series) => (
-          <g className={`chartDots ${series.tone}`} key={`${series.key}-dots`}>
-            {model.pointList(series.key).map((point, index) => (
-              <circle key={`${series.key}-${index}`} cx={point.x} cy={point.y} r="4">
-                <title>{`${series.label}: ${compactNumber(point.value)} (${point.label})`}</title>
-              </circle>
-            ))}
-          </g>
-        ))}
-        {model.xLabels.map((item) => (
-          <text className="chartXLabel" key={`${item.index}-${item.label}`} x={item.x} y={model.height - 14}>
-            {item.label}
-          </text>
-        ))}
-        <text className="chartYLabel" x="14" y="20">Mention</text>
-      </svg>
+      <MentionTrendChart rows={safeRows} />
       <div className="chartLegend">
         {chartSeries.map((series) => (
           <span key={series.key}><i className={series.tone} /> {series.label}</span>
@@ -220,7 +181,6 @@ function DashboardLineChart({ rows, period }) {
 
 function SinglePlatformChart({ rows, series, period }) {
   const safeRows = rows || [];
-  const model = buildChartModel(safeRows, [series]);
   const total = safeRows.reduce((sum, row) => sum + (row[series.key] || 0), 0);
   const peak = safeRows.reduce(
     (best, row) => ((row[series.key] || 0) > (best[series.key] || 0) ? row : best),
@@ -229,29 +189,7 @@ function SinglePlatformChart({ rows, series, period }) {
 
   return (
     <div className="platformChart" aria-label={`${series.label} trend chart`}>
-      <svg viewBox={`0 0 ${model.width} ${model.height}`} preserveAspectRatio="none">
-        {model.yTicks.map((tick) => (
-          <g className="chartGrid" key={tick.y}>
-            <line x1={model.pad.left} x2={model.width - model.pad.right} y1={tick.y} y2={tick.y} />
-            <text x={model.pad.left - 12} y={tick.y + 4}>{compactNumber(tick.value)}</text>
-          </g>
-        ))}
-        <line className="chartAxis" x1={model.pad.left} x2={model.pad.left} y1={model.pad.top} y2={model.pad.top + model.plotHeight} />
-        <line className="chartAxis" x1={model.pad.left} x2={model.width - model.pad.right} y1={model.pad.top + model.plotHeight} y2={model.pad.top + model.plotHeight} />
-        <polyline className={`chartLine ${series.tone}`} points={model.points(series.key)} />
-        <g className={`chartDots ${series.tone}`}>
-          {model.pointList(series.key).map((point, index) => (
-            <circle key={`${series.key}-${index}`} cx={point.x} cy={point.y} r="4">
-              <title>{`${series.label}: ${compactNumber(point.value)} (${point.label})`}</title>
-            </circle>
-          ))}
-        </g>
-        {model.xLabels.map((item) => (
-          <text className="chartXLabel" key={`${series.key}-${item.index}-${item.label}`} x={item.x} y={model.height - 14}>
-            {item.label}
-          </text>
-        ))}
-      </svg>
+      <PlatformTrendChart rows={safeRows} series={series} />
       <div className="platformChartMeta">
         <span><i className={series.tone} /> {intervalLabels[period?.interval] || "Kunlik"}</span>
         <strong>{compactNumber(total)}</strong>

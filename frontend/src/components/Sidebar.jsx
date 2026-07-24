@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bot, ChevronsLeft, ChevronsRight, Facebook, Instagram, Languages, LayoutDashboard, LogOut, Moon, Sun, UserCog } from "lucide-react";
+import { Bot, Facebook, Instagram, Languages, LayoutDashboard, LogOut, Menu, MoonStar, Sun, UserCog, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { clearApiCache, logout } from "../api/client";
 import { applyTheme, resolveTheme, toggleTheme } from "../theme";
@@ -67,7 +67,9 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
             aria-label={theme === "dark" ? "Yorug' rejim" : "Qorong'u rejim"}
             title={theme === "dark" ? "Yorug' rejim" : "Qorong'u rejim"}
           >
-            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+            <span className="themeToggleIcon" key={theme}>
+              {theme === "dark" ? <Sun size={17} /> : <MoonStar size={17} />}
+            </span>
           </button>
           <button
             className="sidebarToggle"
@@ -76,7 +78,9 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
             aria-label={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
             title={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
           >
-            {collapsed ? <ChevronsRight size={18} /> : <ChevronsLeft size={18} />}
+            <span className="sidebarToggleIcon" key={collapsed ? "open" : "close"}>
+              {collapsed ? <Menu size={18} /> : <X size={18} />}
+            </span>
           </button>
         </div>
       </div>

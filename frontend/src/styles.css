@@ -202,6 +202,96 @@
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
 }
 
+/* =============================================================================
+   Aesthetic layer v2 — synthesized from reference dashboards (#2,#5,#8...):
+   soft generous rounding, tasteful glass + blur, restrained gradients, glow depth.
+   One accent (violet/indigo). Not garish. Overrides the base tokens above.
+   ============================================================================= */
+:root {
+  /* Softer, more generous rounding */
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 26px;
+  --radius-2xl: 32px;
+
+  /* Soft ambient depth (light) */
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 16px 40px -18px rgba(15, 23, 42, 0.16);
+  --shadow-soft: 0 1px 2px rgba(15, 23, 42, 0.05), 0 10px 26px -16px rgba(15, 23, 42, 0.12);
+  --shadow-float: 0 24px 60px -20px rgba(15, 23, 42, 0.24), 0 8px 20px -12px rgba(15, 23, 42, 0.12);
+
+  /* Glass — translucent surface + blur + inner highlight */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-bg-strong: rgba(255, 255, 255, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.85);
+  --glass-hairline: rgba(15, 23, 42, 0.07);
+  --glass-blur: 18px;
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+
+  /* Signature gradients — hero / CTA / stat tints (used sparingly) */
+  --gradient-hero: linear-gradient(135deg, #6366f1 0%, #7c6cf6 42%, #a855f7 100%);
+  --gradient-violet: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  --gradient-aurora: radial-gradient(120% 120% at 0% 0%, rgba(99,102,241,0.16), transparent 55%),
+                     radial-gradient(120% 120% at 100% 0%, rgba(168,85,247,0.12), transparent 52%);
+  --gradient-stat-1: linear-gradient(150deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0) 64%);
+  --gradient-stat-2: linear-gradient(150deg, rgba(6, 182, 212, 0.15), rgba(6, 182, 212, 0) 64%);
+  --gradient-stat-3: linear-gradient(150deg, rgba(236, 72, 153, 0.14), rgba(236, 72, 153, 0) 64%);
+  --gradient-stat-4: linear-gradient(150deg, rgba(217, 119, 6, 0.15), rgba(217, 119, 6, 0) 64%);
+
+  /* Glow — signature accent depth */
+  --glow-accent: 0 22px 52px -22px rgba(99, 102, 241, 0.55);
+  --glow-soft: 0 14px 44px -26px rgba(99, 102, 241, 0.4);
+
+  /* Chart tokens (Recharts) */
+  --chart-grid: rgba(15, 23, 42, 0.06);
+  --chart-axis: #8b93a1;
+  --chart-area-from: rgba(99, 102, 241, 0.34);
+  --chart-area-mid: rgba(99, 102, 241, 0.12);
+  --chart-area-to: rgba(99, 102, 241, 0);
+  --chart-line: #6366f1;
+  --chart-line-2: #06b6d4;
+  --chart-tooltip-bg: rgba(17, 24, 39, 0.94);
+  --chart-tooltip-ink: #ffffff;
+  --chart-cursor: rgba(99, 102, 241, 0.14);
+}
+
+:root[data-theme="dark"] {
+  /* Gentle depth in dark (screenshot dashboards keep subtle elevation) */
+  --shadow: 0 12px 36px -18px rgba(0, 0, 0, 0.6);
+  --shadow-soft: 0 8px 24px -16px rgba(0, 0, 0, 0.5);
+  --shadow-float: 0 28px 70px -24px rgba(0, 0, 0, 0.72), 0 10px 24px -14px rgba(0, 0, 0, 0.5);
+
+  --glass-bg: rgba(23, 24, 28, 0.62);
+  --glass-bg-strong: rgba(23, 24, 28, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-hairline: rgba(255, 255, 255, 0.06);
+  --glass-blur: 22px;
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  --gradient-hero: linear-gradient(135deg, #6d5cf5 0%, #8b5cf6 46%, #b06ef8 100%);
+  --gradient-violet: linear-gradient(135deg, #6d5cf5 0%, #9061f9 100%);
+  --gradient-aurora: radial-gradient(120% 120% at 0% 0%, rgba(124,131,255,0.20), transparent 55%),
+                     radial-gradient(120% 120% at 100% 0%, rgba(176,110,248,0.14), transparent 52%);
+  --gradient-stat-1: linear-gradient(150deg, rgba(124, 131, 255, 0.22), rgba(124, 131, 255, 0) 64%);
+  --gradient-stat-2: linear-gradient(150deg, rgba(34, 211, 238, 0.16), rgba(34, 211, 238, 0) 64%);
+  --gradient-stat-3: linear-gradient(150deg, rgba(244, 114, 182, 0.16), rgba(244, 114, 182, 0) 64%);
+  --gradient-stat-4: linear-gradient(150deg, rgba(251, 191, 36, 0.16), rgba(251, 191, 36, 0) 64%);
+
+  --glow-accent: 0 24px 64px -22px rgba(124, 131, 255, 0.5);
+  --glow-soft: 0 18px 54px -28px rgba(124, 131, 255, 0.42);
+
+  --chart-grid: rgba(255, 255, 255, 0.06);
+  --chart-axis: #6b7280;
+  --chart-area-from: rgba(124, 131, 255, 0.44);
+  --chart-area-mid: rgba(124, 131, 255, 0.14);
+  --chart-area-to: rgba(124, 131, 255, 0);
+  --chart-line: #8b8fff;
+  --chart-line-2: #22d3ee;
+  --chart-tooltip-bg: rgba(26, 27, 32, 0.96);
+  --chart-tooltip-ink: #f2f3f5;
+  --chart-cursor: rgba(124, 131, 255, 0.16);
+}
+
 :root[data-sidebar="collapsed"] {
   --sidebar-width: var(--sidebar-collapsed-width);
 }
@@ -7109,5 +7199,191 @@ button {
 
   .landingPreviewKpis {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* ============================================================================
+   AESTHETIC LAYER v2 — reference-dashboard synthesis (glass · gradient · glow)
+   Appended last = highest cascade. Re-skins base cards; touches NO logic.
+   Design system: docs/01-planning/dizayn-tizimi.md
+   ============================================================================ */
+
+/* Atmospheric page wash — one soft violet breath (restrained, not garish) */
+body::before {
+  background: var(--gradient-aurora);
+  opacity: 1;
+}
+
+/* --- Glass panels: translucent surface + blur + inner highlight + soft depth --- */
+.panel,
+.insightPanel,
+.opsPanel,
+.forecastPanel,
+.sourceSetupPanel {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  border: 1px solid var(--glass-hairline);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow), var(--glass-highlight);
+}
+
+/* List rows stay solid (perf: no blur on high-count elements) but softer + rounder */
+.sourceCard,
+.mentionItem {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-hairline);
+  background: var(--surface-raised);
+  transition:
+    transform var(--duration-fast) var(--ease-smooth),
+    border-color var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-fast) var(--ease-smooth);
+}
+.sourceCard:hover,
+.mentionItem:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-soft);
+}
+
+/* --- KPI stat tiles: subtle per-metric gradient tint + glass + glow on hover --- */
+.statCard {
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-hairline);
+  box-shadow: var(--shadow-soft), var(--glass-highlight);
+}
+.statCard::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.85;
+  transition: opacity var(--duration-base) var(--ease-smooth);
+}
+.statCard:nth-child(1)::before { background: var(--gradient-stat-1); }
+.statCard:nth-child(2)::before { background: var(--gradient-stat-2); }
+.statCard:nth-child(3)::before { background: var(--gradient-stat-3); }
+.statCard:nth-child(4)::before { background: var(--gradient-stat-4); }
+.statCard:hover {
+  transform: translateY(-2px);
+  border-color: var(--glass-border);
+  box-shadow: var(--shadow), var(--glow-soft);
+}
+.statCard:hover::before { opacity: 1; }
+
+/* --- Glass sidebar --- */
+.sidebar {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  border-right: 1px solid var(--glass-hairline);
+}
+
+/* --- Refined icon-button toggles (glass pill) + animated icon swap --- */
+.sidebarToggle,
+.themeToggle {
+  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-hairline);
+  overflow: hidden;
+}
+.themeToggle:hover {
+  box-shadow: var(--glow-soft);
+}
+.themeToggleIcon,
+.sidebarToggleIcon {
+  display: inline-grid;
+  place-items: center;
+}
+@keyframes iconPopIn {
+  from { opacity: 0; transform: rotate(-100deg) scale(0.55); }
+  to   { opacity: 1; transform: rotate(0deg) scale(1); }
+}
+@keyframes iconFadeIn {
+  from { opacity: 0; transform: scale(0.65) rotate(8deg); }
+  to   { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+.themeToggleIcon { animation: iconPopIn var(--duration-base) var(--ease-smooth); }
+.sidebarToggleIcon { animation: iconFadeIn var(--duration-fast) var(--ease-smooth); }
+
+/* --- Gradient hero / promo card utility (Landing, upgrade cards, brand moments) --- */
+.gradientHero {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  background: var(--gradient-hero);
+  color: #fff;
+  box-shadow: var(--glow-accent);
+}
+.gradientHero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(60% 90% at 86% 12%, rgba(255, 255, 255, 0.24), transparent 60%),
+    radial-gradient(50% 80% at 12% 100%, rgba(255, 255, 255, 0.1), transparent 55%);
+  pointer-events: none;
+}
+.gradientHero > * { position: relative; z-index: 1; }
+
+/* --- Chart shell + Recharts theming (matches #8 refined gradient area look) --- */
+.chartShell {
+  position: relative;
+  width: 100%;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--chart-grid);
+}
+.recharts-cartesian-axis-line,
+.recharts-cartesian-axis-tick-line {
+  stroke: transparent;
+}
+.recharts-text.recharts-cartesian-axis-tick-value {
+  fill: var(--chart-axis);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.recharts-tooltip-wrapper { outline: none; }
+.rechartsTooltip {
+  background: var(--chart-tooltip-bg);
+  color: var(--chart-tooltip-ink);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: var(--shadow-float);
+  border: 1px solid var(--glass-hairline);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+.rechartsTooltip .rtLabel { opacity: 0.7; margin-bottom: 2px; }
+.rechartsTooltip .rtValue { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* --- Tinted icon chip (soft-colored square behind an icon) — refs #2/#3 --- */
+.iconChip {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .themeToggleIcon,
+  .sidebarToggleIcon {
+    animation: none;
+  }
+  .statCard,
+  .sourceCard,
+  .mentionItem {
+    transition: none;
   }
 }
