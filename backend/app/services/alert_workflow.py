@@ -51,9 +51,13 @@ from app.services.alerts import (
     build_alert_text,
     duration_text,
     get_bound_staff_chat,
+    get_pending_staff_invite,
     local_time_text,
+    parse_telegram_chat_ref,
     resolve_alert_chat_id,
     resolve_alert_lang,
+    set_pending_staff_invite,
+    try_resolve_staff_chat_ref,
 )
 from app.services.realtime import publish_realtime_event
 from app.services.telegram_api import TelegramBotApi, TelegramBotApiError
@@ -456,45 +460,207 @@ def _safe_send(api: TelegramBotApi, chat_id: Any, text: str, **kwargs: Any) -> d
 # --------------------------------------------------------------------------- group commands
 
 
+def _capture_group_invite_link(api: TelegramBotApi, chat_id: int | str) -> tuple[str | None, str | None]:
+    """Return (invite_link, warning). Prefer permanent export; fall back to create."""
+    try:
+        link = api.export_chat_invite_link(chat_id)
+        if link:
+            return link, None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("exportChatInviteLink failed chat=%s: %s", chat_id, exc)
+    try:
+        created = api.create_chat_invite_link(chat_id, name="MonitoringAI support")
+        if created and created.get("invite_link"):
+            return str(created["invite_link"]), None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("createChatInviteLink failed chat=%s: %s", chat_id, exc)
+    return None, (
+        "⚠️ Guruhda public yoki private invite link yo'q (yoki botda huquq yetarli emas).\n"
+        "Telegram → Guruh sozlamalari → Invite link / Manage invite links dan link yarating.\n"
+        "Keyin guruhda /staff deb yozing yoki botga private chatda linkni yuboring."
+    )
+
+
+def finalize_staff_group_bind(
+    api: TelegramBotApi,
+    session: Session,
+    *,
+    chat_id: int | str,
+    title: str | None,
+    source: str,
+    chat_type: str | None = None,
+    username: str | None = None,
+) -> dict:
+    """Bind support group, store invite link, pin summary, send status message."""
+    settings = get_settings()
+    invite_link, invite_warning = _capture_group_invite_link(api, chat_id)
+    bound = bind_staff_chat(
+        session,
+        chat_id,
+        title=title,
+        source=source,
+        invite_link=invite_link,
+        username=username,
+        chat_type=chat_type,
+    )
+    lines = [
+        f"✅ Support guruh ulandi: {title or chat_id}",
+        f"Chat ID: {chat_id}",
+        f"Turi: {chat_type or 'group/supergroup'}",
+    ]
+    if invite_link:
+        lines.append(f"Invite link: {invite_link}")
+    if invite_warning:
+        lines.append("")
+        lines.append(invite_warning)
+    lines.extend(
+        [
+            "",
+            "AI tahlildan o'tgan riskli mentionlar (Telegram, YouTube, Instagram, Facebook)",
+            "shu guruhga kartochka + tugmalar bilan keladi. Pin hisoblagich yoqiladi.",
+            "",
+            "Komandalar: /ochiq · /xodimlar · /statistika · /til · /jamlanma · /staff",
+        ]
+    )
+    _safe_send(api, chat_id, "\n".join(lines))
+    try:
+        sync_summary_message(api, session, settings, force=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not pin summary after staff bind", exc_info=True)
+    logger.info("Bound staff alert chat id=%s title=%s invite=%s", chat_id, title, invite_link)
+    return bound
+
+
 def handle_my_chat_member(api: TelegramBotApi, session: Session, update: dict[str, Any]) -> bool:
-    """When the bot is added as admin/member to a group, bind it as the support inbox."""
+    """When the bot is added as admin to a group, bind it as the support inbox (public or private)."""
     event = update.get("my_chat_member")
     if not event:
         return False
     chat = event.get("chat") or {}
     chat_type = chat.get("type")
+    # Never use channels as staff inbox.
     if chat_type not in {"group", "supergroup"}:
         return False
     new_member = event.get("new_chat_member") or {}
     status = (new_member.get("status") or "").lower()
-    if status not in {"administrator", "member", "restricted"}:
-        # left / kicked — do not unbind automatically (group id still valid if re-added)
+    if status not in {"administrator", "member"}:
         return True
 
     chat_id = chat.get("id")
     title = chat.get("title") or "Support"
+    username = chat.get("username")
     if chat_id is None:
         return True
 
-    bind_staff_chat(session, chat_id, title=title, source="my_chat_member")
-    settings = get_settings()
-    lang = resolve_alert_lang(session, chat_id=str(chat_id))
+    # Prefer admin; if only member, still bind but warn that pin/admin rights help.
+    finalize_staff_group_bind(
+        api,
+        session,
+        chat_id=chat_id,
+        title=title,
+        source=f"my_chat_member:{status}",
+        chat_type=chat_type,
+        username=username,
+    )
+    if status != "administrator":
+        _safe_send(
+            api,
+            chat_id,
+            "⚠️ Botni guruhda *admin* qiling (pin messages, delete messages) — "
+            "pin hisoblagich va kartochka tahrirlash to'liq ishlashi uchun.",
+        )
+    return True
+
+
+def handle_staff_private_message(api: TelegramBotApi, session: Session, update: dict[str, Any]) -> bool:
+    """Private chat: /staff <invite|@username> or a bare t.me link to register support group."""
+    message = update.get("message")
+    if not message:
+        return False
+    chat = message.get("chat") or {}
+    if chat.get("type") != "private":
+        return False
+    text = (message.get("text") or "").strip()
+    if not text:
+        return False
+    chat_id = chat.get("id")
+
+    command = None
+    args: list[str] = []
+    if text.startswith("/"):
+        parts = text.split()
+        command = parts[0].split("@", 1)[0].lstrip("/").lower()
+        args = parts[1:]
+        if command not in {"staff", "support", "guruh", "id"}:
+            return False
+        ref = " ".join(args).strip()
+    else:
+        # Bare invite / username link
+        parsed = parse_telegram_chat_ref(text)
+        if parsed.get("kind") not in {"invite", "username", "id"}:
+            return False
+        ref = text
+
+    if not ref:
+        pending = get_pending_staff_invite(session)
+        bound = get_bound_staff_chat(session)
+        lines = [
+            "Support guruhni bog'lash:",
+            "1) @monitoring_checking_bot ni Supports guruhiga qo'shing va admin qiling",
+            "2) Guruhda /staff yozing",
+            "yoki shu chatga guruh invite linkini yuboring (public yoki private).",
+        ]
+        if bound:
+            lines.append(f"\nHozirgi: {bound.get('title')} · {bound.get('chat_id')}")
+            if bound.get("invite_link"):
+                lines.append(f"Link: {bound['invite_link']}")
+        if pending:
+            lines.append(f"\nKutilayotgan link: {pending.get('invite_link')}")
+        _safe_send(api, chat_id, "\n".join(lines))
+        return True
+
+    resolved = try_resolve_staff_chat_ref(api, ref)
+    parsed = resolved.get("parsed") or parse_telegram_chat_ref(ref)
+    if resolved.get("chat") and resolved["chat"].get("id"):
+        c = resolved["chat"]
+        if c.get("type") == "channel":
+            _safe_send(api, chat_id, "Kanal support inbox bo'la olmaydi. Guruh (group/supergroup) kerak.")
+            return True
+        finalize_staff_group_bind(
+            api,
+            session,
+            chat_id=c["id"],
+            title=c.get("title"),
+            source="private_resolve",
+            chat_type=c.get("type"),
+            username=c.get("username"),
+        )
+        _safe_send(api, chat_id, f"Ulandi: {c.get('title')} ({c.get('id')})")
+        return True
+
+    if parsed.get("kind") == "invite":
+        link = parsed.get("invite_link") or ref
+        set_pending_staff_invite(session, link, note="private_chat")
+        _safe_send(
+            api,
+            chat_id,
+            (
+                "Private invite saqlandi.\n"
+                f"Link: {link}\n\n"
+                "Botni shu guruhga qo'shib admin qiling. Qo'shilishi bilan avtomatik bog'lanadi "
+                "(public yoki private farq qilmaydi).\n"
+                "Agar guruhda invite link bo'lmasa — Telegram sozlamalaridan link yarating."
+            ),
+        )
+        return True
+
     _safe_send(
         api,
         chat_id,
-        (
-            f"✅ Support guruh ulandi: {title}\n"
-            f"Chat ID: {chat_id}\n\n"
-            "AI tahlildan o'tgan riskli mentionlar (Telegram, YouTube, Instagram, Facebook) "
-            "shu guruhga kartochka bo'lib tushadi.\n\n"
-            "Komandalar: /ochiq · /xodimlar · /statistika · /til · /jamlanma"
-        ),
+        "Link ochilmadi. Bot hali guruh a'zosi emas bo'lishi mumkin.\n"
+        "1) Botni guruhga admin qilib qo'shing\n"
+        "2) Guruhda /staff yozing",
     )
-    try:
-        sync_summary_message(api, session, settings, force=True)
-    except Exception:  # noqa: BLE001
-        logger.debug("Could not pin summary after staff bind", exc_info=True)
-    logger.info("Bound staff alert chat id=%s title=%s", chat_id, title)
     return True
 
 
@@ -517,24 +683,53 @@ def handle_alert_group_message(api: TelegramBotApi, session: Session, update: di
 
     # /id and /staff work in any group where the bot can see messages — they bind this
     # group as the destination for AI risk cards (Supports-style staff inbox).
+    # Optional arg: public @username or t.me invite link for documentation / pending bind.
     if command in {"id", "staff", "support", "guruh"}:
-        bind_staff_chat(session, chat_id, title=title, source=f"command_{command}")
-        _safe_send(
+        if args:
+            ref = " ".join(args).strip()
+            resolved = try_resolve_staff_chat_ref(api, ref)
+            parsed = resolved.get("parsed") or {}
+            if resolved.get("chat") and resolved["chat"].get("id"):
+                c = resolved["chat"]
+                finalize_staff_group_bind(
+                    api,
+                    session,
+                    chat_id=c["id"],
+                    title=c.get("title") or title,
+                    source=f"command_{command}_resolved",
+                    chat_type=c.get("type"),
+                    username=c.get("username"),
+                )
+                return True
+            if parsed.get("kind") == "invite":
+                set_pending_staff_invite(session, parsed.get("invite_link") or ref, note="from_group_command")
+                # Still bind the current group (bot is already here) and remember the link.
+                finalize_staff_group_bind(
+                    api,
+                    session,
+                    chat_id=chat_id,
+                    title=title,
+                    source=f"command_{command}_with_invite",
+                    chat_type=chat.get("type"),
+                    username=chat.get("username"),
+                )
+                return True
+            if resolved.get("error"):
+                _safe_send(
+                    api,
+                    chat_id,
+                    "Linkni bot hali ocha olmadi (private invite uchun bot avval guruh a'zosi bo'lishi kerak).\n"
+                    "Shu guruhni support sifatida saqlayman.",
+                )
+        finalize_staff_group_bind(
             api,
-            chat_id,
-            (
-                f"✅ Support guruh sifatida saqlandi\n"
-                f"Chat ID: {chat_id}\n"
-                f"Nomi: {title}\n"
-                f"Turi: {chat.get('type')}\n\n"
-                "Endi botga kelgan AI risk mentionlari shu guruhga yuboriladi.\n"
-                "Pin hisoblagich: /jamlanma"
-            ),
+            session,
+            chat_id=chat_id,
+            title=title,
+            source=f"command_{command}",
+            chat_type=chat.get("type"),
+            username=chat.get("username"),
         )
-        try:
-            sync_summary_message(api, session, settings, force=True)
-        except Exception:  # noqa: BLE001
-            logger.debug("summary after /staff failed", exc_info=True)
         return True
 
     if not _is_staff_chat(session, settings, chat_id):

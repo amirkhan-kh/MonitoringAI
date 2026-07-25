@@ -408,7 +408,7 @@ class StaffGroupBindTests(AlertWorkflowTestCase):
             )
             self.assertTrue(handled)
             self.assertEqual(get_bound_staff_chat(session)["title"], "Supports")
-        self.assertIn("Support guruh sifatida saqlandi", api.sent[0]["text"])
+        self.assertIn("Support guruh ulandi", api.sent[0]["text"])
 
 
 class DeliveryTests(AlertWorkflowTestCase):

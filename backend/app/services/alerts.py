@@ -329,12 +329,18 @@ def get_bound_staff_chat(session: Session) -> dict | None:
     return state.value
 
 
+PENDING_STAFF_INVITE_KEY = "alert_staff_pending_invite"
+
+
 def bind_staff_chat(
     session: Session,
     chat_id: int | str,
     *,
     title: str | None = None,
     source: str = "manual",
+    invite_link: str | None = None,
+    username: str | None = None,
+    chat_type: str | None = None,
 ) -> dict:
     """Persist the support group that should receive AI risk cards."""
     from app.models import AppState
@@ -343,14 +349,24 @@ def bind_staff_chat(
         "chat_id": str(chat_id),
         "title": (title or "").strip() or None,
         "source": source,
+        "invite_link": (invite_link or "").strip() or None,
+        "username": (username or "").strip().lstrip("@") or None,
+        "chat_type": (chat_type or "").strip() or None,
         "bound_at": _utcnow().isoformat(),
     }
-    state = session.get(AppState, STAFF_CHAT_STATE_KEY)
-    if state is None:
+    # Preserve previous invite_link if caller didn't pass a new one.
+    existing = session.get(AppState, STAFF_CHAT_STATE_KEY)
+    if existing and isinstance(existing.value, dict) and not value["invite_link"]:
+        value["invite_link"] = existing.value.get("invite_link")
+    if existing is None:
         session.add(AppState(key=STAFF_CHAT_STATE_KEY, value=value))
     else:
-        state.value = value
-        state.updated_at = _utcnow()
+        existing.value = value
+        existing.updated_at = _utcnow()
+    # Clear any pending invite once we have a concrete chat.
+    pending = session.get(AppState, PENDING_STAFF_INVITE_KEY)
+    if pending is not None:
+        session.delete(pending)
     # Pending cards should retarget to the new group on next dispatch.
     session.query(AlertEvent).filter(
         AlertEvent.delivery_channel == "telegram",
@@ -361,6 +377,98 @@ def bind_staff_chat(
     )
     session.commit()
     return value
+
+
+def set_pending_staff_invite(session: Session, invite_link: str, *, note: str | None = None) -> dict:
+    """Remember an invite link until the bot is added as admin and my_chat_member fires."""
+    from app.models import AppState
+
+    value = {
+        "invite_link": invite_link.strip(),
+        "note": note,
+        "set_at": _utcnow().isoformat(),
+    }
+    state = session.get(AppState, PENDING_STAFF_INVITE_KEY)
+    if state is None:
+        session.add(AppState(key=PENDING_STAFF_INVITE_KEY, value=value))
+    else:
+        state.value = value
+        state.updated_at = _utcnow()
+    session.commit()
+    return value
+
+
+def get_pending_staff_invite(session: Session) -> dict | None:
+    from app.models import AppState
+
+    state = session.get(AppState, PENDING_STAFF_INVITE_KEY)
+    if not state or not isinstance(state.value, dict):
+        return None
+    return state.value if state.value.get("invite_link") else None
+
+
+def parse_telegram_chat_ref(value: str) -> dict:
+    """Parse public @username, t.me/username, or private t.me/+hash / joinchat/hash links."""
+    import re
+
+    raw = (value or "").strip()
+    out: dict = {"raw": raw, "username": None, "invite_hash": None, "kind": None}
+    if not raw:
+        return out
+    # bare chat id
+    if re.fullmatch(r"-?\d{6,}", raw):
+        out["kind"] = "id"
+        out["chat_id"] = raw
+        return out
+    cleaned = re.sub(r"^https?://", "", raw, flags=re.I)
+    cleaned = cleaned.split("?", 1)[0].strip("/")
+    # t.me/+HASH or telegram.me/+HASH
+    m = re.match(r"^(?:t\.me|telegram\.me)/\+([A-Za-z0-9_-]+)$", cleaned, re.I)
+    if m:
+        out["kind"] = "invite"
+        out["invite_hash"] = m.group(1)
+        out["invite_link"] = f"https://t.me/+{m.group(1)}"
+        return out
+    # t.me/joinchat/HASH
+    m = re.match(r"^(?:t\.me|telegram\.me)/joinchat/([A-Za-z0-9_-]+)$", cleaned, re.I)
+    if m:
+        out["kind"] = "invite"
+        out["invite_hash"] = m.group(1)
+        out["invite_link"] = f"https://t.me/joinchat/{m.group(1)}"
+        return out
+    # t.me/username or @username
+    m = re.match(r"^(?:t\.me|telegram\.me)/([A-Za-z0-9_]{5,})$", cleaned, re.I)
+    if m and m.group(1).lower() not in {"joinchat", "addstickers", "share"}:
+        out["kind"] = "username"
+        out["username"] = m.group(1)
+        return out
+    if raw.startswith("@"):
+        out["kind"] = "username"
+        out["username"] = raw[1:]
+        return out
+    out["kind"] = "unknown"
+    return out
+
+
+def try_resolve_staff_chat_ref(api: "TelegramBotApi", value: str) -> dict:
+    """Try Bot API getChat for public usernames / known ids. Private invites need membership first."""
+    parsed = parse_telegram_chat_ref(value)
+    result = {"parsed": parsed, "chat": None, "error": None}
+    try:
+        if parsed.get("kind") == "id":
+            chat = api.get_chat(parsed["chat_id"])
+            result["chat"] = chat
+        elif parsed.get("kind") == "username":
+            chat = api.get_chat(f"@{parsed['username']}")
+            result["chat"] = chat
+        elif parsed.get("kind") == "invite":
+            # Bot API cannot resolve private invite hashes until the bot is already a member.
+            result["error"] = "invite_requires_membership"
+        else:
+            result["error"] = "unrecognized_ref"
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = str(exc)
+    return result
 
 
 def resolve_alert_chat_id(session: Session, settings: Settings, brand_id) -> str | None:
@@ -414,8 +522,23 @@ def deliver_one(session: Session, settings: Settings, event: AlertEvent) -> None
         # Leave pending — operator still needs to configure chat / token.
         return
     lang = resolve_alert_lang(session, chat_id=chat_id, brand_id=event.brand_id)
+    # Never deliver staff cards into channels — only groups / private staff targets.
+    if str(chat_id).startswith("-100"):
+        pass  # supergroup/channel share -100 prefix; reject after getChat if needed
     try:
-        response = TelegramBotApi(bot_token).send_message(
+        api = TelegramBotApi(bot_token)
+        try:
+            chat_info = api.get_chat(chat_id)
+            if chat_info and chat_info.get("type") == "channel":
+                event.error = "delivery_target_is_channel"
+                event.status = "failed"
+                payload["attempts"] = attempts + 1
+                event.payload = payload
+                session.commit()
+                return
+        except Exception:  # noqa: BLE001 - still attempt send if getChat fails
+            pass
+        response = api.send_message(
             chat_id,
             build_alert_text(payload, event, lang=lang),
             reply_markup=build_alert_keyboard(event, lang=lang),

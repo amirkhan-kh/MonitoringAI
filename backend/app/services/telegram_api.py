@@ -122,6 +122,19 @@ class TelegramBotApi:
             {"chat_id": chat_id, "message_id": message_id, "disable_notification": disable_notification},
         )
 
+    def export_chat_invite_link(self, chat_id: int | str) -> str | None:
+        data = self._post("exportChatInviteLink", {"chat_id": chat_id})
+        result = data.get("result")
+        return str(result) if result else None
+
+    def create_chat_invite_link(self, chat_id: int | str, *, name: str | None = None) -> dict[str, Any] | None:
+        payload: dict[str, Any] = {"chat_id": chat_id}
+        if name:
+            payload["name"] = name[:32]
+        data = self._post("createChatInviteLink", payload)
+        result = data.get("result")
+        return result if isinstance(result, dict) else None
+
     def _post(self, method: str, payload: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=timeout) as client:

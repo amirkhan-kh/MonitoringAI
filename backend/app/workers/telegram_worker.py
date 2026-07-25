@@ -18,6 +18,7 @@ from app.services.alert_workflow import (
     handle_alert_group_message,
     handle_callback_query,
     handle_my_chat_member,
+    handle_staff_private_message,
 )
 from app.services.telegram_api import TelegramBotApi, TelegramPollingConflictError
 from app.services.telegram_command_agent import handle_command_update
@@ -121,6 +122,8 @@ def handle_update(api: TelegramBotApi, update: dict[str, Any]) -> None:
         if handle_callback_query(api, session, update):
             return
         if handle_my_chat_member(api, session, update):
+            return
+        if handle_staff_private_message(api, session, update):
             return
         if handle_alert_group_message(api, session, update):
             return
