@@ -8,7 +8,7 @@ import {
   ThumbsUp,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { formatUiDate } from "../i18n";
 
 const sourceTypeLabels = {
@@ -52,11 +52,22 @@ const riskLabels = {
 
 function sourceLabel(mention) {
   if (mention.chat_username) return `@${mention.chat_username}`;
-  return mention.chat_title || String(mention.chat_id);
+  if (mention.chat_title) return mention.chat_title;
+  if (mention.author_username) return `@${String(mention.author_username).replace(/^@/, "")}`;
+  if (mention.author_name) return mention.author_name;
+  if (mention.channel_title) return mention.channel_title;
+  if (mention.video_title) return mention.video_title;
+  if (mention.page_name) return mention.page_name;
+  if (mention.chat_id != null) return String(mention.chat_id);
+  return "Mention";
 }
 
 function mentionText(mention) {
-  return mention.text || mention.caption || "";
+  return mention.text || mention.caption || mention.title || "";
+}
+
+function mentionDate(mention) {
+  return mention.message_date || mention.published_at || mention.created_at || mention.timestamp;
 }
 
 function formatDate(value) {
@@ -85,8 +96,31 @@ function RiskIcon({ level }) {
   return <CheckCircle2 size={11} aria-hidden="true" />;
 }
 
-export function RecentMentions({ mentions, loading = false }) {
+/** Filter mentions by AI analysis sentiment (positive = maqtov, negative = shikoyat). */
+export function filterMentionsBySentiment(mentions = [], sentiment) {
+  if (!sentiment) return mentions || [];
+  return (mentions || []).filter(
+    (mention) => mention?.analysis && !mention.analysis.error && mention.analysis.sentiment === sentiment,
+  );
+}
+
+/**
+ * Shared mention stream card used on monitoring pages.
+ * @param {string|null} sentimentFilter - null | "positive" | "negative"
+ */
+export function RecentMentions({
+  mentions = [],
+  loading = false,
+  title = "Oxirgi mentionlar",
+  description = "Telegram post, comment va bot message oqimi.",
+  emptyText = "Mention yo'q",
+  sentimentFilter = null,
+}) {
   const [selectedMention, setSelectedMention] = useState(null);
+  const rows = useMemo(
+    () => filterMentionsBySentiment(mentions, sentimentFilter),
+    [mentions, sentimentFilter],
+  );
 
   return (
     <section className={loading ? "recentSection isLoading" : "recentSection"} aria-busy={loading}>
@@ -99,8 +133,8 @@ export function RecentMentions({ mentions, loading = false }) {
             </>
           ) : (
             <>
-              <h2>Oxirgi mentionlar</h2>
-              <p>Telegram post, comment va bot message oqimi.</p>
+              <h2>{title}</h2>
+              <p>{description}</p>
             </>
           )}
         </div>
@@ -122,8 +156,8 @@ export function RecentMentions({ mentions, loading = false }) {
               </span>
             </div>
           ))
-        ) : mentions.length ? (
-          mentions.map((mention) => (
+        ) : rows.length ? (
+          rows.map((mention) => (
             <button className="mentionItem" type="button" key={mention.id} onClick={() => setSelectedMention(mention)}>
               <div className="mentionIcon">
                 <MessageSquareText size={18} />
@@ -164,13 +198,15 @@ export function RecentMentions({ mentions, loading = false }) {
                 )}
               </div>
               <span className="mentionMeta">
-                <em title={mention.source_type}>{sourceTypeLabel(mention.source_type)}</em>
-                <small title="Xabar Telegramda yozilgan vaqt">{formatDate(mention.message_date)}</small>
+                <em title={mention.source_type || mention.item_type}>
+                  {sourceTypeLabel(mention.source_type || mention.item_type)}
+                </em>
+                <small title="Mention vaqti">{formatDate(mentionDate(mention))}</small>
               </span>
             </button>
           ))
         ) : (
-          <div className="empty">Mention yo'q</div>
+          <div className="empty">{emptyText}</div>
         )}
       </div>
 
@@ -187,7 +223,8 @@ export function RecentMentions({ mentions, loading = false }) {
               <div>
                 <h2 id="mention-detail-title">{sourceLabel(selectedMention)}</h2>
                 <p>
-                  {sourceTypeLabel(selectedMention.source_type)} · {formatDate(selectedMention.message_date)}
+                  {sourceTypeLabel(selectedMention.source_type || selectedMention.item_type)} ·{" "}
+                  {formatDate(mentionDate(selectedMention))}
                 </p>
               </div>
               <button className="iconButton" type="button" aria-label="Yopish" onClick={() => setSelectedMention(null)}>
@@ -229,6 +266,31 @@ export function RecentMentions({ mentions, loading = false }) {
           </section>
         </div>
       )}
+    </section>
+  );
+}
+
+/** Pair of analysis-filtered mention panels for any monitoring page. */
+export function MentionsAnalysisPanels({ mentions = [], loading = false, platformLabel = "" }) {
+  const suffix = platformLabel ? ` · ${platformLabel}` : "";
+  return (
+    <section className="mentionsAnalysisGrid" aria-label="AI tahlil bo'yicha maqtov va shikoyat">
+      <RecentMentions
+        mentions={mentions}
+        loading={loading}
+        sentimentFilter="positive"
+        title="Maqtovlar"
+        description={`AI tahlilidan ijobiy mentionlar${suffix}`}
+        emptyText="Maqtov topilmadi"
+      />
+      <RecentMentions
+        mentions={mentions}
+        loading={loading}
+        sentimentFilter="negative"
+        title="Shikoyatlar"
+        description={`AI tahlilidan salbiy mentionlar${suffix}`}
+        emptyText="Shikoyat topilmadi"
+      />
     </section>
   );
 }

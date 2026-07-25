@@ -21,6 +21,7 @@ import {
 import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId, saveSelectedBrandId } from "../api/client";
 import DeleteSourceModal from "../components/DeleteSourceModal";
 import { MonitoringInsights } from "../components/MonitoringInsights";
+import { MentionsAnalysisPanels } from "../components/RecentMentions";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
 import { StatsBar } from "../components/StatsBar";
@@ -734,6 +735,12 @@ export function InstagramMonitoring() {
             </div>
           </section>
         </section>
+
+        <MentionsAnalysisPanels
+          mentions={mentions}
+          loading={loading}
+          platformLabel="Instagram"
+        />
 
         <DeleteSourceModal
           open={Boolean(pendingDelete)}

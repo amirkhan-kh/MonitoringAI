@@ -10,7 +10,7 @@ import {
 import DeleteSourceModal from "../components/DeleteSourceModal";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { PageHeader } from "../components/PageHeader";
-import { RecentMentions } from "../components/RecentMentions";
+import { MentionsAnalysisPanels, RecentMentions } from "../components/RecentMentions";
 import { Sidebar } from "../components/Sidebar";
 import { SmartSelect } from "../components/SmartSelect";
 import { SourceBoard } from "../components/SourceBoard";
@@ -377,6 +377,12 @@ export function TelegramMonitoring() {
 
           <RecentMentions mentions={mentions} loading={isInitialLoading} />
         </section>
+
+        <MentionsAnalysisPanels
+          mentions={mentions}
+          loading={isInitialLoading}
+          platformLabel="Telegram"
+        />
 
         <DeleteSourceModal
           open={Boolean(pendingDelete)}

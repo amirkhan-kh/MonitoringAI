@@ -27,6 +27,7 @@ import {
 import { YouTubeIcon } from "../components/BrandIcons";
 import DeleteSourceModal from "../components/DeleteSourceModal";
 import { MonitoringInsights } from "../components/MonitoringInsights";
+import { MentionsAnalysisPanels } from "../components/RecentMentions";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
 import { SmartSelect } from "../components/SmartSelect";
@@ -506,6 +507,12 @@ export function YoutubeMonitoring() {
           />
           <YoutubeRecentMentions mentions={mentions} loading={isInitialLoading} />
         </section>
+
+        <MentionsAnalysisPanels
+          mentions={mentions}
+          loading={isInitialLoading}
+          platformLabel="YouTube"
+        />
 
         <DeleteSourceModal
           open={Boolean(pendingDelete)}
