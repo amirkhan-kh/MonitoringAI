@@ -19,7 +19,6 @@ import {
 import { endpoints, readSelectedBrandId, resolveSelectedBrandId } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
-import { SignalInbox } from "../components/SignalInbox";
 import { StatsBar } from "../components/StatsBar";
 import { TelegramIcon, YouTubeIcon } from "../components/BrandIcons";
 import { MentionTrendChart, PlatformTrendChart } from "../components/TrendChart";
@@ -703,8 +702,6 @@ export function Dashboard() {
             <small>{platformCoverageDetail(ai)}</small>
           </div>
         </section>
-
-        <SignalInbox />
 
         <OfficialSourceSetup sources={sources} filter={filter} />
 
