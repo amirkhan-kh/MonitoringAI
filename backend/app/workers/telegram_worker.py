@@ -32,6 +32,14 @@ logger = logging.getLogger("telegram-worker")
 def main() -> None:
     settings = get_settings()
     init_db()
+    alert_chat = str(settings.alert_telegram_chat_id or "").strip()
+    if alert_chat and not alert_chat.startswith("-"):
+        logger.warning(
+            "ALERT_TELEGRAM_CHAT_ID=%s looks like a personal chat, not a group. "
+            "Support cards in groups may refuse buttons unless the group is bound via /staff "
+            "or AppState. Prefer the Supports supergroup id (-100...).",
+            alert_chat,
+        )
     api = TelegramBotApi(settings.telegram_bot_token)
     with exclusive_polling_lock(settings.telegram_poll_lock_file):
         while not polling_transport_available(api):

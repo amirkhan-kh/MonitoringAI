@@ -32,7 +32,11 @@ services:
       postgres:
         condition: service_healthy
 
+  # IMPORTANT: do not run this with the production TELEGRAM_BOT_TOKEN while prod
+  # telegram-worker is also polling — getUpdates 409 conflict + wrong ALERT chat
+  # make Support buttons show "faqat xodimlar guruhida". Opt-in profile only.
   telegram-worker:
+    profiles: ["local-telegram-poll"]
     build:
       context: ./backend
       dockerfile: Dockerfile

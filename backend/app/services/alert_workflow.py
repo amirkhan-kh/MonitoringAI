@@ -375,38 +375,47 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
     parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     lang = resolve_alert_lang(session, chat_id=str(chat_id) if chat_id is not None else None)
+    is_staff = _is_staff_chat(session, settings, chat_id)
 
-    if not _is_staff_chat(session, settings, chat_id):
-        _safe_answer(api, callback_id, t("toast_staff_only", lang), show_alert=True)
-        return True
-
-    if action == "summary":
-        sync_summary_message(api, session, settings, force=True)
-        _safe_answer(api, callback_id, t("toast_refreshed", lang))
-        return True
-    if action == "list":
-        _safe_answer(api, callback_id)
-        _safe_send(api, chat_id, open_alerts_text(session, lang=lang), reply_markup=None)
-        return True
-    if action == "leaderboard":
-        _safe_answer(api, callback_id)
-        _safe_send(api, chat_id, leaderboard_text(session, lang=lang), reply_markup=None)
-        return True
-    if action == "langmenu":
-        _safe_answer(api, callback_id)
-        _safe_send(
-            api,
-            chat_id,
-            t("lang_pick", lang) + f"\n{t('lang_help', lang, current=lang_display_name(lang))}",
-            reply_markup=language_keyboard(lang),
-        )
-        return True
-    if action == "setlang":
-        next_lang = normalize_lang(parts[2] if len(parts) > 2 else DEFAULT_LANG)
-        _set_chat_language(session, str(chat_id), next_lang)
-        _safe_answer(api, callback_id, t("toast_lang_set", next_lang, name=lang_display_name(next_lang)))
-        sync_summary_message(api, session, settings, force=True)
-        return True
+    # Group-level tools (summary / list / language) only work in a known staff chat.
+    staff_tools = {"summary", "list", "leaderboard", "langmenu", "setlang"}
+    if action in staff_tools:
+        if not is_staff:
+            logger.warning(
+                "Staff-tool callback refused chat_id=%s action=%s allowed=%s",
+                chat_id,
+                action,
+                _staff_chat_allowlist(session, settings),
+            )
+            _safe_answer(api, callback_id, t("toast_staff_only", lang), show_alert=True)
+            return True
+        if action == "summary":
+            sync_summary_message(api, session, settings, force=True)
+            _safe_answer(api, callback_id, t("toast_refreshed", lang))
+            return True
+        if action == "list":
+            _safe_answer(api, callback_id)
+            _safe_send(api, chat_id, open_alerts_text(session, lang=lang), reply_markup=None)
+            return True
+        if action == "leaderboard":
+            _safe_answer(api, callback_id)
+            _safe_send(api, chat_id, leaderboard_text(session, lang=lang), reply_markup=None)
+            return True
+        if action == "langmenu":
+            _safe_answer(api, callback_id)
+            _safe_send(
+                api,
+                chat_id,
+                t("lang_pick", lang) + f"\n{t('lang_help', lang, current=lang_display_name(lang))}",
+                reply_markup=language_keyboard(lang),
+            )
+            return True
+        if action == "setlang":
+            next_lang = normalize_lang(parts[2] if len(parts) > 2 else DEFAULT_LANG)
+            _set_chat_language(session, str(chat_id), next_lang)
+            _safe_answer(api, callback_id, t("toast_lang_set", next_lang, name=lang_display_name(next_lang)))
+            sync_summary_message(api, session, settings, force=True)
+            return True
 
     # Event actions: alert:reply|answer|reopen:<uuid> (legacy check/open → reply)
     if action in {"check", "open"}:
@@ -429,6 +438,22 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
         if event is None:
             session.rollback()
             _safe_answer(api, callback_id, t("toast_not_found", lang))
+            return True
+        # Authorize by known staff group OR by the chat where we actually delivered the card.
+        # This prevents false "faqat xodimlar guruhida" when env points at a personal chat
+        # while the card lives in Supports (or when int/str chat ids differ).
+        if not is_staff and not _callback_matches_event_chat(chat_id, event):
+            session.rollback()
+            logger.warning(
+                "Alert callback refused chat_id=%s event_chat=%s delivery=%s action=%s event=%s allowed=%s",
+                chat_id,
+                event.telegram_chat_id,
+                event.delivery_target,
+                action,
+                event.id,
+                _staff_chat_allowlist(session, settings),
+            )
+            _safe_answer(api, callback_id, t("toast_staff_only", lang), show_alert=True)
             return True
         changed, response = apply_alert_action(session, event, action, actor, lang=lang)
         if changed:
@@ -484,29 +509,65 @@ def _deliver_comment_link(
     _safe_send(api, card_chat_id, f"{actor.name}:\n{text}")
 
 
-def _is_staff_chat(session: Session | None, settings: Settings, chat_id: Any) -> bool:
-    """Accept bound support group, env ALERT_TELEGRAM_CHAT_ID, or brand alert_chat_id."""
+def _normalize_chat_id(chat_id: Any) -> str:
+    """Stable string form for Telegram chat ids (int/str, optional spaces)."""
     if chat_id is None:
+        return ""
+    return str(chat_id).strip()
+
+
+def _same_chat(a: Any, b: Any) -> bool:
+    left, right = _normalize_chat_id(a), _normalize_chat_id(b)
+    if not left or not right:
         return False
-    chat = str(chat_id).strip()
-    configured = str(settings.alert_telegram_chat_id or "").strip()
-    if configured and chat == configured:
+    if left == right:
         return True
-    if session is None:
+    # Rare edge: compare numeric forms if both parse as int.
+    try:
+        return int(left) == int(right)
+    except (TypeError, ValueError):
         return False
+
+
+def _callback_matches_event_chat(chat_id: Any, event: AlertEvent) -> bool:
+    """True when the press happens on the same Telegram message destination we stored."""
+    return _same_chat(chat_id, event.telegram_chat_id) or _same_chat(chat_id, event.delivery_target)
+
+
+def _staff_chat_allowlist(session: Session | None, settings: Settings) -> list[str]:
+    """All chat ids currently treated as support staff destinations (for logs/debug)."""
+    allowed: list[str] = []
+    configured = _normalize_chat_id(settings.alert_telegram_chat_id)
+    if configured:
+        allowed.append(configured)
+    if session is None:
+        return allowed
     try:
         bound = get_bound_staff_chat(session)
-        if bound and str(bound.get("chat_id") or "").strip() == chat:
-            return True
+        bound_id = _normalize_chat_id((bound or {}).get("chat_id"))
+        if bound_id and bound_id not in allowed:
+            allowed.append(bound_id)
         from app.models import Brand
 
         for brand in session.query(Brand).filter(Brand.active.is_(True)).all():
             profile = brand.profile_config or {}
             for key in ("alert_chat_id", "support_chat_id"):
-                if str(profile.get(key) or "").strip() == chat:
-                    return True
+                cid = _normalize_chat_id(profile.get(key))
+                if cid and cid not in allowed:
+                    allowed.append(cid)
     except Exception:  # noqa: BLE001
-        return bool(configured) and chat == configured
+        pass
+    return allowed
+
+
+def _is_staff_chat(session: Session | None, settings: Settings, chat_id: Any) -> bool:
+    """Accept bound support group, env ALERT_TELEGRAM_CHAT_ID, or brand alert_chat_id."""
+    chat = _normalize_chat_id(chat_id)
+    if not chat:
+        return False
+    for allowed in _staff_chat_allowlist(session, settings):
+        if _same_chat(chat, allowed):
+            return True
     return False
 
 

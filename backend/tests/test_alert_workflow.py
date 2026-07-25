@@ -498,6 +498,60 @@ class CallbackTests(AlertWorkflowTestCase):
         self.assertEqual(api.edits, [])
         with SessionLocal() as session:
             self.assertEqual(session.get(AlertEvent, event_id).work_status, "open")
+        self.assertTrue(any("xodimlar guruhida" in (a.get("text") or "") for a in api.answers))
+
+    def test_card_chat_works_even_if_env_points_at_personal_chat(self) -> None:
+        """Regression: local/dev env personal chat_id must not block Supports cards."""
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            event_id = event.id
+
+        import app.services.alert_workflow as workflow
+
+        original = workflow.get_settings
+        # Wrong personal id (exactly the prod bug: 7834215608 vs Supports -100...).
+        workflow.get_settings = lambda: staff_settings(alert_telegram_chat_id="7834215608")
+        try:
+            with SessionLocal() as session:
+                handled = handle_callback_query(
+                    api,
+                    session,
+                    callback_update("reply", event_id, {"id": 7, "first_name": "Aziz"}, chat_id=STAFF_CHAT_ID),
+                )
+        finally:
+            workflow.get_settings = original
+
+        self.assertTrue(handled)
+        with SessionLocal() as session:
+            stored = session.get(AlertEvent, event_id)
+            self.assertEqual(stored.work_status, "checked")
+            self.assertIn("Aziz", stored.checked_by or "")
+        self.assertFalse(any("xodimlar guruhida" in (a.get("text") or "") for a in api.answers))
+
+    def test_int_chat_id_matches_string_staff_config(self) -> None:
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            event = self.make_event(session)
+            event_id = event.id
+
+        import app.services.alert_workflow as workflow
+
+        original = workflow.get_settings
+        workflow.get_settings = lambda: staff_settings()
+        try:
+            with SessionLocal() as session:
+                handled = handle_callback_query(
+                    api,
+                    session,
+                    callback_update("reply", event_id, {"id": 9, "first_name": "Nodira"}, chat_id=int(STAFF_CHAT_ID)),
+                )
+        finally:
+            workflow.get_settings = original
+
+        self.assertTrue(handled)
+        with SessionLocal() as session:
+            self.assertEqual(session.get(AlertEvent, event_id).work_status, "checked")
 
     def test_unrelated_callback_is_left_for_other_handlers(self) -> None:
         with SessionLocal() as session:
