@@ -177,6 +177,8 @@ def help_text() -> str:
         "/id - guruh chat id (ALERT_TELEGRAM_CHAT_ID uchun)\n"
         "/ochiq - javob kutayotgan signallar ro'yxati\n"
         "/statistika - bugungi javoblar va xodimlar kesimi\n"
+        "/xodimlar - kim nechta signalga javob bergani (jadval)\n"
+        "/til uz|ru|en - guruh bot tilini o'zgartirish\n"
         "/jamlanma - pin qilingan hisoblagichni yangilash\n\n"
         "Category: owned, competitor, news, community, risk, bot, industry.\n"
         "Mode: all_messages yoki brand_matches_only.\n"

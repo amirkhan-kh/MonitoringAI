@@ -21,12 +21,19 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import AlertEvent
+from app.models import AlertEvent, Brand, TelegramBotConnection
+from app.services.alert_i18n import (
+    DEFAULT_LANG,
+    open_link_label,
+    platform_label,
+    t,
+)
 from app.services.realtime import publish_realtime_event
 from app.services.telegram_api import TelegramBotApi
 
 ALERT_MAX_ATTEMPTS = 6
 
+# Kept for backward-compatible imports in tests / workflow.
 PLATFORM_LABELS = {"telegram": "Telegram", "youtube": "YouTube", "instagram": "Instagram", "facebook": "Facebook"}
 RISK_EMOJI = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 RISK_ORDER = ("critical", "high", "medium", "low")
@@ -128,6 +135,8 @@ def record_alert(
             "permalink": permalink,
             "attempts": 0,
         }
+        # Prefer the live-bound Supports group over a stale personal chat id in env.
+        delivery_target = resolve_alert_chat_id(session, settings, brand_id)
         event = AlertEvent(
             brand_id=brand_id,
             # mention_id FK only exists for telegram mentions; others live in payload.
@@ -135,7 +144,7 @@ def record_alert(
             event_type="reputation_risk",
             status="pending",
             delivery_channel="telegram",
-            delivery_target=settings.alert_telegram_chat_id or None,
+            delivery_target=delivery_target,
             payload=payload,
         )
         session.add(event)
@@ -163,75 +172,111 @@ def record_alert(
         return None
 
 
-def build_alert_text(payload: dict, event: AlertEvent | None = None) -> str:
+def build_alert_text(payload: dict, event: AlertEvent | None = None, *, lang: str | None = None) -> str:
+    lang = lang or DEFAULT_LANG
     risk = (payload.get("risk_level") or "").lower()
     emoji = RISK_EMOJI.get(risk, "⚠️")
-    platform = PLATFORM_LABELS.get(payload.get("platform"), payload.get("platform") or "?")
-    lines = [f"{emoji} Reputatsion xavf signali — {platform}"]
+    platform = platform_label(payload.get("platform"), lang)
+    lines = [f"{emoji} {t('card_title', lang)} — {platform}"]
     if payload.get("brand_name"):
-        lines.append(f"Brend: {payload['brand_name']}")
+        lines.append(f"{t('brand', lang)}: {payload['brand_name']}")
     if payload.get("source"):
-        lines.append(f"Manba: {payload['source']}")
+        lines.append(f"{t('source', lang)}: {payload['source']}")
     if payload.get("author"):
-        lines.append(f"Muallif: {payload['author']}")
-    lines.append(f"Risk: {payload.get('risk_level')} ({payload.get('risk_score')})")
-    lines.append(f"Sentiment: {payload.get('sentiment')} ({payload.get('sentiment_score')})")
+        lines.append(f"{t('author', lang)}: {payload['author']}")
+    lines.append(f"{t('risk', lang)}: {payload.get('risk_level')} ({payload.get('risk_score')})")
+    lines.append(f"{t('sentiment', lang)}: {payload.get('sentiment')} ({payload.get('sentiment_score')})")
     if payload.get("text"):
-        lines.append(f"\nMatn: {payload['text']}")
+        lines.append(f"\n{t('text', lang)}: {payload['text']}")
     if payload.get("summary"):
-        lines.append(f"Xulosa: {payload['summary']}")
+        lines.append(f"{t('summary', lang)}: {payload['summary']}")
     if payload.get("suggested_action"):
-        lines.append(f"Tavsiya: {payload['suggested_action']}")
-    if payload.get("permalink"):
-        lines.append(f"Link: {payload['permalink']}")
+        lines.append(f"{t('suggested_action', lang)}: {payload['suggested_action']}")
     if event is not None:
         lines.append("")
-        lines.extend(build_status_lines(event))
+        lines.extend(build_status_lines(event, lang=lang))
     return "\n".join(lines)
 
 
-def build_status_lines(event: AlertEvent) -> list[str]:
+def build_status_lines(event: AlertEvent, *, lang: str | None = None) -> list[str]:
     """The workflow footer: always says whether a human has closed this signal."""
+    lang = lang or DEFAULT_LANG
     work_status = event.work_status or WORK_STATUS_OPEN
     lines: list[str] = []
     if work_status == WORK_STATUS_ANSWERED:
         answered_at = _as_utc(event.answered_at)
         started_at = _as_utc(event.sent_at) or _as_utc(event.created_at)
         took = duration_text(answered_at - started_at) if answered_at and started_at else "-"
-        lines.append("📌 Holat: ✅ Javob berildi")
-        lines.append(f"👤 Javob bergan: {event.answered_by or '-'} · {local_time_text(event.answered_at)} ({took})")
-        if event.checked_by:
-            lines.append(f"🔎 Tekshirgan: {event.checked_by} · {local_time_text(event.checked_at)}")
+        lines.append(f"📌 {t('status', lang)}: ✅ {t('status_answered', lang)}")
+        lines.append(
+            f"👤 {t('answered_by', lang)}: {event.answered_by or '-'} · "
+            f"{local_time_text(event.answered_at)} · {t('duration', lang)}: {took}"
+        )
+        if event.checked_by and event.checked_by != event.answered_by:
+            lines.append(
+                f"🔎 {t('checked_by', lang)}: {event.checked_by} · {local_time_text(event.checked_at)}"
+            )
     elif work_status == WORK_STATUS_CHECKED:
-        lines.append(f"📌 Holat: 👀 Tekshirildi — {event.checked_by or '-'} · {local_time_text(event.checked_at)}")
-        lines.append("⏳ Mijozga hali javob berilmagan")
+        lines.append(f"📌 {t('status', lang)}: 👀 {t('status_checking', lang)}")
+        lines.append(
+            f"🔎 {t('checked_by', lang)}: {event.checked_by or '-'} · {local_time_text(event.checked_at)}"
+        )
+        lines.append(f"⏳ {t('status_waiting_reply', lang)}")
     else:
-        lines.append("📌 Holat: 🆕 Tekshirilmadi — javob kutilmoqda")
+        lines.append(f"📌 {t('status', lang)}: 🆕 {t('status_open', lang)}")
     return lines
 
 
-def build_alert_keyboard(event: AlertEvent) -> dict:
+def build_alert_keyboard(event: AlertEvent, *, lang: str | None = None) -> dict:
     """Inline buttons under the card.
 
-    Two workflow buttons (the AI verdict was reviewed / the customer was answered) plus a
-    direct deep link to the comment, so answering is one tap away from the alert.
+    Layout (open):
+      [ 🔍 Tekshirdim ] [ 💬 Javob berdim ]
+      [ 🔗 Havola orqali ochish ]   ← claims review (tekshirilyapti)
+      [ 🌐 Platform comment link ]  ← direct deep link to original comment
     """
+    lang = lang or DEFAULT_LANG
     work_status = event.work_status or WORK_STATUS_OPEN
     event_id = str(event.id)
+    payload = event.payload or {}
+    platform = payload.get("platform")
+    permalink = payload.get("permalink")
+
     if work_status == WORK_STATUS_ANSWERED:
-        rows = [[{"text": "↩️ Qayta ochish", "callback_data": f"alert:reopen:{event_id}"}]]
+        rows: list[list[dict[str, str]]] = [
+            [{"text": f"↩️ {t('btn_reopen', lang)}", "callback_data": f"alert:reopen:{event_id}"}]
+        ]
     else:
         checked = work_status == WORK_STATUS_CHECKED
-        check_label = f"☑️ Tekshirildi · {_short_name(event.checked_by)}" if checked else "🔍 Tekshirildi"
+        if checked:
+            check_label = f"☑️ {t('btn_checked', lang)} · {_short_name(event.checked_by)}"
+        else:
+            check_label = f"🔍 {t('btn_check', lang)}"
         rows = [
             [
                 {"text": check_label, "callback_data": f"alert:check:{event_id}"},
-                {"text": "💬 Javob berdim", "callback_data": f"alert:answer:{event_id}"},
+                {"text": f"💬 {t('btn_answer', lang)}", "callback_data": f"alert:answer:{event_id}"},
             ]
         ]
-    permalink = (event.payload or {}).get("permalink")
+        if permalink:
+            rows.append(
+                [
+                    {
+                        "text": f"🔗 {t('btn_claim_and_open', lang)}",
+                        "callback_data": f"alert:open:{event_id}",
+                    }
+                ]
+            )
+
     if permalink:
-        rows.append([{"text": "🔗 Kommentga o'tish", "url": permalink}])
+        rows.append(
+            [
+                {
+                    "text": f"🌐 {open_link_label(platform, lang)}",
+                    "url": permalink,
+                }
+            ]
+        )
     return {"inline_keyboard": rows}
 
 
@@ -242,39 +287,160 @@ def _short_name(name: str | None, limit: int = 14) -> str:
     return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
+def resolve_delivery_bot_token(session: Session, settings: Settings, brand_id) -> str:
+    """Prefer the brand's dashboard-connected bot; fall back to the global worker token.
+
+    Mentions from Telegram / Instagram / YouTube / Facebook for a brand should land in
+    the support group via the same bot the operator configured under Telegram setup.
+    """
+    if brand_id is not None:
+        connection = (
+            session.query(TelegramBotConnection)
+            .filter(
+                TelegramBotConnection.brand_id == brand_id,
+                TelegramBotConnection.active.is_(True),
+                TelegramBotConnection.token_ciphertext.is_not(None),
+            )
+            .one_or_none()
+        )
+        if connection and connection.token_ciphertext:
+            try:
+                from app.services.telegram_connector import decrypt_bot_token
+
+                return decrypt_bot_token(connection.token_ciphertext)
+            except Exception:  # noqa: BLE001 - fall back to global token
+                pass
+    return settings.telegram_bot_token
+
+
+STAFF_CHAT_STATE_KEY = "alert_staff_chat"
+
+
+def get_bound_staff_chat(session: Session) -> dict | None:
+    """Runtime-bound support group (from /staff, /id, or bot-added-to-group)."""
+    from app.models import AppState
+
+    state = session.get(AppState, STAFF_CHAT_STATE_KEY)
+    if not state or not isinstance(state.value, dict):
+        return None
+    chat_id = str(state.value.get("chat_id") or "").strip()
+    if not chat_id:
+        return None
+    return state.value
+
+
+def bind_staff_chat(
+    session: Session,
+    chat_id: int | str,
+    *,
+    title: str | None = None,
+    source: str = "manual",
+) -> dict:
+    """Persist the support group that should receive AI risk cards."""
+    from app.models import AppState
+
+    value = {
+        "chat_id": str(chat_id),
+        "title": (title or "").strip() or None,
+        "source": source,
+        "bound_at": _utcnow().isoformat(),
+    }
+    state = session.get(AppState, STAFF_CHAT_STATE_KEY)
+    if state is None:
+        session.add(AppState(key=STAFF_CHAT_STATE_KEY, value=value))
+    else:
+        state.value = value
+        state.updated_at = _utcnow()
+    # Pending cards should retarget to the new group on next dispatch.
+    session.query(AlertEvent).filter(
+        AlertEvent.delivery_channel == "telegram",
+        AlertEvent.status.in_(["pending", "failed"]),
+    ).update(
+        {AlertEvent.delivery_target: str(chat_id)},
+        synchronize_session=False,
+    )
+    session.commit()
+    return value
+
+
+def resolve_alert_chat_id(session: Session, settings: Settings, brand_id) -> str | None:
+    """Staff group chat id priority: brand profile → bound support group → env.
+
+    A positive env id is often a private user chat from early setup; a bound group
+    (negative id) always wins so Supports-style groups receive the cards.
+    """
+    if brand_id is not None:
+        brand = session.get(Brand, brand_id)
+        profile = (brand.profile_config if brand else None) or {}
+        override = str(profile.get("alert_chat_id") or profile.get("support_chat_id") or "").strip()
+        if override:
+            return override
+
+    bound = get_bound_staff_chat(session)
+    if bound and bound.get("chat_id"):
+        return str(bound["chat_id"])
+
+    return str(settings.alert_telegram_chat_id or "").strip() or None
+
+
+def resolve_alert_lang(session: Session, *, chat_id: str | None = None, brand_id=None) -> str:
+    """Language for bot copy. Chat override > brand dashboard > global > uz."""
+    from app.models import AppState
+    from app.services.alert_i18n import LANG_STATE_CHAT_PREFIX, LANG_STATE_GLOBAL, normalize_lang
+
+    if chat_id:
+        state = session.get(AppState, f"{LANG_STATE_CHAT_PREFIX}{chat_id}")
+        if state and isinstance(state.value, dict) and state.value.get("lang"):
+            return normalize_lang(str(state.value.get("lang")))
+    if brand_id is not None:
+        brand = session.get(Brand, brand_id)
+        profile = (brand.profile_config if brand else None) or {}
+        for key in ("alert_language", "ui_language", "language"):
+            if profile.get(key):
+                return normalize_lang(str(profile.get(key)))
+    global_state = session.get(AppState, LANG_STATE_GLOBAL)
+    if global_state and isinstance(global_state.value, dict) and global_state.value.get("lang"):
+        return normalize_lang(str(global_state.value.get("lang")))
+    return DEFAULT_LANG
+
+
 def deliver_one(session: Session, settings: Settings, event: AlertEvent) -> None:
     """Try to send one alert; update its status + attempt count. Never raises."""
     payload = dict(event.payload or {})
     attempts = int(payload.get("attempts", 0))
+    chat_id = resolve_alert_chat_id(session, settings, event.brand_id)
+    bot_token = resolve_delivery_bot_token(session, settings, event.brand_id)
+    if not chat_id or not bot_token:
+        # Leave pending — operator still needs to configure chat / token.
+        return
+    lang = resolve_alert_lang(session, chat_id=chat_id, brand_id=event.brand_id)
     try:
-        response = TelegramBotApi(settings.telegram_bot_token).send_message(
-            settings.alert_telegram_chat_id,
-            build_alert_text(payload, event),
-            reply_markup=build_alert_keyboard(event),
+        response = TelegramBotApi(bot_token).send_message(
+            chat_id,
+            build_alert_text(payload, event, lang=lang),
+            reply_markup=build_alert_keyboard(event, lang=lang),
         )
         sent_message = response.get("result") or {}
         event.status = "sent"
         event.sent_at = _utcnow()
         event.error = None
-        event.delivery_target = settings.alert_telegram_chat_id
-        # Remember where the card landed so button presses can edit it in place.
-        event.telegram_chat_id = str((sent_message.get("chat") or {}).get("id") or settings.alert_telegram_chat_id)
+        event.delivery_target = str(chat_id)
+        event.telegram_chat_id = str((sent_message.get("chat") or {}).get("id") or chat_id)
         message_id = sent_message.get("message_id")
         event.telegram_message_id = int(message_id) if message_id else None
+        payload["lang"] = lang
+        payload["delivery_bot"] = "brand" if bot_token != settings.telegram_bot_token else "global"
     except Exception as exc:  # noqa: BLE001 - record + retry, never crash the loop
         attempts += 1
         event.error = str(exc)[:500]
         event.status = "abandoned" if attempts >= ALERT_MAX_ATTEMPTS else "failed"
-    # Reassign payload so SQLAlchemy detects the JSONB change.
     payload["attempts"] = attempts
     event.payload = payload
     session.commit()
 
 
 def dispatch_pending_alerts(session: Session, settings: Settings, limit: int = 20) -> int:
-    """Deliver queued alerts. No-op (leaves them pending) until a chat id is set."""
-    if not settings.alert_telegram_chat_id or not settings.telegram_bot_token:
-        return 0
+    """Deliver queued alerts. Brand-level chat/token can deliver even if global is unset."""
     events = (
         session.query(AlertEvent)
         .filter(AlertEvent.delivery_channel == "telegram")
@@ -285,8 +451,9 @@ def dispatch_pending_alerts(session: Session, settings: Settings, limit: int = 2
     )
     sent = 0
     for event in events:
+        before = event.status
         deliver_one(session, settings, event)
-        if event.status == "sent":
+        if event.status == "sent" and before != "sent":
             sent += 1
     return sent
 
@@ -318,29 +485,38 @@ def due_reminder_alerts(session: Session, settings: Settings, limit: int = 10) -
 
 def send_sla_reminders(session: Session, settings: Settings, api: TelegramBotApi | None = None) -> int:
     """Nudge the staff group about signals still waiting for a reply. Never raises."""
-    if not settings.alert_telegram_chat_id or not settings.telegram_bot_token:
-        return 0
     events = due_reminder_alerts(session, settings)
     if not events:
         return 0
-    api = api or TelegramBotApi(settings.telegram_bot_token)
     sent = 0
     now = _utcnow()
     for event in events:
+        chat_id = event.telegram_chat_id or resolve_alert_chat_id(session, settings, event.brand_id)
+        bot_token = resolve_delivery_bot_token(session, settings, event.brand_id)
+        if not chat_id or not bot_token:
+            continue
+        lang = resolve_alert_lang(session, chat_id=str(chat_id), brand_id=event.brand_id)
         waited = duration_text(now - (_as_utc(event.sent_at) or now))
         payload = event.payload or {}
-        who = "Tekshirilgan, lekin javob berilmagan" if event.work_status == WORK_STATUS_CHECKED else "Hali hech kim ko'rmadi"
-        text = (
-            f"⏰ {waited} javobsiz turibdi — {who}.\n"
-            f"Manba: {payload.get('source') or '-'}\n"
-            "Kim oladi? Javob bergach «💬 Javob berdim» tugmasini bosing."
+        who = (
+            t("sla_nudge_checked", lang)
+            if event.work_status == WORK_STATUS_CHECKED
+            else t("sla_nudge_unseen", lang)
+        )
+        text = "⏰ " + t(
+            "sla_nudge_body",
+            lang,
+            waited=waited,
+            who=who,
+            source=payload.get("source") or "-",
         )
         try:
-            api.send_message(
-                event.telegram_chat_id or settings.alert_telegram_chat_id,
+            event_api = api if api is not None and bot_token == settings.telegram_bot_token else TelegramBotApi(bot_token)
+            event_api.send_message(
+                chat_id,
                 text,
                 reply_to_message_id=event.telegram_message_id,
-                reply_markup=build_alert_keyboard(event),
+                reply_markup=build_alert_keyboard(event, lang=lang),
             )
         except Exception:  # noqa: BLE001 - a failed nudge must not stall the loop
             continue

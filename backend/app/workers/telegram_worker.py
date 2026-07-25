@@ -14,7 +14,11 @@ from sqlalchemy import or_
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import TelegramSource
-from app.services.alert_workflow import handle_alert_group_message, handle_callback_query
+from app.services.alert_workflow import (
+    handle_alert_group_message,
+    handle_callback_query,
+    handle_my_chat_member,
+)
 from app.services.telegram_api import TelegramBotApi, TelegramPollingConflictError
 from app.services.telegram_command_agent import handle_command_update
 from app.services.telegram_ingestion import get_message_from_update, ingest_telegram_update
@@ -106,8 +110,8 @@ def exclusive_polling_lock(lock_file: str):
 
 
 def allowed_update_types(configured: list[str]) -> list[str]:
-    """Never let an env override drop callback_query — the alert buttons depend on it."""
-    return list(dict.fromkeys([*configured, "callback_query"]))
+    """Never drop workflow updates — buttons and support-group binding depend on them."""
+    return list(dict.fromkeys([*configured, "callback_query", "my_chat_member"]))
 
 
 def handle_update(api: TelegramBotApi, update: dict[str, Any]) -> None:
@@ -115,6 +119,8 @@ def handle_update(api: TelegramBotApi, update: dict[str, Any]) -> None:
         # Alert-button presses and the staff group's read-only commands come first: they
         # are never monitoring content and must not fall through to ingestion.
         if handle_callback_query(api, session, update):
+            return
+        if handle_my_chat_member(api, session, update):
             return
         if handle_alert_group_message(api, session, update):
             return

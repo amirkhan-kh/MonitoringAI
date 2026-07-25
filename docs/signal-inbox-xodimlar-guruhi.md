@@ -16,21 +16,33 @@ dashboardda bossangiz Telegramdagi kartochka o'zgaradi.
 Brend: Uzum market
 Manba: Официальный чат Uzum Market
 Muallif: Dildora
-Risk: high (0.8) · Sentiment: negative (-0.6)
+Risk: high (0.8)
+Kayfiyat: negative (-0.6)
 Matn / Xulosa / Tavsiya ...
-Link: https://t.me/uzummarket_chat/361937
 
-📌 Holat: 🆕 Tekshirilmadi — javob kutilmoqda
-[ 🔍 Tekshirildi ] [ 💬 Javob berdim ]
-[ 🔗 Kommentga o'tish            ]
+📌 Holat: 🆕 Yangi — hali olinmagan
+[ 🔍 Tekshirdim ] [ 💬 Javob berdim ]
+[ 🔗 Havola orqali ochish          ]   ← holatni «Tekshirilyapti» qiladi
+[ 🌐 Telegram izohiga o'tish       ]   ← platformadagi komment deep-link
 ```
 
-- **🔍 Tekshirildi** — AI xulosasi o'qildi. Ikkinchi marta bossangiz belgi olinadi
-  (faqat o'zingiznikini). Boshqa xodim tekshirgan bo'lsa, bot uning ismini aytadi.
-- **💬 Javob berdim** — mijozga javob berildi, signal yopiladi. Kartochkada javob
-  bergan xodimning ismi va necha daqiqada javob berilgani yoziladi.
-- **🔗 Kommentga o'tish** — postdagi linkka bir bosishda o'tadi.
+- **🔍 Tekshirdim** — AI xulosasi o'qildi / ish olingan. Ikkinchi marta bossangiz belgi
+  olinadi (faqat o'zingiznikini). Boshqa xodim tekshirgan bo'lsa, bot uning ismini aytadi.
+- **💬 Javob berdim** — mijozga javob berildi, signal yopiladi. Kartochkada javob bergan
+  xodimning **ismi + @username** va javob vaqti yoziladi.
+- **🔗 Havola orqali ochish** — holatni `Tekshirilyapti…` qiladi (kim olgani yoziladi),
+  so'ng pastagi platforma havolasidan kommentga o'tasiz.
+- **🌐 … izohiga / kommentiga o'tish** — Telegram / YouTube / Instagram / Facebookdagi
+  original kommentga deep-link (javob yozish oynasiga yaqin joyga tushadi).
 - Yopilgan kartochkada **↩️ Qayta ochish** tugmasi qoladi — noto'g'ri yopilsa qaytariladi.
+
+### Holatlar (professional oqim)
+
+| Holat | Matn | Qachon |
+| --- | --- | --- |
+| Yangi | `🆕 Yangi — hali olinmagan` | Hali hech kim bosmagan |
+| Tekshirilyapti | `👀 Tekshirilyapti…` + xodim ismi | Havola orqali ochish yoki Tekshirdim |
+| Javob berildi | `✅ Javob berildi` + `👤 Javob bergan xodim: Ism (@user)` | Javob berdim |
 
 Ikki xodim bir vaqtda bosса, birinchisi yozib qoladi, ikkinchisiga "falonchi
 allaqachon javob bergan" deb chiqadi (yozuv DB'da qulflab yangilanadi).
@@ -51,7 +63,14 @@ Manbalar bo'yicha:
 
 Bugun yopildi: 18 · O'rtacha javob vaqti: 22 daq
 Xodimlar: Aziz 7 · Dildora 6
+🌐 O'zbekcha
+
+[ 🔄 Yangilash ] [ 📋 Ochiq ro'yxat ]
+[ 👥 Xodimlar jadvali ] [ 🌐 Til ]
 ```
+
+- **👥 Xodimlar jadvali** — bugun kim nechta kommentga javob berganini jadval qilib chiqaradi.
+- **🌐 Til** — guruh bot tilini `uz` / `ru` / `en` ga o'zgartirish (dinamik).
 
 Hammasi yopilsa: `✅ Javobsiz signal yo'q — hammasi yopilgan`.
 
@@ -66,10 +85,25 @@ guruh spamga aylanmasligi uchun cheklangan. `ALERT_SLA_MINUTES=0` — eslatma o'
 
 | Komanda | Nima qiladi |
 | --- | --- |
-| `/id` | Guruh chat id — `ALERT_TELEGRAM_CHAT_ID` uchun kerak |
+| `/id` | Guruh chat id — `ALERT_TELEGRAM_CHAT_ID` yoki brand `profile_config.alert_chat_id` |
 | `/ochiq` | Javob kutayotgan signallar ro'yxati (link bilan) |
 | `/statistika` | Bugungi yopilganlar, o'rtacha javob vaqti, xodimlar kesimi |
+| `/xodimlar` | Kim nechta signalga javob bergani (jadval) |
+| `/til uz\|ru\|en` | Guruh bot tilini dinamik o'zgartirish |
 | `/jamlanma` | Pin qilingan hisoblagichni majburiy yangilash |
+
+## Multi-platform + brand bot
+
+AI tahlildan o'tgan **Telegram, YouTube, Instagram, Facebook** risk signallari bir xil
+kartochka sifatida xodimlar guruhiga tushadi. Yetkazish tartibi:
+
+1. Brand dashboardda ulangan bot tokeni (Telegram setup) — bor bo'lsa shu bot yuboradi.
+2. Aks holda global `TELEGRAM_BOT_TOKEN`.
+3. Guruh chat id: brand `profile_config.alert_chat_id` (ixtiyoriy) → aks holda
+   `ALERT_TELEGRAM_CHAT_ID`.
+
+Deep-link har platformada o'z formatida: `t.me/...`, YouTube `watch?v=&lc=`, Instagram
+media permalink, Facebook `permalink_url`.
 
 ## Sozlash: 4 qadam
 
