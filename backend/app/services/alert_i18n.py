@@ -38,19 +38,24 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "New — not claimed yet",
     },
     "status_checking": {
-        "uz": "Tekshirilyapti…",
-        "ru": "Проверяется…",
-        "en": "Under review…",
+        "uz": "Tahlil qilinmoqda…",
+        "ru": "Идёт разбор…",
+        "en": "In progress…",
     },
     "status_checked": {
-        "uz": "Tekshirildi",
-        "ru": "Проверено",
-        "en": "Reviewed",
+        "uz": "Tahlil qilinmoqda",
+        "ru": "Идёт разбор",
+        "en": "In progress",
     },
     "status_waiting_reply": {
-        "uz": "Mijozga hali javob berilmagan",
-        "ru": "Клиенту ещё не ответили",
-        "en": "Customer not answered yet",
+        "uz": "Xodim kommentga javob yozmoqda — boshqalar kutsin",
+        "ru": "Сотрудник отвечает — остальные ждут",
+        "en": "Staff is replying — others wait",
+    },
+    "status_open_link": {
+        "uz": "Kommentga o'tish",
+        "ru": "Открыть комментарий",
+        "en": "Open the comment",
     },
     "status_answered": {
         "uz": "Javob berildi",
@@ -68,40 +73,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Reviewed by",
     },
     "duration": {"uz": "Javob vaqti", "ru": "Время ответа", "en": "Response time"},
-    "btn_check": {"uz": "Tekshirdim", "ru": "Проверил", "en": "Reviewed"},
-    "btn_checked": {"uz": "Tekshirildi", "ru": "Проверено", "en": "Reviewed"},
+    "btn_reply": {"uz": "Javob berish", "ru": "Ответить", "en": "Reply"},
+    "btn_replying": {
+        "uz": "Tahlil qilinmoqda…",
+        "ru": "Идёт разбор…",
+        "en": "In progress…",
+    },
     "btn_answer": {"uz": "Javob berdim", "ru": "Ответил", "en": "I replied"},
     "btn_reopen": {"uz": "Qayta ochish", "ru": "Открыть снова", "en": "Reopen"},
-    "btn_open_comment": {
-        "uz": "Kommentga o'tish",
-        "ru": "К комментарию",
-        "en": "Open comment",
-    },
-    "btn_open_telegram": {
-        "uz": "Telegram izohiga o'tish",
-        "ru": "К сообщению в Telegram",
-        "en": "Open Telegram message",
-    },
-    "btn_open_youtube": {
-        "uz": "YouTube kommentiga o'tish",
-        "ru": "К комментарию YouTube",
-        "en": "Open YouTube comment",
-    },
-    "btn_open_instagram": {
-        "uz": "Instagram kommentiga o'tish",
-        "ru": "К комментарию Instagram",
-        "en": "Open Instagram comment",
-    },
-    "btn_open_facebook": {
-        "uz": "Facebook kommentiga o'tish",
-        "ru": "К комментарию Facebook",
-        "en": "Open Facebook comment",
-    },
-    "btn_claim_and_open": {
-        "uz": "Havola orqali ochish",
-        "ru": "Открыть по ссылке",
-        "en": "Open via link",
-    },
     "btn_refresh": {"uz": "Yangilash", "ru": "Обновить", "en": "Refresh"},
     "btn_open_list": {"uz": "Ochiq ro'yxat", "ru": "Открытый список", "en": "Open list"},
     "btn_staff_table": {
@@ -126,20 +105,35 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Ошибка, попробуйте ещё раз.",
         "en": "Something went wrong, try again.",
     },
-    "toast_check_ok": {
-        "uz": "Tekshirildi. Endi kommentga o'tib mijozga javob bering, so'ng «Javob berdim»ni bosing.",
-        "ru": "Проверено. Откройте комментарий, ответьте клиенту, затем нажмите «Ответил».",
-        "en": "Marked reviewed. Open the comment, reply to the customer, then press «I replied».",
+    "toast_reply_claimed": {
+        "uz": "Tahlil qilinmoqda. Komment linki shu yerga yuborildi — mijozga reply qilib javob yozing, so'ng «Javob berdim»ni bosing.",
+        "ru": "Идёт разбор. Ссылка на комментарий отправлена — ответьте клиенту, затем «Ответил».",
+        "en": "In progress. Comment link sent — reply to the customer, then press «I replied».",
     },
-    "toast_check_cleared": {
-        "uz": "Belgi olib tashlandi — signal yana yangi holatda.",
-        "ru": "Отметка снята — сигнал снова новый.",
-        "en": "Cleared — signal is open again.",
+    "toast_already_replying": {
+        "uz": "{name} allaqachon javob bermoqda ({time}). Boshqa signal oling.",
+        "ru": "{name} уже отвечает ({time}). Возьмите другой сигнал.",
+        "en": "{name} is already handling this ({time}). Take another signal.",
     },
-    "toast_already_checked_by": {
-        "uz": "{name} allaqachon tekshirgan ({time}).",
-        "ru": "{name} уже проверил(а) ({time}).",
-        "en": "{name} already reviewed this ({time}).",
+    "toast_ai_verify_ok": {
+        "uz": "AI tasdiqladi: yordam yetarli. Signal yopildi.",
+        "ru": "AI подтвердил: помощь достаточна. Сигнал закрыт.",
+        "en": "AI confirmed: help was sufficient. Signal closed.",
+    },
+    "toast_ai_verify_fail": {
+        "uz": "AI: javob yetarli emas. Post o'zgarmadi, hisobga olinmadi. Sabab: {reason}",
+        "ru": "AI: ответа недостаточно. Пост без изменений. Причина: {reason}",
+        "en": "AI: reply not sufficient. Post unchanged. Reason: {reason}",
+    },
+    "toast_ai_verify_error": {
+        "uz": "AI tekshiruvi ishlamadi. Keyinroq qayta urinib ko'ring.",
+        "ru": "Проверка AI не удалась. Попробуйте позже.",
+        "en": "AI check failed. Try again later.",
+    },
+    "toast_need_reply_first": {
+        "uz": "Avval «Javob berish»ni bosing va kommentga o'ting.",
+        "ru": "Сначала нажмите «Ответить» и откройте комментарий.",
+        "en": "Press «Reply» first and open the comment.",
     },
     "toast_already_answered_by": {
         "uz": "{name} allaqachon javob bergan ({time}).",

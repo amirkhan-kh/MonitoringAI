@@ -1,19 +1,18 @@
-"""Staff-group workflow for reputation signals: review → reply → closed.
+"""Staff-group workflow for reputation signals: claim → reply → AI-verified close.
 
 The bot sits in the support team's Telegram group as an admin. Every risky mention is
-posted there as a card with two workflow buttons:
+posted there as a card with two workflow buttons only:
 
-  🔍 Tekshirildi   — someone reviewed the AI verdict (toggle; re-press un-checks)
-  💬 Javob berdim  — someone opened the link, replied to the customer, and closed it
+  💬 Javob berish  — claim the card ("Tahlil qilinmoqda…") and open the original comment
+                     on Telegram / YouTube / Instagram / Facebook (deep link / reply context)
+  ✅ Javob berdim  — staff finished helping; AI verifies quality before closing and credit
 
-and a deep link straight to the comment. The person's Telegram name is recorded, so the
-group always shows *who* handled *what*. A pinned summary message carries the number of
-signals still waiting for a reply — the "nothing is left unanswered" guarantee — and the
-SLA nudges in ``alerts.send_sla_reminders`` chase whatever crosses the deadline.
+No separate "Tekshirdim", plain URL, or platform open buttons — reply is the only path
+to the comment. A second staff member cannot steal a claimed card. After a successful
+AI verify the card shows who answered; if AI rejects, the card and credit stay unchanged.
 
-State always lives in the DB (AlertEvent.work_status + who/when columns); the Telegram
-message and the dashboard are two renderings of the same row, which is why a press in the
-group and a click in the dashboard converge instead of fighting.
+A pinned summary tracks open work; SLA nudges chase overdue cards. State lives in
+AlertEvent.work_status (+ who/when columns); Telegram and dashboard both render the row.
 """
 
 from __future__ import annotations
@@ -144,54 +143,37 @@ def apply_alert_action(
     actor: Actor,
     *,
     lang: str | None = None,
+    skip_ai_verify: bool = False,
 ) -> tuple[bool, str]:
     """Apply one workflow transition. Returns ``(state_changed, message_for_actor)``.
 
-    Two people tapping at the same moment is the normal case in a busy group, so the
-    caller locks the row first and every branch here is written to be safe to lose:
-    the first press wins and the second gets told who beat them to it.
-
     Actions:
-      * ``check``  — toggle reviewed ("Tekshirdim")
-      * ``open``   — claim review (tekshirilyapti) when staff opens the deep link
-      * ``answer`` — mark customer replied ("Javob berdim") with staff name/username
+      * ``reply``  — claim "Javob berish" (tahlil qilinmoqda) so only one staff handles it
+      * ``answer`` — "Javob berdim": AI verifies help quality; only then closes the card
       * ``reopen`` — undo a mistaken close
     """
     lang = lang or DEFAULT_LANG
     now = _utcnow()
     status = event.work_status or WORK_STATUS_OPEN
 
-    if action in {"check", "open"}:
+    if action in {"reply", "check", "open"}:  # legacy aliases → reply claim
         if status == WORK_STATUS_ANSWERED:
             return False, t("toast_closed_cannot_check", lang, name=event.answered_by or "-")
         if status == WORK_STATUS_CHECKED:
-            # "open" (via link) keeps the existing reviewer; "check" toggles for same person.
-            if action == "open":
-                return False, t(
-                    "toast_already_checked_by",
-                    lang,
-                    name=event.checked_by or "-",
-                    time=local_time_text(event.checked_at),
-                )
-            if event.checked_by_user_id and actor.user_id and event.checked_by_user_id != actor.user_id:
-                return False, t(
-                    "toast_already_checked_by",
-                    lang,
-                    name=event.checked_by or "-",
-                    time=local_time_text(event.checked_at),
-                )
-            event.work_status = WORK_STATUS_OPEN
-            event.checked_by = None
-            event.checked_by_user_id = None
-            event.checked_at = None
-            return True, t("toast_check_cleared", lang)
+            if event.checked_by_user_id and actor.user_id and event.checked_by_user_id == actor.user_id:
+                # Same person re-taps: keep claim, re-share link instruction.
+                return True, t("toast_reply_claimed", lang)
+            return False, t(
+                "toast_already_replying",
+                lang,
+                name=event.checked_by or "-",
+                time=local_time_text(event.checked_at),
+            )
         event.work_status = WORK_STATUS_CHECKED
         event.checked_by = actor.name
         event.checked_by_user_id = actor.user_id
         event.checked_at = now
-        if action == "open":
-            return True, t("toast_opening_link", lang)
-        return True, t("toast_check_ok", lang)
+        return True, t("toast_reply_claimed", lang)
 
     if action == "answer":
         if status == WORK_STATUS_ANSWERED:
@@ -204,31 +186,135 @@ def apply_alert_action(
                 name=event.answered_by or "-",
                 time=local_time_text(event.answered_at),
             )
+        # Another staff member already claimed "Javob berish" — do not let others close it.
+        if status == WORK_STATUS_CHECKED:
+            if (
+                event.checked_by_user_id
+                and actor.user_id
+                and event.checked_by_user_id != actor.user_id
+            ):
+                return False, t(
+                    "toast_already_replying",
+                    lang,
+                    name=event.checked_by or "-",
+                    time=local_time_text(event.checked_at),
+                )
+
+        # AI gate: on failure leave the card completely unchanged (no credit, no rename).
+        if not skip_ai_verify:
+            ok, reason = verify_staff_resolution(event, actor)
+            if not ok:
+                return False, t("toast_ai_verify_fail", lang, reason=reason or "-")
+
         event.work_status = WORK_STATUS_ANSWERED
         event.answered_by = actor.name
         event.answered_by_user_id = actor.user_id
         event.answered_at = now
-        # Replying necessarily means the verdict was read, so a card can never end up
-        # "answered but never checked" — which would read as a hole in the audit trail.
         if not event.checked_by:
             event.checked_by = actor.name
             event.checked_by_user_id = actor.user_id
             event.checked_at = now
-        return True, t("toast_closed", lang)
+        payload = dict(event.payload or {})
+        payload["staff_resolution_verified"] = True
+        payload["staff_resolution_by"] = actor.name
+        payload["staff_resolution_at"] = now.isoformat()
+        event.payload = payload
+        return True, t("toast_ai_verify_ok", lang)
 
     if action == "reopen":
         if status != WORK_STATUS_ANSWERED:
             return False, t("toast_already_open", lang)
-        event.work_status = WORK_STATUS_CHECKED if event.checked_by else WORK_STATUS_OPEN
+        event.work_status = WORK_STATUS_OPEN
         event.answered_by = None
         event.answered_by_user_id = None
         event.answered_at = None
-        # Give the SLA clock a fresh start instead of instantly re-nudging a reopened card.
+        event.checked_by = None
+        event.checked_by_user_id = None
+        event.checked_at = None
         event.reminder_count = 0
         event.reminded_at = None
         return True, t("toast_reopened", lang, name=actor.name)
 
     return False, t("toast_unknown_action", lang)
+
+
+def verify_staff_resolution(event: AlertEvent, actor: Actor) -> tuple[bool, str]:
+    """Ask Gemini whether the staff likely resolved the customer's request.
+
+    We do not yet scrape the live platform reply, so evidence is the original mention,
+    AI summary, suggested action, and how long the card was claimed. Fail-closed on
+    model/provider errors so accidental closes do not credit staff.
+    """
+    import json
+
+    from app.config import get_settings
+    from app.services.gemini_analysis import create_gemini_client
+
+    settings = get_settings()
+    payload = event.payload or {}
+    claimed_at = _as_utc(event.checked_at)
+    minutes = max(0, int((_utcnow() - claimed_at).total_seconds() // 60)) if claimed_at else 0
+    prompt = {
+        "task": (
+            "Support xodim platformadagi kommentga javob berib mijozga yordam berganini "
+            "da'vo qilmoqda (Telegram/YouTube/Instagram/Facebook). Aniq javob matni yo'q. "
+            "Mijoz matni, xulosa va tavsiya asosida: odatiy support javobi bilan muammo "
+            "yechilishi mumkinmi? Standard savollar (buyurtma, yetkazish, refund, aloqa, "
+            "ma'lumot) va aniq suggested_action bo'lsa resolved=true mumkin. "
+            "Haqorat/faqat shikoyat, yechib bo'lmaydigan siyosiy/huquqiy tahdid yoki "
+            "umuman yordam berib bo'lmaydigan holatda false. minutes_since_claim=0 bo'lsa "
+            "biroz qattiqroq baholang."
+        ),
+        "platform": payload.get("platform"),
+        "author": payload.get("author"),
+        "customer_text": payload.get("text"),
+        "ai_summary": payload.get("summary"),
+        "suggested_action": payload.get("suggested_action"),
+        "risk_level": payload.get("risk_level"),
+        "sentiment": payload.get("sentiment"),
+        "staff_name": actor.name,
+        "minutes_since_claim": minutes,
+        "was_claimed": bool(claimed_at),
+    }
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "resolved": {"type": "BOOLEAN"},
+            "reason": {"type": "STRING"},
+            "confidence": {"type": "NUMBER"},
+        },
+        "required": ["resolved", "reason", "confidence"],
+    }
+    try:
+        from google.genai import types
+
+        client = create_gemini_client(settings)
+        response = client.models.generate_content(
+            model=settings.gemini_analysis_model,
+            contents=json.dumps(prompt, ensure_ascii=False),
+            config=types.GenerateContentConfig(
+                system_instruction=(
+                    "Siz brend support sifatini tekshiruvchi auditor AI'siz. "
+                    "Faqat JSON qaytaring. resolved=true — mijozga yordam berish "
+                    "realistik va xodim ishni yakunlagan deb hisoblash mumkin bo'lsa."
+                ),
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.1,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        text = (getattr(response, "text", None) or "").strip()
+        data = json.loads(text) if text else {}
+        resolved = bool(data.get("resolved"))
+        reason = str(data.get("reason") or "").strip() or ("ok" if resolved else "sabab ko'rsatilmadi")
+        confidence = float(data.get("confidence") or 0)
+        if resolved and confidence < 0.4:
+            return False, f"ishonch past ({confidence:.2f}): {reason}"
+        return resolved, reason
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Staff resolution AI verify failed: %s", exc)
+        return False, "AI tekshiruvi xatosi"
 
 
 def publish_alert_event(session: Session, event: AlertEvent, *, commit: bool = True) -> None:
@@ -322,46 +408,14 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
         sync_summary_message(api, session, settings, force=True)
         return True
 
-    # Event actions: alert:check|open|answer|reopen:<uuid>
+    # Event actions: alert:reply|answer|reopen:<uuid> (legacy check/open → reply)
+    if action in {"check", "open"}:
+        action = "reply"
     event_id = parts[2] if len(parts) > 2 else ""
     try:
         event_uuid = UUID(event_id)
     except (ValueError, AttributeError):
         _safe_answer(api, callback_id, t("toast_not_found", lang))
-        return True
-
-    if action == "open":
-        # Deep-link claim: mark "tekshirilyapti" then guide staff to the URL button.
-        actor = actor_from_telegram_user(callback.get("from"))
-        try:
-            event = (
-                session.query(AlertEvent)
-                .filter(AlertEvent.id == event_uuid)
-                .with_for_update()
-                .one_or_none()
-            )
-            if event is None:
-                session.rollback()
-                _safe_answer(api, callback_id, t("toast_not_found", lang))
-                return True
-            permalink = (event.payload or {}).get("permalink")
-            if not permalink:
-                session.rollback()
-                _safe_answer(api, callback_id, t("toast_no_link", lang), show_alert=True)
-                return True
-            changed, response = apply_alert_action(session, event, "open", actor, lang=lang)
-            if changed:
-                publish_alert_event(session, event, commit=False)
-            session.commit()
-        except Exception:  # noqa: BLE001
-            session.rollback()
-            logger.exception("Alert open callback failed data=%s", data)
-            _safe_answer(api, callback_id, t("toast_error", lang))
-            return True
-        _safe_answer(api, callback_id, response, show_alert=True)
-        if changed:
-            refresh_alert_card(api, event, lang=lang)
-            sync_summary_message(api, session, settings, force=True)
         return True
 
     actor = actor_from_telegram_user(callback.get("from"))
@@ -386,11 +440,48 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
         _safe_answer(api, callback_id, t("toast_error", lang))
         return True
 
-    _safe_answer(api, callback_id, response)
-    if changed:
+    # "Javob berish": claim + deep-link to original platform comment (reply context).
+    if action == "reply" and (changed or event.work_status == WORK_STATUS_CHECKED):
+        permalink = (event.payload or {}).get("permalink")
+        platform = (event.payload or {}).get("platform") or ""
+        if permalink:
+            _safe_answer(api, callback_id, response, show_alert=True)
+            _deliver_comment_link(api, actor, permalink, platform=platform, card_chat_id=chat_id)
+        else:
+            _safe_answer(api, callback_id, t("toast_no_link", lang), show_alert=True)
+    else:
+        _safe_answer(api, callback_id, response, show_alert=action == "answer")
+
+    if changed or action in {"reply", "answer"}:
         refresh_alert_card(api, event, lang=lang)
-        sync_summary_message(api, session, settings, force=True)
+        if changed:
+            sync_summary_message(api, session, settings, force=True)
     return True
+
+
+def _deliver_comment_link(
+    api: TelegramBotApi,
+    actor: Actor,
+    permalink: str,
+    *,
+    platform: str,
+    card_chat_id: Any,
+) -> None:
+    """Send deep link so staff opens the original comment in reply context."""
+    platform_name = platform or "platform"
+    text = (
+        f"💬 Javob berish — {platform_name}\n"
+        f"Kommentga o'ting (reply/otvet holatida):\n{permalink}\n\n"
+        "Mijoz bilan suhbatni yakunlab Supports guruhiga qayting va «Javob berdim»ni bosing."
+    )
+    # Prefer private DM so the group stays clean; fall back to a short group note.
+    if actor.user_id:
+        try:
+            api.send_message(actor.user_id, text)
+            return
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not DM staff user_id=%s", actor.user_id, exc_info=True)
+    _safe_send(api, card_chat_id, f"{actor.name}:\n{text}")
 
 
 def _is_staff_chat(session: Session | None, settings: Settings, chat_id: Any) -> bool:

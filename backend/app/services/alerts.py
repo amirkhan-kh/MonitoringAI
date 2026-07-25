@@ -8,10 +8,10 @@ Design for "always correct":
   2. A separate dispatcher (alert_worker) delivers pending/failed alerts with retry
      and rate-limiting, then marks them sent/abandoned.
   3. Idempotent: one alert per (platform, mention) via a payload dedup key.
-  4. Every delivered card carries inline buttons, so the staff group closes the loop:
-     who reviewed the AI verdict, and who actually replied to the customer. That state
-     lives in DB columns (see AlertEvent.work_status), not in the message text — the
-     message is only a rendering of it, and can be re-rendered at any time.
+  4. Every delivered card carries two inline buttons only: «Javob berish» (claim +
+     deep-link to the original platform comment) and «Javob berdim» (AI-verified close
+     with staff credit). State lives in DB columns (AlertEvent.work_status + who/when);
+     the Telegram message is a re-renderable view of that row.
 """
 
 from __future__ import annotations
@@ -199,9 +199,10 @@ def build_alert_text(payload: dict, event: AlertEvent | None = None, *, lang: st
 
 
 def build_status_lines(event: AlertEvent, *, lang: str | None = None) -> list[str]:
-    """The workflow footer: always says whether a human has closed this signal."""
+    """The workflow footer: open → tahlil qilinmoqda → javob berildi."""
     lang = lang or DEFAULT_LANG
     work_status = event.work_status or WORK_STATUS_OPEN
+    payload = event.payload or {}
     lines: list[str] = []
     if work_status == WORK_STATUS_ANSWERED:
         answered_at = _as_utc(event.answered_at)
@@ -212,72 +213,44 @@ def build_status_lines(event: AlertEvent, *, lang: str | None = None) -> list[st
             f"👤 {t('answered_by', lang)}: {event.answered_by or '-'} · "
             f"{local_time_text(event.answered_at)} · {t('duration', lang)}: {took}"
         )
-        if event.checked_by and event.checked_by != event.answered_by:
-            lines.append(
-                f"🔎 {t('checked_by', lang)}: {event.checked_by} · {local_time_text(event.checked_at)}"
-            )
     elif work_status == WORK_STATUS_CHECKED:
-        lines.append(f"📌 {t('status', lang)}: 👀 {t('status_checking', lang)}")
+        lines.append(f"📌 {t('status', lang)}: ⏳ {t('status_checking', lang)}")
         lines.append(
-            f"🔎 {t('checked_by', lang)}: {event.checked_by or '-'} · {local_time_text(event.checked_at)}"
+            f"👤 {event.checked_by or '-'} · {local_time_text(event.checked_at)}"
         )
-        lines.append(f"⏳ {t('status_waiting_reply', lang)}")
+        lines.append(f"💬 {t('status_waiting_reply', lang)}")
+        permalink = payload.get("permalink")
+        if permalink:
+            lines.append(f"🔗 {t('status_open_link', lang)}: {permalink}")
     else:
         lines.append(f"📌 {t('status', lang)}: 🆕 {t('status_open', lang)}")
     return lines
 
 
 def build_alert_keyboard(event: AlertEvent, *, lang: str | None = None) -> dict:
-    """Inline buttons under the card.
-
-    Layout (open):
-      [ 🔍 Tekshirdim ] [ 💬 Javob berdim ]
-      [ 🔗 Havola orqali ochish ]   ← claims review (tekshirilyapti)
-      [ 🌐 Platform comment link ]  ← direct deep link to original comment
-    """
+    """Only two staff actions: Javob berish (claim + open) and Javob berdim (AI verify + close)."""
     lang = lang or DEFAULT_LANG
     work_status = event.work_status or WORK_STATUS_OPEN
     event_id = str(event.id)
-    payload = event.payload or {}
-    platform = payload.get("platform")
-    permalink = payload.get("permalink")
 
     if work_status == WORK_STATUS_ANSWERED:
-        rows: list[list[dict[str, str]]] = [
-            [{"text": f"↩️ {t('btn_reopen', lang)}", "callback_data": f"alert:reopen:{event_id}"}]
-        ]
-    else:
-        checked = work_status == WORK_STATUS_CHECKED
-        if checked:
-            check_label = f"☑️ {t('btn_checked', lang)} · {_short_name(event.checked_by)}"
-        else:
-            check_label = f"🔍 {t('btn_check', lang)}"
-        rows = [
-            [
-                {"text": check_label, "callback_data": f"alert:check:{event_id}"},
-                {"text": f"💬 {t('btn_answer', lang)}", "callback_data": f"alert:answer:{event_id}"},
+        return {
+            "inline_keyboard": [
+                [{"text": f"↩️ {t('btn_reopen', lang)}", "callback_data": f"alert:reopen:{event_id}"}]
             ]
-        ]
-        if permalink:
-            rows.append(
-                [
-                    {
-                        "text": f"🔗 {t('btn_claim_and_open', lang)}",
-                        "callback_data": f"alert:open:{event_id}",
-                    }
-                ]
-            )
+        }
 
-    if permalink:
-        rows.append(
-            [
-                {
-                    "text": f"🌐 {open_link_label(platform, lang)}",
-                    "url": permalink,
-                }
-            ]
-        )
-    return {"inline_keyboard": rows}
+    if work_status == WORK_STATUS_CHECKED:
+        reply_label = f"⏳ {t('btn_replying', lang)} · {_short_name(event.checked_by)}"
+    else:
+        reply_label = f"💬 {t('btn_reply', lang)}"
+
+    return {
+        "inline_keyboard": [
+            [{"text": reply_label, "callback_data": f"alert:reply:{event_id}"}],
+            [{"text": f"✅ {t('btn_answer', lang)}", "callback_data": f"alert:answer:{event_id}"}],
+        ]
+    }
 
 
 def _short_name(name: str | None, limit: int = 14) -> str:
