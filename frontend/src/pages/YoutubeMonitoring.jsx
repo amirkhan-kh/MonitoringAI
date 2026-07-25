@@ -463,7 +463,7 @@ export function YoutubeMonitoring() {
         <section className="panel activeBrandToolbar">
           <div>
             <strong>Faol brand</strong>
-            <p>YouTube kanal va ma'lumotlar faqat shu tanlangan brandga ulanadi.</p>
+            <p>Faqat shu brand bo‘yicha YouTube ma’lumotlari.</p>
           </div>
           <SmartSelect
             value={selectedBrandId}
@@ -474,7 +474,7 @@ export function YoutubeMonitoring() {
           />
           <a className="button secondary linkButton" href="/profile">
             <Link2 size={16} />
-            <span>Brand sozlamalari</span>
+            <span>Profil</span>
           </a>
         </section>
 

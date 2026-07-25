@@ -1,25 +1,39 @@
-# Design references (vendored)
+# Design references (vendored + project north star)
 
 Bu papkadagi `*-DESIGN.md` fayllar — MonitoringAI redizayni uchun **konkret token tizimi
-namunalari**. Ular Grok/Claude dizayn ishlaganda "qanday ko'rinishga intilamiz" degan
-savolga aniq javob beradi (surface ladder, hairline border, radius, accent intizomi,
-tipografiya).
+namunalari**. Ular agent dizayn ishlaganda "qanday ko'rinishga intilamiz" degan savolga
+aniq javob beradi.
 
-## Fayllar va nega olindi
-- `raycast-DESIGN.md` — **dark-first chuqurlik** namunasi. Pure near-black kanvas, surface
-  ladder (#07080a → #0d0d0d → #101111), 6–10px radius, 1px hairline border, kam va nuqtali
-  accent. MonitoringAI'ning dark-first shell'i uchun asosiy ilhom.
-- `vercel-DESIGN.md` — **minimalist border+token** namunasi. Kartalarni shadow emas, 1px
-  border bilan ajratish; bitta neutral kulrang shkala + bitta accent.
-- `stripe-DESIGN.md` — **KPI/metrika kartasi va dashboard shell** namunasi. Katta raqam +
-  trend delta + tabular-figure; dashboard qismida dark shell'ga o'tish.
+## Ustuvorlik (2026-07-25)
+
+| Ustunlik | Fayl | Nima uchun |
+|----------|------|------------|
+| **1 — PRIMARY (product shell)** | `agentos-dashboard-DESIGN.md` | AgentOS screenshot **tuzilmasi** + **hue-agnostic** rang: neytral dark gray ladder, bitta almashtiriladigan accent (yashil majburiy emas). |
+| 2 | `raycast-DESIGN.md` | Near-black surface ladder, hairline, radius intizomi. |
+| 3 | `stripe-DESIGN.md` | KPI: katta raqam + delta + tabular-nums. |
+| 4 | `vercel-DESIGN.md` | Marketing light minimal (Landing/legal yordamchi). |
+
+## Qisqa xulosa — AgentOS (PRIMARY)
+
+- Dark **neytral** sirt zinalari (yashil cast yo‘q — har qanday accentga mos).
+- Chrome uchun **bitta accent token** (indigo/cyan/rose/amber/emerald/… — tanlov erkin).
+- Soft holatlar = accent + opacity/`color-mix` → barcha ranglarga mos.
+- Multi-rang faqat chart seriyalarida; platforma ranglari faqat data.
+- Panel = raised + hairline; KPI = katta raqam + delta + mini-chart.
+- Dial’lar: variance 4–5, motion 3–4, density 7–8.
 
 ## Manba va litsenziya
-Manba: https://github.com/VoltAgent/awesome-design-md (MIT). 2026-07-24 da olindi.
-Bu fayllar **referens** (o'qib ilhom olish uchun), ijro etiladigan kod emas.
+
+- `raycast` / `vercel` / `stripe`: https://github.com/VoltAgent/awesome-design-md (MIT), 2026-07-24.
+- `agentos-dashboard-DESIGN.md`: foydalanuvchi screenshotidan **original tahlil** (2026-07-25).
+  Bu fayllar **referens** — ijro etiladigan kod emas.
 
 ## Qanday ishlatiladi
-Dizayn brifidagi ([[../../../docs/01-planning/grok-brief-01-dizayn.md]]) yo'nalish bilan
-birga o'qing. Bularni ko'r-ko'rona nusxalamang — MonitoringAI'ning o'z brend identifikatsiyasi
-(indigo→pink→cyan gradient) saqlanadi, bu fayllardan faqat *tamoyil* (chuqurlik, intizom,
-tipografiya) olinadi.
+
+1. `docs/01-planning/design-direction-agentos-cockpit.md` — joriy yo‘nalish brifi.
+2. `docs/01-planning/dizayn-tizimi.md` — v3 draft tokenlar (**kodga hali yozilmagan**).
+3. `.agents/skills/design-taste-frontend/SKILL.md` — anti-slop + **Dashboard / AgentOS** bo‘limi.
+4. **UI o‘zgartirishni boshlama** — foydalanuvchi qo‘shimcha brif beradi va ochiq buyruq beradi.
+
+Bularni ko‘r-ko‘rona nusxalamang. MonitoringAI brendi (ma’lumot, platformalar, o‘zbekcha
+matn ma’nosi) saqlanadi; AgentOS dan **tamoyil va estetik intizom** olinadi.

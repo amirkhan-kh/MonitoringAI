@@ -9,7 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { formatUiDate } from "../i18n";
+import { formatUiDate, translateUiText, useUiLanguage } from "../i18n";
 
 const sourceTypeLabels = {
   channel_post: "Kanal posti",
@@ -75,12 +75,14 @@ function formatDate(value) {
   return formatUiDate(value, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-function sourceTypeLabel(value) {
-  return sourceTypeLabels[value] || value || "Xabar";
+function sourceTypeLabel(value, lng) {
+  const key = sourceTypeLabels[value] || value || "Xabar";
+  return translateUiText(key, { lng });
 }
 
-function mediaTypeLabel(value) {
-  return mediaTypeLabels[value] || value;
+function mediaTypeLabel(value, lng) {
+  const key = mediaTypeLabels[value] || value;
+  return key ? translateUiText(key, { lng }) : key;
 }
 
 function SentimentIcon({ sentiment }) {
@@ -112,10 +114,12 @@ export function RecentMentions({
   mentions = [],
   loading = false,
   title = "Oxirgi mentionlar",
-  description = "Telegram post, comment va bot message oqimi.",
+  description = "Post, comment va bot oqimi.",
   emptyText = "Mention yo'q",
   sentimentFilter = null,
 }) {
+  const lng = useUiLanguage();
+  const tt = (value) => translateUiText(value, { lng });
   const [selectedMention, setSelectedMention] = useState(null);
   const rows = useMemo(
     () => filterMentionsBySentiment(mentions, sentimentFilter),
@@ -133,8 +137,8 @@ export function RecentMentions({
             </>
           ) : (
             <>
-              <h2>{title}</h2>
-              <p>{description}</p>
+              <h2 data-i18n-ignore="true">{tt(title)}</h2>
+              <p data-i18n-ignore="true">{tt(description)}</p>
             </>
           )}
         </div>
@@ -166,47 +170,55 @@ export function RecentMentions({
                 <strong>{sourceLabel(mention)}</strong>
                 {mentionText(mention)
                   ? <p data-i18n-ignore="true">{mentionText(mention)}</p>
-                  : <p>Matn yo'q</p>}
+                  : <p data-i18n-ignore="true">{tt("Matn yo'q")}</p>}
                 <div className="mentionBadgeRow">
-                  {mention.media_type && <span>{mediaTypeLabel(mention.media_type)}</span>}
-                  {!!mention.brand_match_terms?.length && <span className="warning">Brand signal</span>}
+                  {mention.media_type && (
+                    <span data-i18n-ignore="true">{mediaTypeLabel(mention.media_type, lng)}</span>
+                  )}
+                  {!!mention.brand_match_terms?.length && (
+                    <span className="warning" data-i18n-ignore="true">{tt("Brand signal")}</span>
+                  )}
                 </div>
                 {mention.analysis && !mention.analysis.error ? (
                   <div className="mentionAnalysis">
                     <div className="mentionBadgeRow">
                       {mention.analysis.sentiment && (
-                        <span className={`sentimentBadge ${mention.analysis.sentiment}`}>
+                        <span className={`sentimentBadge ${mention.analysis.sentiment}`} data-i18n-ignore="true">
                           <SentimentIcon sentiment={mention.analysis.sentiment} />
-                          {sentimentLabels[mention.analysis.sentiment] || mention.analysis.sentiment}
+                          {tt(sentimentLabels[mention.analysis.sentiment] || mention.analysis.sentiment)}
                           {typeof mention.analysis.sentiment_score === "number"
                             ? ` · ${mention.analysis.sentiment_score.toFixed(2)}`
                             : ""}
                         </span>
                       )}
                       {mention.analysis.risk_level && (
-                        <span className={`riskBadge ${mention.analysis.risk_level}`}>
+                        <span className={`riskBadge ${mention.analysis.risk_level}`} data-i18n-ignore="true">
                           <RiskIcon level={mention.analysis.risk_level} />
-                          {riskLabels[mention.analysis.risk_level] || mention.analysis.risk_level}
+                          {tt(riskLabels[mention.analysis.risk_level] || mention.analysis.risk_level)}
                         </span>
                       )}
                     </div>
-                    {mention.analysis.summary && <p className="mentionSummary">{mention.analysis.summary}</p>}
-                    {mention.analysis.suggested_action && <p className="mentionAction">{mention.analysis.suggested_action}</p>}
+                    {mention.analysis.summary && (
+                      <p className="mentionSummary" data-i18n-ignore="true">{mention.analysis.summary}</p>
+                    )}
+                    {mention.analysis.suggested_action && (
+                      <p className="mentionAction" data-i18n-ignore="true">{mention.analysis.suggested_action}</p>
+                    )}
                   </div>
                 ) : (
-                  <span className="mentionPending">AI tahlil kutilmoqda…</span>
+                  <span className="mentionPending" data-i18n-ignore="true">{tt("AI tahlil kutilmoqda…")}</span>
                 )}
               </div>
               <span className="mentionMeta">
-                <em title={mention.source_type || mention.item_type}>
-                  {sourceTypeLabel(mention.source_type || mention.item_type)}
+                <em title={mention.source_type || mention.item_type} data-i18n-ignore="true">
+                  {sourceTypeLabel(mention.source_type || mention.item_type, lng)}
                 </em>
-                <small title="Mention vaqti">{formatDate(mentionDate(mention))}</small>
+                <small title={tt("Mention vaqti")}>{formatDate(mentionDate(mention))}</small>
               </span>
             </button>
           ))
         ) : (
-          <div className="empty">{emptyText}</div>
+          <div className="empty" data-i18n-ignore="true">{tt(emptyText)}</div>
         )}
       </div>
 
@@ -222,12 +234,17 @@ export function RecentMentions({
             <div className="modalHeader">
               <div>
                 <h2 id="mention-detail-title">{sourceLabel(selectedMention)}</h2>
-                <p>
-                  {sourceTypeLabel(selectedMention.source_type || selectedMention.item_type)} ·{" "}
+                <p data-i18n-ignore="true">
+                  {sourceTypeLabel(selectedMention.source_type || selectedMention.item_type, lng)} ·{" "}
                   {formatDate(mentionDate(selectedMention))}
                 </p>
               </div>
-              <button className="iconButton" type="button" aria-label="Yopish" onClick={() => setSelectedMention(null)}>
+              <button
+                className="iconButton"
+                type="button"
+                aria-label={tt("Yopish")}
+                onClick={() => setSelectedMention(null)}
+              >
                 <X size={18} />
               </button>
             </div>
@@ -243,23 +260,27 @@ export function RecentMentions({
               )}
               {mentionText(selectedMention)
                 ? <p data-i18n-ignore="true">{mentionText(selectedMention)}</p>
-                : <p>Bu mentionda matn topilmadi.</p>}
+                : <p data-i18n-ignore="true">{tt("Bu mentionda matn topilmadi.")}</p>}
               {selectedMention.analysis && !selectedMention.analysis.error && (
                 <div className="mentionAnalysis modalAnalysis">
                   <div className="mentionBadgeRow">
                     {selectedMention.analysis.sentiment && (
-                      <span className={`sentimentBadge ${selectedMention.analysis.sentiment}`}>
-                        {sentimentLabels[selectedMention.analysis.sentiment] || selectedMention.analysis.sentiment}
+                      <span className={`sentimentBadge ${selectedMention.analysis.sentiment}`} data-i18n-ignore="true">
+                        {tt(sentimentLabels[selectedMention.analysis.sentiment] || selectedMention.analysis.sentiment)}
                       </span>
                     )}
                     {selectedMention.analysis.risk_level && (
-                      <span className={`riskBadge ${selectedMention.analysis.risk_level}`}>
-                        {riskLabels[selectedMention.analysis.risk_level] || selectedMention.analysis.risk_level}
+                      <span className={`riskBadge ${selectedMention.analysis.risk_level}`} data-i18n-ignore="true">
+                        {tt(riskLabels[selectedMention.analysis.risk_level] || selectedMention.analysis.risk_level)}
                       </span>
                     )}
                   </div>
-                  {selectedMention.analysis.summary && <p className="mentionSummary">{selectedMention.analysis.summary}</p>}
-                  {selectedMention.analysis.suggested_action && <p className="mentionAction">{selectedMention.analysis.suggested_action}</p>}
+                  {selectedMention.analysis.summary && (
+                    <p className="mentionSummary" data-i18n-ignore="true">{selectedMention.analysis.summary}</p>
+                  )}
+                  {selectedMention.analysis.suggested_action && (
+                    <p className="mentionAction" data-i18n-ignore="true">{selectedMention.analysis.suggested_action}</p>
+                  )}
                 </div>
               )}
             </div>
@@ -272,15 +293,26 @@ export function RecentMentions({
 
 /** Pair of analysis-filtered mention panels for any monitoring page. */
 export function MentionsAnalysisPanels({ mentions = [], loading = false, platformLabel = "" }) {
-  const suffix = platformLabel ? ` · ${platformLabel}` : "";
+  const lng = useUiLanguage();
+  const tt = (value) => translateUiText(value, { lng });
+  const platform = platformLabel ? translateUiText(platformLabel, { lng }) : "";
+  const positiveDesc = platform
+    ? `${tt("AI tahlilidan ijobiy mentionlar")} · ${platform}`
+    : tt("AI tahlilidan ijobiy mentionlar");
+  const negativeDesc = platform
+    ? `${tt("AI tahlilidan salbiy mentionlar")} · ${platform}`
+    : tt("AI tahlilidan salbiy mentionlar");
   return (
-    <section className="mentionsAnalysisGrid" aria-label="AI tahlil bo'yicha maqtov va shikoyat">
+    <section
+      className="mentionsAnalysisGrid"
+      aria-label={tt("AI tahlil bo'yicha maqtov va shikoyat")}
+    >
       <RecentMentions
         mentions={mentions}
         loading={loading}
         sentimentFilter="positive"
         title="Maqtovlar"
-        description={`AI tahlilidan ijobiy mentionlar${suffix}`}
+        description={positiveDesc}
         emptyText="Maqtov topilmadi"
       />
       <RecentMentions
@@ -288,7 +320,7 @@ export function MentionsAnalysisPanels({ mentions = [], loading = false, platfor
         loading={loading}
         sentimentFilter="negative"
         title="Shikoyatlar"
-        description={`AI tahlilidan salbiy mentionlar${suffix}`}
+        description={negativeDesc}
         emptyText="Shikoyat topilmadi"
       />
     </section>

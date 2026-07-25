@@ -21,7 +21,8 @@ import { PageHeader } from "../components/PageHeader";
 import { Sidebar } from "../components/Sidebar";
 import { StatsBar } from "../components/StatsBar";
 import { TelegramIcon, YouTubeIcon } from "../components/BrandIcons";
-import { MentionTrendChart, PlatformTrendChart } from "../components/TrendChart";
+import { PercentGauge, PlatformShareChart, PlatformTrendChart } from "../components/TrendChart";
+import { translateUiText, useUiLanguage } from "../i18n";
 
 const periodOptions = [
   { key: "day", label: "Kun", value: 1, interval: "hour" },
@@ -84,7 +85,7 @@ function changeLabel(value) {
   return `${value}%`;
 }
 
-function platformCoverageDetail(ai) {
+function platformCoverageDetail(ai, lng) {
   const platformLabels = {
     telegram: "Telegram",
     youtube: "YouTube",
@@ -94,15 +95,21 @@ function platformCoverageDetail(ai) {
   const platforms = ai?.platforms || {};
   const rows = Object.entries(platforms)
     .filter(([, metric]) => (metric?.mentions || 0) > 0)
-    .map(([platform, metric]) => `${platformLabels[platform] || platform}: ${percent(metric.coverage || 0)}`);
-  return rows.length ? rows.join(" · ") : "AI tahlil uchun mention yo'q";
+    .map(([platform, metric]) => {
+      const name = translateUiText(platformLabels[platform] || platform, { lng });
+      return `${name}: ${percent(metric.coverage || 0)}`;
+    });
+  return rows.length
+    ? rows.join(" · ")
+    : translateUiText("AI tahlil uchun mention yo'q", { lng });
 }
 
-function reliabilityDetail(ai) {
+function reliabilityDetail(ai, lng) {
   const failed = ai?.failed_mentions || 0;
   const processed = ai?.processed_mentions || 0;
   const balance = percent(ai?.platform_balance || 0);
-  return processed ? `Processed ${processed} · Xato ${failed} · Balans ${balance}` : "Hali AI tahlil yo'q";
+  if (!processed) return translateUiText("Hali AI tahlil yo'q", { lng });
+  return translateUiText(`Processed ${processed} · Xato ${failed} · Balans ${balance}`, { lng });
 }
 
 function trendIcon(direction) {
@@ -144,7 +151,8 @@ function buildChartModel(rows, seriesList = chartSeries) {
   return { width, height, pad, plotWidth, plotHeight, points, pointList, yTicks, xLabels };
 }
 
-function DashboardLineChart({ rows, period }) {
+function DashboardLineChart({ rows, period, lng }) {
+  const tt = (value) => translateUiText(value, { lng });
   const safeRows = rows || [];
   const totals = chartSeries.reduce((acc, series) => {
     acc[series.key] = safeRows.reduce((sum, row) => sum + (row[series.key] || 0), 0);
@@ -154,57 +162,72 @@ function DashboardLineChart({ rows, period }) {
     (best, row) => ((row.total || 0) > (best.total || 0) ? row : best),
     safeRows[0] || { total: 0, label: "-" },
   );
+  const shareTotals = {
+    telegram: totals.telegram || 0,
+    youtube: totals.youtube || 0,
+    instagram: totals.instagram || 0,
+    facebook: totals.facebook || 0,
+  };
+  const intervalText = tt(intervalLabels[period?.interval] || "Kunlik");
 
   return (
-    <div className="analyticsChart" aria-label="Mention trend chart">
-      <MentionTrendChart rows={safeRows} />
-      <div className="chartLegend">
-        {chartSeries.map((series) => (
-          <span key={series.key}><i className={series.tone} /> {series.label}</span>
-        ))}
-        <span className="chartTimezone">
-          {intervalLabels[period?.interval] || "Kunlik"} · {period?.timezone || "Asia/Tashkent"} {period?.utc_offset || "+05:00"}
+    <div className="analyticsChart" aria-label={tt("Platforma ulushi diagrammasi")}>
+      <PlatformShareChart totals={shareTotals} height={248} />
+      <div className="chartLegend chartLegend--share">
+        {chartSeries
+          .filter((series) => series.key !== "total")
+          .map((series) => (
+            <span key={series.key} data-i18n-ignore="true">
+              <i className={series.tone} /> {tt(series.label)}
+            </span>
+          ))}
+        <span className="chartTimezone" data-i18n-ignore="true">
+          {intervalText} · {period?.timezone || "Asia/Tashkent"} {period?.utc_offset || "+05:00"}
         </span>
       </div>
       <div className="chartSummary">
-        <span className="total">Jami <strong>{compactNumber(totals.total)}</strong></span>
-        <span className="telegram">Telegram <strong>{compactNumber(totals.telegram)}</strong></span>
-        <span className="youtube">YouTube <strong>{compactNumber(totals.youtube)}</strong></span>
-        <span className="instagram">Instagram <strong>{compactNumber(totals.instagram)}</strong></span>
-        <span className="facebook">Facebook <strong>{compactNumber(totals.facebook)}</strong></span>
-        <span>Pik davr <strong>{peak.label || "-"}</strong> · {compactNumber(peak.total)}</span>
+        <span className="total" data-i18n-ignore="true">{tt("Jami")} <strong>{compactNumber(totals.total)}</strong></span>
+        <span className="telegram" data-i18n-ignore="true">{tt("Telegram")} <strong>{compactNumber(totals.telegram)}</strong></span>
+        <span className="youtube" data-i18n-ignore="true">{tt("YouTube")} <strong>{compactNumber(totals.youtube)}</strong></span>
+        <span className="instagram" data-i18n-ignore="true">{tt("Instagram")} <strong>{compactNumber(totals.instagram)}</strong></span>
+        <span className="facebook" data-i18n-ignore="true">{tt("Facebook")} <strong>{compactNumber(totals.facebook)}</strong></span>
+        <span data-i18n-ignore="true">{tt("Pik davr")} <strong>{peak.label || "-"}</strong> · {compactNumber(peak.total)}</span>
       </div>
     </div>
   );
 }
 
-function SinglePlatformChart({ rows, series, period }) {
+function SinglePlatformChart({ rows, series, period, lng }) {
+  const tt = (value) => translateUiText(value, { lng });
   const safeRows = rows || [];
   const total = safeRows.reduce((sum, row) => sum + (row[series.key] || 0), 0);
   const peak = safeRows.reduce(
     (best, row) => ((row[series.key] || 0) > (best[series.key] || 0) ? row : best),
     safeRows[0] || { [series.key]: 0, label: "-" },
   );
+  const seriesLabel = tt(series.label);
+  const intervalText = tt(intervalLabels[period?.interval] || "Kunlik");
 
   return (
-    <div className="platformChart" aria-label={`${series.label} trend chart`}>
+    <div className="platformChart" aria-label={`${seriesLabel} ${tt("Trend")}`}>
       <PlatformTrendChart rows={safeRows} series={series} />
       <div className="platformChartMeta">
-        <span><i className={series.tone} /> {intervalLabels[period?.interval] || "Kunlik"}</span>
+        <span data-i18n-ignore="true"><i className={series.tone} /> {intervalText}</span>
         <strong>{compactNumber(total)}</strong>
-        <span>Pik: {peak.label || "-"} · {compactNumber(peak[series.key] || 0)}</span>
+        <span data-i18n-ignore="true">{tt("Pik")}: {peak.label || "-"} · {compactNumber(peak[series.key] || 0)}</span>
       </div>
     </div>
   );
 }
 
-function ProgressRows({ rows }) {
+function ProgressRows({ rows, lng }) {
+  const tt = (value) => translateUiText(value, { lng });
   const max = maxValue(rows);
   return (
     <div className="barList compact">
       {rows.map((item) => (
         <div className={`barRow ${item.tone || ""}`} key={item.label}>
-          <span>{item.icon ? <item.icon size={16} /> : null} {item.label}</span>
+          <span data-i18n-ignore="true">{item.icon ? <item.icon size={16} /> : null} {tt(item.label)}</span>
           <div className="barTrack">
             <i className={item.tone || ""} style={{ width: `${Math.max(4, (item.value / max) * 100)}%` }} />
           </div>
@@ -231,9 +254,10 @@ const riskIcons = {
   unknown: Activity,
 };
 
-function Distribution({ rows, type }) {
+function Distribution({ rows, type, lng }) {
+  const tt = (value) => translateUiText(value, { lng });
   const total = rows.reduce((sum, item) => sum + item.value, 0);
-  if (!total) return <div className="empty">Hali AI tahlil natijasi yo'q</div>;
+  if (!total) return <div className="empty" data-i18n-ignore="true">{tt("Hali AI tahlil natijasi yo'q")}</div>;
   const iconMap = type === "sentiment" ? sentimentIcons : riskIcons;
 
   return (
@@ -244,7 +268,7 @@ function Distribution({ rows, type }) {
             key={item.key}
             className={`${type}-${item.key}`}
             style={{ width: `${Math.max(4, (item.value / total) * 100)}%` }}
-            title={`${item.label}: ${item.value}`}
+            title={`${tt(item.label)}: ${item.value}`}
           />
         ))}
       </div>
@@ -252,10 +276,10 @@ function Distribution({ rows, type }) {
         {rows.map((item) => {
           const Icon = iconMap[item.key] || Activity;
           return (
-            <span key={item.key}>
+            <span key={item.key} data-i18n-ignore="true">
               <i className={`${type}-${item.key}`} />
               <Icon size={13} strokeWidth={2} aria-hidden="true" />
-              {item.label} <strong className="tabular-nums">{item.value}</strong>
+              {tt(item.label)} <strong className="tabular-nums">{item.value}</strong>
             </span>
           );
         })}
@@ -264,7 +288,8 @@ function Distribution({ rows, type }) {
   );
 }
 
-function OfficialSourceSetup({ sources, filter }) {
+function OfficialSourceSetup({ sources, filter, lng }) {
+  const tt = (value) => translateUiText(value, { lng });
   const platforms = [
     {
       label: "Telegram",
@@ -308,12 +333,14 @@ function OfficialSourceSetup({ sources, filter }) {
     <article className="dashboardPanel panel sourceSetupPanel compactSetupPanel">
       <div className="sectionHeader compact">
         <div>
-          <h2>Official source profili</h2>
-          <p>{filter.brand_name || "Brand"} rasmiy kanal/bloglari profil sahifasida boshqariladi.</p>
+          <h2 data-i18n-ignore="true">{tt("Official source")}</h2>
+          <p data-i18n-ignore="true">
+            {`${filter.brand_name || tt("Brand")} ${tt("rasmiy manbalari.")}`}
+          </p>
         </div>
         <a className="button secondary linkButton" href="/profile">
           <ExternalLink size={16} />
-          <span>Profilga o'tish</span>
+          <span data-i18n-ignore="true">{tt("Profil")}</span>
         </a>
       </div>
       <div className="sourceSetupGrid">
@@ -323,11 +350,11 @@ function OfficialSourceSetup({ sources, filter }) {
             <div className={`sourceSetupCard ${item.tone}`} key={item.label}>
               <span className="setupIcon"><Icon size={18} /></span>
               <span>
-                <strong>{item.label}</strong>
-                <em>{item.description}</em>
+                <strong data-i18n-ignore="true">{tt(item.label)}</strong>
+                <em data-i18n-ignore="true">{tt(item.description)}</em>
               </span>
               <b>{item.official}/{item.total}</b>
-              <small>{item.status}</small>
+              <small data-i18n-ignore="true">{tt(item.status)}</small>
             </div>
           );
         })}
@@ -395,7 +422,8 @@ const platformCardConfig = {
   },
 };
 
-function PlatformChartCard({ platform, rows, period, mentions, engagement, sources }) {
+function PlatformChartCard({ platform, rows, period, mentions, engagement, sources, lng }) {
+  const tt = (value) => translateUiText(value, { lng });
   const config = platformCardConfig[platform] || platformCardConfig.telegram;
   const Icon = config.Icon;
   const series = { key: config.key, label: config.label, tone: config.tone };
@@ -405,19 +433,19 @@ function PlatformChartCard({ platform, rows, period, mentions, engagement, sourc
     <article className={`dashboardPanel panel platformPanel ${series.tone}`}>
       <div className="sectionHeader compact">
         <div>
-          <h2><Icon size={18} /> {series.label} holati</h2>
-          <p>{config.description}</p>
+          <h2 data-i18n-ignore="true"><Icon size={18} /> {tt(series.label)} {tt("holati")}</h2>
+          <p data-i18n-ignore="true">{tt(config.description)}</p>
         </div>
         <a className="miniButton linkButton" href={config.href}>
           <PlusCircle size={15} />
-          <span>Manba</span>
+          <span data-i18n-ignore="true">{tt("Manba")}</span>
         </a>
       </div>
-      <SinglePlatformChart rows={rows} series={series} period={period} />
+      <SinglePlatformChart rows={rows} series={series} period={period} lng={lng} />
       <div className="platformMetricStrip">
         {metrics.map((item) => (
           <span key={item.label}>
-            <em>{item.label}</em>
+            <em data-i18n-ignore="true">{tt(item.label)}</em>
             <strong>{compactNumber(item.value)}</strong>
           </span>
         ))}
@@ -551,6 +579,7 @@ function DashboardSkeleton() {
 }
 
 export function Dashboard() {
+  const lng = useUiLanguage();
   const [botStatus, setBotStatus] = useState(null);
   const [brands, setBrands] = useState([]);
   const [selectedBrandId, setSelectedBrandId] = useState(() => readSelectedBrandId());
@@ -652,7 +681,7 @@ export function Dashboard() {
 
   return (
     <div className="appShell">
-      <Sidebar botStatus={botStatus} activePath="/" />
+      <Sidebar botStatus={botStatus} activePath="/umumiy-dashboard" />
       <main className="main">
         <PageHeader
           eyebrow="Brand intelligence"
@@ -661,7 +690,7 @@ export function Dashboard() {
         />
         {error && <div className="errorBanner">{error}</div>}
 
-        <div className="periodTabs" role="tablist" aria-label="Dashboard davri">
+        <div className="periodTabs" role="tablist" aria-label={translateUiText("Dashboard davri", { lng })}>
           {isInitialLoading
             ? periodOptions.map((item) => <span className="skeletonTab" key={item.key} />)
             : periodOptions.map((item) => (
@@ -671,73 +700,117 @@ export function Dashboard() {
                   type="button"
                   onClick={() => setPeriodKey(item.key)}
                 >
-                  {item.label}
+                  <span data-i18n-ignore="true">{translateUiText(item.label, { lng })}</span>
                 </button>
               ))}
         </div>
 
-        <StatsBar items={statItems} loading={isInitialLoading} />
+        <StatsBar
+          items={statItems.map((item) => ({ ...item, label: translateUiText(item.label, { lng }) }))}
+          loading={isInitialLoading}
+        />
 
         {isInitialLoading ? (
           <DashboardSkeleton />
         ) : (
           <>
-        <section className="scopeStrip">
-          <div>
-            <span>Filter</span>
-            <strong>{filter.scope || "Tanlangan brand/client bo'yicha"}</strong>
-          </div>
-          <div>
-            <span>Brand</span>
-            <strong>{filter.brand_name || "Barcha brandlar"}</strong>
-          </div>
-          <div>
-            <span>AI ishonchlilik</span>
-            <strong>{percent(ai.reliability || 0)}</strong>
-            <small>{reliabilityDetail(ai)}</small>
-          </div>
-          <div>
-            <span>AI qamrov</span>
-            <strong>{percent(ai.total_coverage || 0)}</strong>
-            <small>{platformCoverageDetail(ai)}</small>
-          </div>
+        <section className="scopeStrip scopeStrip--gauges" aria-label={translateUiText("Filtr va AI sifat ko'rsatkichlari", { lng })}>
+          <article className="scopeCard scopeCard--meta">
+            <span className="scopeCardLabel" data-i18n-ignore="true">{translateUiText("Filter", { lng })}</span>
+            <strong className="scopeCardValue" data-i18n-ignore="true">
+              {translateUiText(filter.scope || "Tanlangan brand/client bo'yicha", { lng })}
+            </strong>
+            <p className="scopeCardHint" data-i18n-ignore="true">
+              {translateUiText("Dashboard ma'lumotlari tanlangan brand doirasida.", { lng })}
+            </p>
+          </article>
+          <article className="scopeCard scopeCard--meta">
+            <span className="scopeCardLabel" data-i18n-ignore="true">{translateUiText("Brand", { lng })}</span>
+            <strong className="scopeCardValue" data-i18n-ignore="true">
+              {filter.brand_name || translateUiText("Barcha brandlar", { lng })}
+            </strong>
+            <p className="scopeCardHint" data-i18n-ignore="true">
+              {translateUiText("Official source va mention oqimi shu brand bo'yicha.", { lng })}
+            </p>
+          </article>
+          <article className="scopeCard scopeCard--gauge tone-violet">
+            <div className="scopeCardHead">
+              <span className="scopeCardLabel" data-i18n-ignore="true">{translateUiText("AI ishonchlilik", { lng })}</span>
+              <span className="scopeCardBadge">{percent(ai.reliability || 0)}</span>
+            </div>
+            <PercentGauge
+              value={ai.reliability || 0}
+              max={100}
+              height={120}
+              tone="total"
+              showTicks
+              showLabels
+            />
+            <small className="scopeCardHint" data-i18n-ignore="true">{reliabilityDetail(ai, lng)}</small>
+          </article>
+          <article className="scopeCard scopeCard--gauge tone-teal">
+            <div className="scopeCardHead">
+              <span className="scopeCardLabel" data-i18n-ignore="true">{translateUiText("AI qamrov", { lng })}</span>
+              <span className="scopeCardBadge">{percent(ai.total_coverage || 0)}</span>
+            </div>
+            <PercentGauge
+              value={ai.total_coverage || 0}
+              max={100}
+              height={120}
+              tone="positive"
+              showTicks
+              showLabels
+            />
+            <small className="scopeCardHint" data-i18n-ignore="true">{platformCoverageDetail(ai, lng)}</small>
+          </article>
         </section>
 
-        <OfficialSourceSetup sources={sources} filter={filter} />
+        <OfficialSourceSetup sources={sources} filter={filter} lng={lng} />
 
         <section className="analyticsHero">
           <article className="dashboardPanel panel">
             <div className="sectionHeader">
               <div>
-                <h2>Brand harakati</h2>
-                <p>Tanlangan brand va davr bo'yicha barcha platformalardagi mention oqimi.</p>
+                <h2 data-i18n-ignore="true">{translateUiText("Platform ulushi", { lng })}</h2>
+                <p data-i18n-ignore="true">
+                  {translateUiText("Tanlangan brand va davr bo'yicha platformalar umumiy taqsimoti.", { lng })}
+                </p>
               </div>
-              <span className="pill neutral">{activePeriod.label} · {intervalLabels[analytics?.period?.interval || activePeriod.interval]}</span>
+              <span className="pill neutral" data-i18n-ignore="true">
+                {translateUiText(activePeriod.label, { lng })} ·{" "}
+                {translateUiText(intervalLabels[analytics?.period?.interval || activePeriod.interval], { lng })}
+              </span>
             </div>
-            <DashboardLineChart rows={analytics?.trend || []} period={analytics?.period || activePeriod} />
+            <DashboardLineChart
+              rows={analytics?.trend || []}
+              period={analytics?.period || activePeriod}
+              lng={lng}
+            />
           </article>
 
           <article className={`dashboardPanel panel forecastPanel ${forecast.direction || "barqaror"}`}>
             <div className="forecastTop">
               <div>
-                <span>Keyingi 7 kun prognozi</span>
+                <span data-i18n-ignore="true">{translateUiText("7 kun prognoz", { lng })}</span>
                 <strong>{compactNumber(forecast.next_7d_mentions || 0)}</strong>
               </div>
               <TrendIcon size={28} />
             </div>
             <div className="forecastGrid">
-              <span>Trend</span>
-              <strong>{forecast.direction || "barqaror"}</strong>
-              <span>Oldingi davrga nisbatan</span>
+              <span data-i18n-ignore="true">{translateUiText("Trend", { lng })}</span>
+              <strong data-i18n-ignore="true">{translateUiText(forecast.direction || "barqaror", { lng })}</strong>
+              <span data-i18n-ignore="true">{translateUiText("O'zgarish", { lng })}</span>
               <strong>{changeLabel(forecast.change_percent || 0)}</strong>
-              <span>Ishonch</span>
+              <span data-i18n-ignore="true">{translateUiText("Ishonch", { lng })}</span>
               <strong>{percent(forecast.confidence || 0)}</strong>
-              <span>Comment/chat prognoz</span>
+              <span data-i18n-ignore="true">{translateUiText("Comment", { lng })}</span>
               <strong>{compactNumber(forecast.next_7d_comments)}</strong>
-              <span>Like prognoz</span>
+              <span data-i18n-ignore="true">{translateUiText("Like", { lng })}</span>
               <strong>{compactNumber(forecast.next_7d_youtube_likes)}</strong>
             </div>
-            <p>{forecast.method}</p>
+            <p data-i18n-ignore={forecast.method ? "true" : undefined}>
+              {forecast.method ? translateUiText(forecast.method, { lng }) : null}
+            </p>
           </article>
         </section>
 
@@ -749,6 +822,7 @@ export function Dashboard() {
             mentions={mentions}
             engagement={engagement}
             sources={sources}
+            lng={lng}
           />
           <PlatformChartCard
             platform="youtube"
@@ -757,6 +831,7 @@ export function Dashboard() {
             mentions={mentions}
             engagement={engagement}
             sources={sources}
+            lng={lng}
           />
           <PlatformChartCard
             platform="instagram"
@@ -765,6 +840,7 @@ export function Dashboard() {
             mentions={mentions}
             engagement={engagement}
             sources={sources}
+            lng={lng}
           />
           <PlatformChartCard
             platform="facebook"
@@ -773,6 +849,7 @@ export function Dashboard() {
             mentions={mentions}
             engagement={engagement}
             sources={sources}
+            lng={lng}
           />
         </section>
 
@@ -780,78 +857,91 @@ export function Dashboard() {
           <article className="dashboardPanel panel">
             <div className="sectionHeader">
               <div>
-                <h2>Engagement</h2>
-                <p>Like, view, reaction va comment signalari hamda prognoz.</p>
+                <h2 data-i18n-ignore="true">{translateUiText("Engagement", { lng })}</h2>
+                <p data-i18n-ignore="true">
+                  {translateUiText("Like, view, reaction va comment signalari hamda prognoz.", { lng })}
+                </p>
               </div>
             </div>
             <div className="metricGrid">
-              <div className="youtube"><Heart size={17} /><strong>{compactNumber(engagement.youtube_likes)}</strong><span>YouTube like</span></div>
-              <div className="youtube"><Eye size={17} /><strong>{compactNumber(engagement.youtube_views)}</strong><span>YouTube view</span></div>
-              <div className="telegram"><Activity size={17} /><strong>{compactNumber(engagement.telegram_reactions)}</strong><span>Telegram reaction</span></div>
-              <div className="total"><MessageSquareText size={17} /><strong>{compactNumber(engagement.youtube_comment_count)}</strong><span>Video comment count</span></div>
-              <div className="instagram"><Heart size={17} /><strong>{compactNumber(engagement.instagram_likes)}</strong><span>Instagram like</span></div>
-              <div className="facebook"><MessageSquareText size={17} /><strong>{compactNumber(engagement.facebook_replies)}</strong><span>Facebook reply</span></div>
-              <div className="youtube"><Heart size={17} /><strong>{compactNumber(forecast.next_7d_youtube_likes)}</strong><span>7 kun like prognoz</span></div>
-              <div className="youtube"><Eye size={17} /><strong>{compactNumber(forecast.next_7d_youtube_views)}</strong><span>7 kun view prognoz</span></div>
+              <div className="youtube"><Heart size={17} /><strong>{compactNumber(engagement.youtube_likes)}</strong><span data-i18n-ignore="true">{translateUiText("YouTube like", { lng })}</span></div>
+              <div className="youtube"><Eye size={17} /><strong>{compactNumber(engagement.youtube_views)}</strong><span data-i18n-ignore="true">{translateUiText("YouTube view", { lng })}</span></div>
+              <div className="telegram"><Activity size={17} /><strong>{compactNumber(engagement.telegram_reactions)}</strong><span data-i18n-ignore="true">{translateUiText("Telegram reaction", { lng })}</span></div>
+              <div className="total"><MessageSquareText size={17} /><strong>{compactNumber(engagement.youtube_comment_count)}</strong><span data-i18n-ignore="true">{translateUiText("Video comment count", { lng })}</span></div>
+              <div className="instagram"><Heart size={17} /><strong>{compactNumber(engagement.instagram_likes)}</strong><span data-i18n-ignore="true">{translateUiText("Instagram like", { lng })}</span></div>
+              <div className="facebook"><MessageSquareText size={17} /><strong>{compactNumber(engagement.facebook_replies)}</strong><span data-i18n-ignore="true">{translateUiText("Facebook reply", { lng })}</span></div>
+              <div className="youtube"><Heart size={17} /><strong>{compactNumber(forecast.next_7d_youtube_likes)}</strong><span data-i18n-ignore="true">{translateUiText("7 kun like prognoz", { lng })}</span></div>
+              <div className="youtube"><Eye size={17} /><strong>{compactNumber(forecast.next_7d_youtube_views)}</strong><span data-i18n-ignore="true">{translateUiText("7 kun view prognoz", { lng })}</span></div>
             </div>
-            <p className="mutedNote">{engagement.youtube_dislikes_note}</p>
+            <p className="mutedNote" data-i18n-ignore={engagement.youtube_dislikes_note ? "true" : undefined}>
+              {engagement.youtube_dislikes_note
+                ? translateUiText(engagement.youtube_dislikes_note, { lng })
+                : null}
+            </p>
           </article>
 
           <article className="dashboardPanel panel">
             <div className="sectionHeader">
               <div>
-                <h2>Content turi</h2>
-                <p>Post, video, chat va commentlar kesimi.</p>
+                <h2 data-i18n-ignore="true">{translateUiText("Content turi", { lng })}</h2>
+                <p data-i18n-ignore="true">{translateUiText("Post, video, chat va commentlar kesimi.", { lng })}</p>
               </div>
             </div>
-            <ProgressRows rows={actionRows} />
+            <ProgressRows rows={actionRows} lng={lng} />
           </article>
 
           <article className="dashboardPanel panel">
             <div className="sectionHeader">
               <div>
-                <h2>Platformalar</h2>
-                <p>Qaysi platformadan qancha signal kelmoqda.</p>
+                <h2 data-i18n-ignore="true">{translateUiText("Platformalar", { lng })}</h2>
+                <p data-i18n-ignore="true">{translateUiText("Qaysi platformadan qancha signal kelmoqda.", { lng })}</p>
               </div>
             </div>
-            <ProgressRows rows={platformRows} />
+            <ProgressRows rows={platformRows} lng={lng} />
           </article>
 
           <article className="dashboardPanel panel">
             <div className="sectionHeader">
               <div>
-                <h2>AI kayfiyat</h2>
-                <p>Vertex/Gemini tahlil qilgan mentionlar asosida.</p>
+                <h2 data-i18n-ignore="true">{translateUiText("AI kayfiyat", { lng })}</h2>
+                <p data-i18n-ignore="true">{translateUiText("Vertex/Gemini tahlil qilgan mentionlar asosida.", { lng })}</p>
               </div>
               <span className="pill neutral">{percent(mentions.analysis_coverage || 0)}</span>
             </div>
-            <Distribution rows={sentimentRows} type="sentiment" />
+            <Distribution rows={sentimentRows} type="sentiment" lng={lng} />
             <div className="aiScoreGrid">
-              <span>O'rtacha sentiment score <strong>{score(ai.avg_sentiment_score)}</strong></span>
-              <span>O'rtacha risk score <strong>{score(ai.avg_risk_score)}</strong></span>
-              <span>Model <strong>{ai.model || "Gemini"}</strong></span>
-              <span>Platform qamrovi <strong>{platformCoverageDetail(ai)}</strong></span>
+              <span data-i18n-ignore="true">{translateUiText("O'rtacha sentiment score", { lng })} <strong>{score(ai.avg_sentiment_score)}</strong></span>
+              <span data-i18n-ignore="true">{translateUiText("O'rtacha risk score", { lng })} <strong>{score(ai.avg_risk_score)}</strong></span>
+              <span data-i18n-ignore="true">{translateUiText("Model", { lng })} <strong>{ai.model || "Gemini"}</strong></span>
+              <span data-i18n-ignore="true">{translateUiText("Platform qamrovi", { lng })} <strong>{platformCoverageDetail(ai, lng)}</strong></span>
             </div>
-            <p className="mutedNote">{ai.note}</p>
+            <p className="mutedNote" data-i18n-ignore={ai.note ? "true" : undefined}>
+              {ai.note ? translateUiText(ai.note, { lng }) : null}
+            </p>
           </article>
 
           <article className="dashboardPanel panel wide">
             <div className="sectionHeader">
               <div>
-                <h2>Risk va ustuvorlik</h2>
-                <p>Brandga zarar yetkazishi mumkin bo'lgan signallar.</p>
+                <h2 data-i18n-ignore="true">{translateUiText("Risk va ustuvorlik", { lng })}</h2>
+                <p data-i18n-ignore="true">{translateUiText("Brandga zarar yetkazishi mumkin bo'lgan signallar.", { lng })}</p>
               </div>
               <button className="button secondary" type="button" onClick={loadInitial}>
                 <RefreshCw size={17} />
-                <span>Yangilash</span>
+                <span data-i18n-ignore="true">{translateUiText("Yangilash", { lng })}</span>
               </button>
             </div>
             <div className="riskLayout">
-              <Distribution rows={riskRows} type="risk" />
+              <Distribution rows={riskRows} type="risk" lng={lng} />
               <div className="aiPlan">
                 <Sparkles size={20} />
-                <strong>AI action layer</strong>
-                <p>Dashboard mention hajmi, sentiment, risk va AI qamrovini birlashtirib ustuvor signalni ko'rsatadi. Salbiy yoki yuqori riskli xabarlar birinchi navbatda javobga chiqariladi.</p>
+                <strong data-i18n-ignore="true">{translateUiText("AI action layer", { lng })}</strong>
+                <p data-i18n-ignore="true">
+                  {translateUiText(
+                    "Dashboard mention hajmi, sentiment, risk va AI qamrovini birlashtirib ustuvor signalni ko'rsatadi. Salbiy yoki yuqori riskli xabarlar birinchi navbatda javobga chiqariladi.",
+                    { lng },
+                  )}
+                </p>
               </div>
             </div>
           </article>

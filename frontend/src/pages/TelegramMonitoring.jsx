@@ -338,7 +338,7 @@ export function TelegramMonitoring() {
         <section className="panel activeBrandToolbar">
           <div>
             <strong>Faol brand</strong>
-            <p>Telegram ma'lumotlari faqat shu tanlangan brand bo'yicha ko'rsatiladi va ulanadi.</p>
+            <p>Faqat shu brand bo‘yicha Telegram ma’lumotlari.</p>
           </div>
           <SmartSelect
             value={selectedBrandId}
@@ -349,7 +349,7 @@ export function TelegramMonitoring() {
           />
           <a className="button secondary linkButton" href="/profile">
             <Link2 size={16} />
-            <span>Brand sozlamalari</span>
+            <span>Profil</span>
           </a>
         </section>
 

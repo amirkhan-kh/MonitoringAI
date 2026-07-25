@@ -9,17 +9,21 @@
 ## 0. DESIGN READ (bir qatorda)
 
 **"Bu — brendni ijtimoiy tarmoqlarda kuzatuvchi SaaS *operatsion dashboard*, kun bo'yi ishlatiladi;
-til — Linear/Raycast/Vercel uslubidagi dark-first minimalizm; poydevor — semantik dual-theme token
-tizimi + shadcn/Radix patternlari + o'lchovli (restrained) Motion."**
+til — **AgentOS-class dark analytics cockpit** (neytral dark ladder, bitta *almashtiriladigan*
+accent istalgan hue, nafis gauge/sparkline chartlar); poydevor — dual-theme tokenlar + o'lchovli Motion."**
 
-Bu **landing sahifa yoki portfolio EMAS** — bu ma'lumot zich dashboard. Shuning uchun `taste-skill`ning
-anti-slop *tamoyillari* (rang/tipografiya/motion intizomi, holatlar, WCAG) to'liq qo'llaniladi, lekin
-uning "hero/landing" *maketlash qoidalari* faqat `Landing.jsx` sahifasiga tegishli.
+> **2026-07-25:** AgentOS screenshot = tuzilma north star.  
+> **Rang:** yashilga qulflanmaydi — neytral sirtlar + bitta swappable accent (`agentos-dashboard-DESIGN.md`).  
+> **UI implementatsiyasi hali ochilmagan.**
 
-### Dial'lar (dashboard uchun sozlangan)
+Bu **landing sahifa yoki portfolio EMAS** — bu ma'lumot zich dashboard. `taste-skill` anti-slop
+*tamoyillari* to'liq; landing *maketlash* faqat `Landing.jsx` uchun. Cockpit qoidalari §1 dial
+va AgentOS referensida.
+
+### Dial'lar (dashboard / AgentOS uchun sozlangan)
 - `DESIGN_VARIANCE: 5` — o'ylangan, tartibli; badiiy xaos emas (bu ish quroli).
-- `MOTION_INTENSITY: 4` — maqsadli, qisqa spring micro-interaction; hech qачон bezak uchun emas.
-- `VISUAL_DENSITY: 6` — dashboard uchun **zichlik — bu afzallik**; bir ko'rinishda 5–9 asosiy element.
+- `MOTION_INTENSITY: 4` — maqsadli, qisqa micro-interaction; hech qаchon bezak uchun emas.
+- `VISUAL_DENSITY: 7` — cockpit zichligi; bir ko'rinishda 6–12 o'qiladigan metrika elementi.
 
 ---
 
@@ -68,14 +72,14 @@ qayta ishlaysan. Batafsil "TEGILMAYDIGAN" bo'limiga qara (§6).
 
 ## 4. REFERENS MATERIALLAR (ish boshlashdan OLDIN o'qi)
 
-1. `.agents/skills/design-taste-frontend/SKILL.md` — anti-slop tamoyillari (§4 Design Engineering
-   Directives, §4.5 Interactive States, §4.2 Color, §4.1 Typography). Landing uchun to'liq; dashboard
-   uchun faqat tamoyillar.
-2. `.agents/skills/design-references/raycast-DESIGN.md` — **dark-first chuqurlik** (surface ladder,
-   hairline border, radius, kam accent). Bizning dark shell'imizning asosiy ilhomi.
-3. `.agents/skills/design-references/vercel-DESIGN.md` — border+token minimalizmi.
-4. `.agents/skills/design-references/stripe-DESIGN.md` — KPI/metrika kartasi anatomiyasi.
-5. Chart/vizualizatsiya qilishdan OLDIN — `dataviz` skill'ini yukla (rang, o'q, kontrast qoidalari).
+1. **`.agents/skills/design-references/agentos-dashboard-DESIGN.md`** — **PRIMARY** (product shell).
+   Pixel-scan, green-black ladder, emerald accent, chart craft, do/don't.
+2. `docs/01-planning/design-direction-agentos-cockpit.md` — joriy yo‘nalish (implementatsiya freeze).
+3. `docs/01-planning/dizayn-tizimi.md` — v3 **draft** tokenlar (kodga hali yozilmagan).
+4. `.agents/skills/design-taste-frontend/SKILL.md` — anti-slop + § Dashboard/AgentOS + freeze qoidasi.
+5. `.agents/skills/design-references/raycast-DESIGN.md` — near-black + hairline (AgentOS bilan uyg‘un).
+6. `.agents/skills/design-references/stripe-DESIGN.md` — KPI anatomiyasi.
+7. `.agents/skills/design-references/vercel-DESIGN.md` — faqat marketing yordamchi (Landing).
 
 ---
 

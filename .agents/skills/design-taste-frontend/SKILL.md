@@ -1,12 +1,16 @@
 ---
 name: design-taste-frontend
-description: Anti-slop frontend skill for landing pages, portfolios, and redesigns. The agent reads the brief, infers the right design direction, and ships interfaces that do not look templated. Real design systems when applicable, audit-first on redesigns, strict pre-flight check.
+description: Anti-slop frontend skill for landings, portfolios, product dashboards, and redesigns. Reads the brief, picks the right aesthetic (including AgentOS-style dark analytics cockpits), audit-first on redesigns, strict pre-flight. For MonitoringAI product UI, prefer design-references/agentos-dashboard-DESIGN.md when the direction is cockpit redesign.
 ---
 
 # tasteskill: Anti-Slop Frontend Skill
 
-> Landing pages, portfolios, and redesigns. Not dashboards, not data tables, not multi-step product UI.
+> Landing pages, portfolios, **product dashboards / analytics cockpits**, and redesigns.
 > Every rule below is **contextual**. None of it fires automatically. First read the brief, then pull only what fits.
+>
+> **MonitoringAI note (2026-07-25):** Product shell redesign north star is the **AgentOS cockpit**
+> reference at `design-references/agentos-dashboard-DESIGN.md`. Do **not** restyle the app until
+> the user explicitly starts the design implementation phase.
 
 ---
 
@@ -57,6 +61,7 @@ After the design read, set three dials. Every layout, motion, and density decisi
 | "premium consumer / Apple-y / luxury / brand" | 7-8 | 5-7 | 3-4 |
 | "playful / wild / Dribbble / Awwwards / experimental / agency" | 9-10 | 8-10 | 3-4 |
 | "landing page / portfolio / marketing site (default)" | 7-9 | 6-8 | 3-5 |
+| "dark analytics cockpit / AgentOS / ops dashboard / monitoring shell" | 4-5 | 3-4 | 7-8 |
 | "trust-first / public-sector / regulated / accessibility-critical" | 3-4 | 2-3 | 4-5 |
 | "redesign - preserve" | match existing | +1 | match existing |
 | "redesign - overhaul" | +2 | +2 | match existing |
@@ -70,6 +75,8 @@ After the design read, set three dials. Every layout, motion, and density decisi
 | Portfolio (Designer / studio) | 8 | 7 | 3 |
 | Portfolio (Developer) | 6 | 5 | 4 |
 | Editorial / Blog | 6 | 4 | 3 |
+| **Dark analytics cockpit (AgentOS-class)** | **4–5** | **3–4** | **7–8** |
+| MonitoringAI product shell (target) | 5 | 4 | 7 |
 | Public-sector service | 3 | 2 | 5 |
 | Redesign - preserve | match | match+1 | match |
 | Redesign - overhaul | +2 | +2 | match |
@@ -113,9 +120,10 @@ For these directions, there is **no single official package**. Build with native
 | Brutalism | Native CSS, monospace, raw borders. No library. |
 | Editorial / magazine | Serif type, asymmetric grid, generous whitespace. No library. |
 | Dark tech / hacker | Mono + accent neon, terminal motifs. No library. |
-| Aurora / mesh gradients | SVG or layered radial gradients. No library. |
+| **AgentOS / dark analytics cockpit** | **Neutral** near-black surface ladder (no green cast), **one swappable brand accent** (any hue — indigo, cyan, rose, amber, emerald, …) for chrome via tokens + `color-mix` soft fills, multi-hue **only** on chart series, thin gauges/sparklines, soft glass + hairline. See `design-references/agentos-dashboard-DESIGN.md`. Do **not** lock product chrome to screenshot green. Not AI-purple mesh as default. |
+| Aurora / mesh gradients | SVG or layered radial gradients. No library. Marketing only — never default app chrome. |
 | Kinetic typography | Native CSS animations, scroll-driven animations, GSAP for hijacks. No library. |
-| **Apple Liquid Glass** | Apple documents this for Apple platforms only. **There is no official `liquid-glass.css`.** Web implementations are approximations using `backdrop-filter` + layered borders + highlights. Label clearly as approximation. |
+| **Apple Liquid Glass** | Apple documents this for Apple platforms only. **There is no official `liquid-glass.css`.** Web implementations are approximations using `backdrop-filter` + layered borders + highlights. Label clearly as approximation. Soft glass **cards** in AgentOS cockpits are hairline + raised surface, not full liquid-glass marketing blobs. |
 
 ---
 
@@ -893,17 +901,36 @@ stack: ["react", "next", "tailwind", "motion"]
 
 ---
 
-## 13. OUT OF SCOPE
+## 13. OUT OF SCOPE vs IN SCOPE (product UI)
 
-This skill is NOT for:
-* Dashboards / dense product UI / admin panels (use Fluent, Carbon, Atlassian, or Polaris from Section 2.A).
-* Data tables (use TanStack Table or AG Grid).
-* Multi-step forms / wizards (use Form-specific patterns; this skill won't make them better).
-* Code editors (use Monaco / CodeMirror with their official skinning).
-* Native mobile (use Apple HIG / Material directly).
-* Realtime collab UIs (presence, cursors, OT-aware - different problem class).
+### 13.A Still out of scope as *marketing* defaults
+* Pure data-grid products with no visual hierarchy brief (use TanStack Table / AG Grid patterns).
+* Multi-step forms / wizards as a design problem alone.
+* Code editors, native mobile, realtime collab cursors.
 
-If the brief is one of the above, **say so explicitly**, point to the right tool, and only apply this skill's marketing-page / about-page / landing-page parts to the surfaces where they apply.
+### 13.B **IN SCOPE: dark analytics cockpits / MonitoringAI-class dashboards**
+
+When the brief is an **ops / brand-monitoring / AI-agent dashboard** (especially with an
+AgentOS-like screenshot), this skill **does** apply, with different dials and references:
+
+1. Declare Design Read as **cockpit**, not landing.
+2. Set dials from the **"dark analytics cockpit"** row in §1.A / §1.B (variance low, density high).
+3. Load **`design-references/agentos-dashboard-DESIGN.md`** as the visual north star (MonitoringAI).
+4. Apply §4 engineering directives (color lock, shape lock, states, a11y) — **skip** landing-only
+   rules that conflict (hero viewport caps, marquee bans still apply; "3 equal feature cards" ban
+   still applies to marketing bands, not to a deliberate KPI bento).
+5. Chart craft: thin strokes, dim tracks, one hero number per card, semantic multi-hue only for series.
+6. **Hue-agnostic chrome:** neutrals stay neutral; one accent token drives CTA/nav/focus so **any** brand color fits. Do not hardcode emerald because a reference screenshot was green.
+7. **Do not** default to AI-purple mesh, equal marketing cards, or Inter+slate admin boredom.
+
+Optional enterprise systems (Fluent / Carbon / Polaris) remain valid when the brief names them;
+for MonitoringAI's chosen direction, **AgentOS reference > generic enterprise kit**.
+
+### 13.C Implementation freeze (MonitoringAI)
+
+Until the user explicitly starts redesign implementation:
+* Update docs/skills/tokens **on paper** only.
+* Do **not** rewrite `frontend/src/styles.css` or page layouts "just to match AgentOS."
 
 ---
 

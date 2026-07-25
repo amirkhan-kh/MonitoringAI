@@ -3,41 +3,46 @@ import {
   Brain,
   CheckCircle2,
   Clock3,
-  Gauge,
   Layers3,
   Radio,
   ShieldCheck,
   Workflow,
 } from "lucide-react";
+import { translateUiText, useUiLanguage } from "../i18n";
+import { PercentGauge, PipelineGauge } from "./TrendChart";
 
 const platformCopy = {
   telegram: {
     name: "Telegram",
     sourceLabel: "Source",
     mentionLabel: "Mention",
-    flow: ["Source qo'shish", "Backfill yoki live bot", "AI tahlil", "Risk javobi"],
-    production: "Kanal, group va discussion commentlari source holatiga qarab avtomatik yig'iladi.",
+    flow: ["Source", "Live/backfill", "AI", "Risk"],
+    production: "Kanal va discussion avtomatik yig'iladi.",
+    tone: "telegram",
   },
   youtube: {
     name: "YouTube",
     sourceLabel: "Source",
     mentionLabel: "Video/comment",
-    flow: ["Kanal yoki hashtag", "Sync", "AI tahlil", "Trend va risk"],
-    production: "Kanal uploads, video commentlari va hashtag manbalari API key orqali yangilanadi.",
+    flow: ["Kanal", "Sync", "AI", "Risk"],
+    production: "Video va commentlar API orqali yangilanadi.",
+    tone: "youtube",
   },
   instagram: {
     name: "Instagram",
     sourceLabel: "Akkaunt",
-    mentionLabel: "Comment/@mention",
-    flow: ["Business akkaunt", "Token/poller", "AI tahlil", "Meta webhook"],
-    production: "Own account ishlashi token va Meta permission holatiga bog'liq. Keng ommaviy oqim uchun App Review kerak bo'lishi mumkin.",
+    mentionLabel: "Comment",
+    flow: ["Akkaunt", "Token", "AI", "Webhook"],
+    production: "Token va Meta ruxsatiga bog'liq.",
+    tone: "instagram",
   },
   facebook: {
     name: "Facebook",
     sourceLabel: "Page",
-    mentionLabel: "Comment/reply",
-    flow: ["Page token", "Poller/webhook", "AI tahlil", "Inboxga javob"],
-    production: "Page commentlari token va permission bilan olinadi. Business portfolio cheklovi bo'lsa avval Meta tomoni hal qilinadi.",
+    mentionLabel: "Comment",
+    flow: ["Page", "Poller", "AI", "Javob"],
+    production: "Page commentlari token bilan olinadi.",
+    tone: "facebook",
   },
 };
 
@@ -115,15 +120,17 @@ function healthTone({ sources, summary, status }) {
   return "good";
 }
 
-function sourceStatusText({ platform, sources, summary, status }) {
+function sourceStatusText({ platform, sources, summary, status, lng }) {
   const copy = platformCopy[platform] || platformCopy.telegram;
-  if (status && status.configured === false) return `${copy.name} API sozlanmagan`;
+  if (status && status.configured === false) {
+    return translateUiText(`${copy.name} API sozlanmagan`, { lng });
+  }
   const invalid = invalidSources(sources);
-  if (invalid) return `${invalid} ta token yaroqsiz`;
+  if (invalid) return translateUiText(`${invalid} ta token yaroqsiz`, { lng });
   const total = sourceTotal(sources, summary);
   const active = activeSources(sources, summary);
-  if (!total) return `${copy.sourceLabel} qo'shilmagan`;
-  return `${active}/${total} faol`;
+  if (!total) return translateUiText(`${copy.sourceLabel} qo'shilmagan`, { lng });
+  return translateUiText(`${active}/${total} faol`, { lng });
 }
 
 function statusIcon(tone) {
@@ -132,7 +139,28 @@ function statusIcon(tone) {
   return CheckCircle2;
 }
 
+/** How many pipeline stages are “ready” based on live data. */
+function pipelineActiveCount({ platform, sources, summary, status, ai }) {
+  const copy = platformCopy[platform] || platformCopy.telegram;
+  const totalSources = sourceTotal(sources, summary);
+  const hasSources = totalSources > 0 && !(status && status.configured === false);
+  const hasMentions = mentionTotal(summary) > 0;
+  const hasAi = (ai.analyzed || 0) > 0 || ai.coverage > 0;
+  const stages = [
+    hasSources,
+    hasMentions || hasSources,
+    hasAi,
+    hasAi,
+  ];
+  if (!hasSources) stages[1] = false;
+  return {
+    steps: copy.flow,
+    active: stages.filter(Boolean).length,
+  };
+}
+
 export function MonitoringInsights({ platform, summary, sources = [], status = null, loading = false }) {
+  const lng = useUiLanguage();
   const copy = platformCopy[platform] || platformCopy.telegram;
   const tone = healthTone({ sources, summary, status });
   const StatusIcon = statusIcon(tone);
@@ -142,6 +170,14 @@ export function MonitoringInsights({ platform, summary, sources = [], status = n
   const secondary = secondaryMentionTotal(platform, summary);
   const active = activeSources(sources, summary);
   const totalSources = sourceTotal(sources, summary);
+  const productionRatio = totalSources ? active / totalSources : 0;
+  const pipeline = pipelineActiveCount({ platform, sources, summary, status, ai });
+  const signalShare = totalMentions ? Math.min(1, secondary / totalMentions) : 0;
+  const tt = (value) => translateUiText(value, { lng });
+  const mentionFlowLabel = tt(`${copy.mentionLabel} oqimi`);
+  const sourceActiveLabel = tt(`${copy.sourceLabel} faol`);
+  const pipelineLabel = tt(`Signal oqimi · ${pipeline.active}/${pipeline.steps.length}`);
+  const translatedSteps = pipeline.steps.map((step) => tt(step));
 
   if (loading) {
     return (
@@ -159,74 +195,114 @@ export function MonitoringInsights({ platform, summary, sources = [], status = n
   }
 
   return (
-    <section className="insightsGrid">
-      <article className={`insightPanel ${tone}`}>
+    <section className="insightsGrid insightsGrid--mixed">
+      {/* Production — status + big numbers (no gauge; ratio is not the main story) */}
+      <article className={`insightPanel insightPanel--stat ${tone}`}>
         <div className="insightHead">
           <span className="insightIcon"><StatusIcon size={18} /></span>
           <div>
-            <strong>Production holati</strong>
-            <p>{sourceStatusText({ platform, sources, summary, status })}</p>
+            <strong data-i18n-ignore="true">{tt("Production")}</strong>
+            <p data-i18n-ignore="true">{sourceStatusText({ platform, sources, summary, status, lng })}</p>
           </div>
         </div>
-        <div className="insightMetricLine">
-          <span>{copy.sourceLabel}</span>
-          <b>{active}/{totalSources}</b>
+        <div className="insightHeroMetric">
+          <strong className="insightHeroValue">
+            {active}<span className="insightHeroSep">/</span>{totalSources}
+          </strong>
+          <span className="insightHeroLabel" data-i18n-ignore="true">{sourceActiveLabel}</span>
         </div>
-        <small>{copy.production}</small>
+        <div className="insightMeterTrack" aria-hidden="true">
+          <i
+            className={`tone-${tone === "good" ? "positive" : tone === "danger" ? "negative" : "warning"}`}
+            style={{ width: `${Math.max(totalSources ? 6 : 0, productionRatio * 100)}%` }}
+          />
+        </div>
+        <small data-i18n-ignore="true">{tt(copy.production)}</small>
       </article>
 
-      <article className="insightPanel">
+      {/* Mention — volume focus with dual metrics + soft fill */}
+      <article className="insightPanel insightPanel--stat">
         <div className="insightHead">
           <span className="insightIcon"><Layers3 size={18} /></span>
           <div>
-            <strong>Mention oqimi</strong>
-            <p>{copy.mentionLabel} bir joyda ko'rinadi.</p>
+            <strong data-i18n-ignore="true">{tt("Mention")}</strong>
+            <p data-i18n-ignore="true">{mentionFlowLabel}</p>
           </div>
         </div>
-        <div className="qualityMeter">
-          <i style={{ width: `${Math.max(3, Math.min(100, totalMentions ? 100 : 3))}%` }} />
+        <div className="insightHeroMetric">
+          <strong className="insightHeroValue">{compactNumber(totalMentions)}</strong>
+          <span className="insightHeroLabel" data-i18n-ignore="true">{tt("Jami mention")}</span>
         </div>
-        <div className="insightSplit">
-          <span>Jami <b>{compactNumber(totalMentions)}</b></span>
-          <span>Qo'shimcha signal <b>{compactNumber(secondary)}</b></span>
+        <div className="insightDualStats">
+          <div>
+            <span data-i18n-ignore="true">{tt("Signal")}</span>
+            <b>{compactNumber(secondary)}</b>
+          </div>
+          <div>
+            <span data-i18n-ignore="true">{tt("Ulush")}</span>
+            <b>{percent(signalShare)}</b>
+          </div>
+        </div>
+        <div className="insightMeterTrack" aria-hidden="true">
+          <i
+            className={`tone-${copy.tone || "accent"}`}
+            style={{ width: `${Math.max(totalMentions ? 8 : 0, Math.min(100, signalShare * 100 || (totalMentions ? 100 : 0)))}%` }}
+          />
         </div>
       </article>
 
-      <article className="insightPanel">
+      {/* AI qamrov — keep ECharts gauge */}
+      <article className="insightPanel insightPanel--gauge">
         <div className="insightHead">
           <span className="insightIcon"><Brain size={18} /></span>
           <div>
-            <strong>AI aniqlik nazorati</strong>
-            <p>Tahlil qilingan mentionlar ulushi.</p>
+            <strong data-i18n-ignore="true">{tt("AI qamrov")}</strong>
+            <p data-i18n-ignore="true">{tt("Tahlil ulushi")}</p>
           </div>
         </div>
-        <div className="qualityMeter ai">
-          <i style={{ width: `${Math.max(3, coverage * 100)}%` }} />
-        </div>
+        <PercentGauge
+          value={coverage}
+          max={100}
+          height={108}
+          tone="positive"
+          compact
+          showTicks
+          showLabels
+        />
         <div className="insightSplit">
-          <span>Qamrov <b>{percent(coverage)}</b></span>
-          <span>High risk <b>{compactNumber(ai.highRisk)}</b></span>
+          <span data-i18n-ignore="true">{tt("Qamrov")} <b>{percent(coverage)}</b></span>
+          <span data-i18n-ignore="true">{tt("Risk")} <b>{compactNumber(ai.highRisk)}</b></span>
         </div>
         <div className="insightSplit compact">
-          <span>Tahlil <b>{compactNumber(ai.analyzed)}/{compactNumber(ai.mentions)}</b></span>
+          <span data-i18n-ignore="true">{tt("Tahlil")} <b>{compactNumber(ai.analyzed)}/{compactNumber(ai.mentions)}</b></span>
         </div>
       </article>
 
-      <article className="insightPanel workflowPanel">
+      {/* Zanjir — keep pipeline gauge */}
+      <article className="insightPanel insightPanel--gauge workflowPanel">
         <div className="insightHead">
           <span className="insightIcon"><Workflow size={18} /></span>
           <div>
-            <strong>Ishlash zanjiri</strong>
-            <p>Brand signali yo'qolmasligi uchun ketma-ketlik.</p>
+            <strong data-i18n-ignore="true">{tt("Zanjir")}</strong>
+            <p data-i18n-ignore="true">{pipelineLabel}</p>
           </div>
         </div>
-        <div className="workflowSteps">
-          {copy.flow.map((item, index) => (
-            <span key={item}>
-              {index === 0 ? <Radio size={14} /> : index === 2 ? <Gauge size={14} /> : <ShieldCheck size={14} />}
-              {item}
-            </span>
-          ))}
+        <PipelineGauge
+          steps={translatedSteps}
+          activeCount={pipeline.active}
+          height={96}
+          tone="accent"
+        />
+        <div className="workflowSteps workflowSteps--compact">
+          {translatedSteps.map((item, index) => {
+            const ready = index < pipeline.active;
+            return (
+              <span key={`${pipeline.steps[index]}-${item}`} className={ready ? "isReady" : ""} data-i18n-ignore="true">
+                {index === 0 ? <Radio size={13} /> : index === 2 ? <Brain size={13} /> : <ShieldCheck size={13} />}
+                {item}
+              </span>
+            );
+          })}
         </div>
       </article>
     </section>

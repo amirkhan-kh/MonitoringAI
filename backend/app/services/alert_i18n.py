@@ -106,9 +106,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Something went wrong, try again.",
     },
     "toast_reply_claimed": {
-        "uz": "Tahlil qilinmoqda. Komment linki shu yerga yuborildi — mijozga reply qilib javob yozing, so'ng «Javob berdim»ni bosing.",
-        "ru": "Идёт разбор. Ссылка на комментарий отправлена — ответьте клиенту, затем «Ответил».",
-        "en": "In progress. Comment link sent — reply to the customer, then press «I replied».",
+        "uz": "Tahlil qilinmoqda. Mijozga javob yozib, so'ng «Javob berdim»ni bosing.",
+        "ru": "Идёт разбор. Ответьте клиенту, затем нажмите «Ответил».",
+        "en": "In progress. Reply to the customer, then press «I replied».",
+    },
+    "toast_reply_open": {
+        "uz": "Komment ochilmoqda…",
+        "ru": "Открываем комментарий…",
+        "en": "Opening the comment…",
     },
     "toast_already_replying": {
         "uz": "{name} allaqachon javob bermoqda ({time}). Boshqa signal oling.",

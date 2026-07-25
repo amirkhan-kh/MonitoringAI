@@ -38,6 +38,7 @@ from app.services.alerts import (
     due_reminder_alerts,
     get_bound_staff_chat,
     resolve_alert_chat_id,
+    resolve_comment_open_url,
     send_sla_reminders,
 )
 from app.services.alert_workflow import handle_my_chat_member
@@ -163,6 +164,52 @@ class AlertWorkflowTestCase(unittest.TestCase):
         return event
 
 
+class OpenUrlResolutionTests(AlertWorkflowTestCase):
+    def test_rebuilds_telegram_url_from_username_and_message_id(self) -> None:
+        url = resolve_comment_open_url(
+            {
+                "platform": "telegram",
+                "permalink": None,
+                "chat_username": "uzummarket_chat",
+                "message_id": 361937,
+            },
+            staff_chat_id=STAFF_CHAT_ID,
+        )
+        self.assertEqual(url, "https://t.me/uzummarket_chat/361937")
+
+    def test_rebuilds_private_supergroup_url(self) -> None:
+        url = resolve_comment_open_url(
+            {
+                "platform": "telegram",
+                "chat_id": -1001866473964,
+                "message_id": 42,
+            },
+            staff_chat_id=STAFF_CHAT_ID,
+        )
+        self.assertEqual(url, "https://t.me/c/1866473964/42")
+
+    def test_rejects_staff_supports_self_link(self) -> None:
+        staff_internal = STAFF_CHAT_ID[4:]
+        url = resolve_comment_open_url(
+            {
+                "platform": "telegram",
+                "permalink": f"https://t.me/c/{staff_internal}/77",
+                "chat_id": int(STAFF_CHAT_ID),
+                "message_id": 77,
+                "source": "Supports",
+            },
+            staff_chat_id=STAFF_CHAT_ID,
+        )
+        self.assertIsNone(url)
+
+    def test_keeps_customer_public_link(self) -> None:
+        url = resolve_comment_open_url(
+            {"permalink": "https://t.me/uzummarket_chat/1", "platform": "telegram"},
+            staff_chat_id=STAFF_CHAT_ID,
+        )
+        self.assertEqual(url, "https://t.me/uzummarket_chat/1")
+
+
 class CardRenderingTests(AlertWorkflowTestCase):
     def test_open_card_shows_only_reply_and_answer_buttons(self) -> None:
         with SessionLocal() as session:
@@ -222,8 +269,14 @@ class CardRenderingTests(AlertWorkflowTestCase):
         self.assertEqual(event.work_status, "checked")
         self.assertIn("Tahlil qilinmoqda", text)
         self.assertIn("Dildora", text)
+        self.assertNotIn("Kommentga o'tish", text)
+        self.assertNotIn("boshqalar kutsin", text.lower())
         self.assertIn("Tahlil qilinmoqda", message)
-        self.assertIn("Tahlil qilinmoqda", keyboard["inline_keyboard"][0][0]["text"])
+        reply_btn = keyboard["inline_keyboard"][0][0]
+        self.assertIn("Tahlil qilinmoqda", reply_btn["text"])
+        # Claimed button becomes a platform URL so staff re-open the original comment.
+        self.assertEqual(reply_btn.get("url"), "https://t.me/uzummarket_chat/361937")
+        self.assertNotIn("callback_data", reply_btn)
 
     def test_russian_locale_buttons(self) -> None:
         with SessionLocal() as session:
@@ -433,13 +486,115 @@ class CallbackTests(AlertWorkflowTestCase):
             stored = session.get(AlertEvent, event_id)
             self.assertEqual(stored.work_status, "checked")
             self.assertIn("Aziz", stored.checked_by or "")
-        # DM to staff user_id with the platform permalink.
+        # DM to staff with a single URL button to the original platform comment.
         dm = next((m for m in api.sent if m["chat_id"] == 7), None)
         self.assertIsNotNone(dm)
-        self.assertIn("https://t.me/uzummarket_chat/361937", dm["text"])
-        self.assertIn("telegram", dm["text"].lower())
+        self.assertIn("Tahlil qilinmoqda", dm["text"])
+        url_btn = dm["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(url_btn["url"], "https://t.me/uzummarket_chat/361937")
         self.assertTrue(api.edits)
         self.assertIn("Tahlil qilinmoqda", api.edits[0]["text"])
+        # Group card footer must not dump the link text.
+        self.assertNotIn("Kommentga o'tish", api.edits[0]["text"])
+        claimed_btn = api.edits[0]["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(claimed_btn.get("url"), "https://t.me/uzummarket_chat/361937")
+
+    def test_reply_without_permalink_still_claims_not_error(self) -> None:
+        """Regression: missing deep-link must not show «ochiladigan havola yo'q» as hard fail."""
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            event = self.make_event(session, payload={"permalink": None})
+            event_id = event.id
+
+        import app.services.alert_workflow as workflow
+
+        original = workflow.get_settings
+        workflow.get_settings = lambda: staff_settings()
+        try:
+            with SessionLocal() as session:
+                handled = handle_callback_query(
+                    api,
+                    session,
+                    callback_update("reply", event_id, {"id": 7, "first_name": "Aziz"}),
+                )
+        finally:
+            workflow.get_settings = original
+
+        self.assertTrue(handled)
+        with SessionLocal() as session:
+            stored = session.get(AlertEvent, event_id)
+            self.assertEqual(stored.work_status, "checked")
+            self.assertIn("Aziz", stored.checked_by or "")
+        self.assertTrue(api.answers)
+        answer_text = api.answers[0]["text"] or ""
+        self.assertIn("Tahlil qilinmoqda", answer_text)
+        self.assertNotIn("ochiladigan havola yo'q", answer_text.lower())
+        self.assertNotIn("no openable link", answer_text.lower())
+
+    def test_reply_staff_self_link_still_claims(self) -> None:
+        """Supports-group self-ingest link is not opened, but claim still succeeds."""
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            event = self.make_event(
+                session,
+                payload={
+                    "permalink": f"https://t.me/c/{STAFF_CHAT_ID[4:]}/99",
+                    "chat_id": int(STAFF_CHAT_ID),
+                    "message_id": 99,
+                    "source": "Supports",
+                },
+            )
+            event_id = event.id
+
+        import app.services.alert_workflow as workflow
+
+        original = workflow.get_settings
+        workflow.get_settings = lambda: staff_settings()
+        try:
+            with SessionLocal() as session:
+                handled = handle_callback_query(
+                    api,
+                    session,
+                    callback_update("reply", event_id, {"id": 7, "first_name": "Aziz"}),
+                )
+        finally:
+            workflow.get_settings = original
+
+        self.assertTrue(handled)
+        with SessionLocal() as session:
+            stored = session.get(AlertEvent, event_id)
+            self.assertEqual(stored.work_status, "checked")
+        answer_text = (api.answers[0]["text"] or "").lower()
+        self.assertNotIn("ochiladigan havola yo'q", answer_text)
+        # No DM with staff-group URL button.
+        dm = next((m for m in api.sent if m["chat_id"] == 7), None)
+        self.assertIsNone(dm)
+
+    def test_second_person_reply_shows_already_claiming_not_no_link(self) -> None:
+        api = FakeTelegramApi()
+        with SessionLocal() as session:
+            event = self.make_event(session, payload={"permalink": None})
+            apply_alert_action(session, event, "reply", Actor(name="Dildora", user_id=1))
+            session.commit()
+            event_id = event.id
+
+        import app.services.alert_workflow as workflow
+
+        original = workflow.get_settings
+        workflow.get_settings = lambda: staff_settings()
+        try:
+            with SessionLocal() as session:
+                handle_callback_query(
+                    api,
+                    session,
+                    callback_update("reply", event_id, {"id": 9, "first_name": "Aziz"}),
+                )
+        finally:
+            workflow.get_settings = original
+
+        answer_text = api.answers[0]["text"] or ""
+        self.assertIn("Dildora", answer_text)
+        self.assertNotIn("ochiladigan havola yo'q", answer_text.lower())
 
     def test_answer_ai_reject_does_not_credit(self) -> None:
         api = FakeTelegramApi()

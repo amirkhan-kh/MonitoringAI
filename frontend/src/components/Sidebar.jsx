@@ -20,7 +20,7 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
   const language = i18n.resolvedLanguage || i18n.language || "uz";
   const botLabel = botStatus?.ok && botStatus.username ? `@${botStatus.username}` : t("Bot ulanmagan");
   const navItems = [
-    { href: "/", label: t("Umumiy dashboard"), icon: LayoutDashboard },
+    { href: "/umumiy-dashboard", label: t("Umumiy dashboard"), icon: LayoutDashboard },
     { href: "/telegram-monitoring", label: t("Telegram monitoring"), icon: TelegramIcon },
     { href: "/youtube-monitoring", label: t("YouTube monitoring"), icon: YouTubeIcon },
     { href: "/instagram-monitoring", label: t("Instagram monitoring"), icon: Instagram },
@@ -64,8 +64,8 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
             className="themeToggle"
             type="button"
             onClick={handleThemeToggle}
-            aria-label={theme === "dark" ? "Yorug' rejim" : "Qorong'u rejim"}
-            title={theme === "dark" ? "Yorug' rejim" : "Qorong'u rejim"}
+            aria-label={theme === "dark" ? t("Yorug' rejim") : t("Qorong'u rejim")}
+            title={theme === "dark" ? t("Yorug' rejim") : t("Qorong'u rejim")}
           >
             <span className="themeToggleIcon" key={theme}>
               {theme === "dark" ? <Sun size={17} /> : <MoonStar size={17} />}
@@ -75,8 +75,8 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
             className="sidebarToggle"
             type="button"
             onClick={() => setCollapsed((value) => !value)}
-            aria-label={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
-            title={collapsed ? "Sidebarni ochish" : "Sidebarni yopish"}
+            aria-label={collapsed ? t("Sidebarni ochish") : t("Sidebarni yopish")}
+            title={collapsed ? t("Sidebarni ochish") : t("Sidebarni yopish")}
           >
             <span className="sidebarToggleIcon" key={collapsed ? "open" : "close"}>
               {collapsed ? <Menu size={18} /> : <X size={18} />}

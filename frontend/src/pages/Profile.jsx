@@ -288,7 +288,7 @@ function ActiveBrandSelector({ brands, selectedBrandId, onChange, onCreate }) {
     <section className="panel activeBrandToolbar">
       <div>
         <strong>Faol brand</strong>
-        <p>Shu yerda tanlangan brand dashboard va barcha monitoring bo'limlarida avtomatik qo'llanadi.</p>
+        <p>Dashboard va monitoring shu brand bo‘yicha.</p>
       </div>
       <SmartSelect
         value={selectedBrandId}

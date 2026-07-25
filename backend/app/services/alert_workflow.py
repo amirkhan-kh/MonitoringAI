@@ -55,6 +55,7 @@ from app.services.alerts import (
     parse_telegram_chat_ref,
     resolve_alert_chat_id,
     resolve_alert_lang,
+    resolve_comment_open_url,
     set_pending_staff_invite,
     try_resolve_staff_chat_ref,
 )
@@ -465,18 +466,37 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
         _safe_answer(api, callback_id, t("toast_error", lang))
         return True
 
-    # "Javob berish": claim + deep-link to original platform comment (reply context).
-    if action == "reply" and (changed or event.work_status == WORK_STATUS_CHECKED):
-        permalink = (event.payload or {}).get("permalink")
-        platform = (event.payload or {}).get("platform") or ""
-        if permalink:
+    # "Javob berish": claim first; then deep-link to the original platform comment.
+    if action == "reply":
+        if not changed:
+            # Refused (someone else already claimed / card closed) — show that reason.
             _safe_answer(api, callback_id, response, show_alert=True)
-            _deliver_comment_link(api, actor, permalink, platform=platform, card_chat_id=chat_id)
+            return True
+        open_url = resolve_comment_open_url(
+            event.payload or {},
+            staff_chat_id=str(event.telegram_chat_id or event.delivery_target or chat_id or ""),
+            session=session,
+            mention_id=event.mention_id,
+        )
+        if open_url:
+            _safe_answer(api, callback_id, t("toast_reply_open", lang), show_alert=False)
+            refresh_alert_card(api, event, lang=lang)
+            _open_platform_comment(
+                api,
+                actor,
+                open_url,
+                platform=(event.payload or {}).get("platform") or "",
+                fallback_chat_id=chat_id,
+            )
         else:
-            _safe_answer(api, callback_id, t("toast_no_link", lang), show_alert=True)
-    else:
-        _safe_answer(api, callback_id, response, show_alert=action == "answer")
+            # Claim still succeeded even without a deep-link (legacy cards / staff self-ingest).
+            # Never surface toast_no_link as a hard failure — staff can still «Javob berdim».
+            _safe_answer(api, callback_id, response or t("toast_reply_claimed", lang), show_alert=True)
+            refresh_alert_card(api, event, lang=lang)
+        sync_summary_message(api, session, settings, force=True)
+        return True
 
+    _safe_answer(api, callback_id, response, show_alert=action == "answer")
     if changed or action in {"reply", "answer"}:
         refresh_alert_card(api, event, lang=lang)
         if changed:
@@ -484,29 +504,38 @@ def handle_callback_query(api: TelegramBotApi, session: Session, update: dict[st
     return True
 
 
-def _deliver_comment_link(
+def _open_platform_comment(
     api: TelegramBotApi,
     actor: Actor,
-    permalink: str,
+    open_url: str,
     *,
     platform: str,
-    card_chat_id: Any,
+    fallback_chat_id: Any = None,
 ) -> None:
-    """Send deep link so staff opens the original comment in reply context."""
-    platform_name = platform or "platform"
-    text = (
-        f"💬 Javob berish — {platform_name}\n"
-        f"Kommentga o'ting (reply/otvet holatida):\n{permalink}\n\n"
-        "Mijoz bilan suhbatni yakunlab Supports guruhiga qayting va «Javob berdim»ni bosing."
-    )
-    # Prefer private DM so the group stays clean; fall back to a short group note.
+    """Push staff into the original comment (Telegram / IG / FB / YouTube app or web).
+
+    Telegram Bot API cannot auto-navigate a callback press to an arbitrary HTTPS URL.
+    After claim the group button becomes a *url* button; we also DM a single URL button
+    so the client opens the platform with one tap (reply/otvet context).
+    """
+    platform_name = (platform or "comment").strip().capitalize() or "Comment"
+    markup = {
+        "inline_keyboard": [
+            [{"text": f"↗ {platform_name} · komment / reply", "url": open_url}],
+        ]
+    }
+    text = f"⏳ Tahlil qilinmoqda — {platform_name}\nMijoz kommentiga o'ting (reply):"
     if actor.user_id:
         try:
-            api.send_message(actor.user_id, text)
+            api.send_message(actor.user_id, text, reply_markup=markup)
             return
         except Exception:  # noqa: BLE001
-            logger.debug("Could not DM staff user_id=%s", actor.user_id, exc_info=True)
-    _safe_send(api, card_chat_id, f"{actor.name}:\n{text}")
+            logger.debug("Could not DM open-comment to user_id=%s", actor.user_id, exc_info=True)
+    if fallback_chat_id is not None:
+        try:
+            api.send_message(fallback_chat_id, f"{actor.name}: {text}", reply_markup=markup)
+        except Exception:  # noqa: BLE001
+            logger.debug("Open-comment group fallback failed", exc_info=True)
 
 
 def _normalize_chat_id(chat_id: Any) -> str:

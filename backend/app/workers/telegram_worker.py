@@ -144,6 +144,9 @@ def handle_update(api: TelegramBotApi, update: dict[str, Any]) -> None:
         _, message = extracted
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
+        # Never ingest the staff Supports group or our own bot alert cards (feedback loop).
+        if _should_skip_ingestion_chat(chat_id, message):
+            return
         if chat_id is not None:
             try:
                 chat_info = api.get_chat(chat_id)
@@ -206,6 +209,50 @@ def handle_update(api: TelegramBotApi, update: dict[str, Any]) -> None:
     with SessionLocal() as session:
         mention = ingest_telegram_update(session, update, chat_description=chat_description)
         log_stored_mention(mention)
+
+
+def _should_skip_ingestion_chat(chat_id: Any, message: dict[str, Any]) -> bool:
+    """Drop staff-group traffic and self-alert loops before they become new Mentions."""
+    from app.config import get_settings
+    from app.services.alerts import get_bound_staff_chat, resolve_alert_chat_id
+
+    chat = str(chat_id or "").strip()
+    if not chat:
+        return False
+    settings = get_settings()
+    configured = str(settings.alert_telegram_chat_id or "").strip()
+    if configured and chat == configured:
+        return True
+    # Bot's own messages (alert cards) must never re-enter AI risk pipeline.
+    from_user = message.get("from") or {}
+    if from_user.get("is_bot"):
+        text = str(message.get("text") or message.get("caption") or "")
+        markup = str(message.get("reply_markup") or "")
+        if (
+            "Reputatsion xavf" in text
+            or "reputation risk" in text.lower()
+            or "alert:reply:" in markup
+            or "alert:answer:" in markup
+            or "Javob berdim" in text
+            or "Javob berish" in text
+            or "Ответил" in text
+            or "Ответить" in text
+            or "javobsiz turibdi" in text
+            or "Kim oladi?" in text
+        ):
+            return True
+    try:
+        with SessionLocal() as session:
+            bound = get_bound_staff_chat(session)
+            if bound and str(bound.get("chat_id") or "").strip() == chat:
+                return True
+            # Also respect brand/global resolved delivery target (bound or env).
+            resolved = str(resolve_alert_chat_id(session, settings, brand_id=None) or "").strip()
+            if resolved and resolved == chat:
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 
 
 def log_stored_mention(mention: Any | None) -> None:

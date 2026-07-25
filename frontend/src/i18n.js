@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import { resources } from "./locales.js";
@@ -35,6 +35,16 @@ function dynamicTranslation(value, language) {
     [/^(\d+) source$/, language === "ru" ? "$1 источников" : "$1 sources"],
     [/^(\d+) hashtag$/, language === "ru" ? "$1 хэштегов" : "$1 hashtags"],
     [/^Yetishmaydi: (.+)$/, language === "ru" ? "Не заполнено: $1" : "Missing: $1"],
+    // Dashboard AI reliability / coverage details
+    [/^Processed (\d+) · Xato (\d+) · Balans (.+)$/, language === "ru" ? "Обработано $1 · Ошибки $2 · Баланс $3" : "Processed $1 · Errors $2 · Balance $3"],
+    [/^Signal oqimi · (\d+)\/(\d+)$/, language === "ru" ? "Поток сигналов · $1/$2" : "Signal flow · $1/$2"],
+    [/^(\d+)\/(\d+) faol$/, language === "ru" ? "$1/$2 активны" : "$1/$2 active"],
+    [/^(\d+) ta token yaroqsiz$/, language === "ru" ? "Недействительных токенов: $1" : "$1 invalid tokens"],
+    [/^Source faol$/, language === "ru" ? "Source активен" : "Source active"],
+    [/^Akkaunt faol$/, language === "ru" ? "Аккаунт активен" : "Account active"],
+    [/^Page faol$/, language === "ru" ? "Страница активна" : "Page active"],
+    [/^(.+) API sozlanmagan$/, language === "ru" ? "API $1 не настроен" : "$1 API is not configured"],
+    [/^(.+) qo'shilmagan$/, language === "ru" ? "$1 не добавлен" : "$1 not added"],
     [/^(“.+?”) source butunlay o'chirilsinmi\? Unga tegishli barcha post, comment va AI tahlillar ham o'chadi\. Bu amalni ortga qaytarib bo'lmaydi\.$/, language === "ru" ? "$1: полностью удалить источник? Все связанные публикации, комментарии и анализы ИИ также будут удалены. Это действие нельзя отменить." : "$1: permanently delete this source? All related posts, comments, and AI analyses will also be deleted. This action cannot be undone."],
     [/^(\d+) ta source o'chirildi\. (\d+) ta tahlil qilingan mention saqlandi — bu (?:kanalni|manbani) qayta ulasangiz ular qayta tahlil qilinmaydi\.$/, language === "ru" ? "Удалено источников: $1. Сохранено проанализированных упоминаний: $2 — при повторном подключении они не будут анализироваться заново." : "Deleted $1 sources. Kept $2 analysed mentions — reconnecting this source will not re-analyse them."],
     [/^(\d+) ta akkaunt o'chirildi\. (\d+) ta tahlil qilingan mention saqlandi — bu akkauntni qayta ulasangiz ular qayta tahlil qilinmaydi\.$/, language === "ru" ? "Удалено аккаунтов: $1. Сохранено проанализированных упоминаний: $2 — при повторном подключении они не будут анализироваться заново." : "Deleted $1 accounts. Kept $2 analysed mentions — reconnecting this account will not re-analyse them."],
@@ -48,9 +58,26 @@ function dynamicTranslation(value, language) {
     [/^Serverga ulanib bo'lmadi \((.+)\)\. Backend ishga tushganini tekshiring\.$/, language === "ru" ? "Не удалось подключиться к серверу ($1). Проверьте, запущен ли backend." : "Could not connect to the server ($1). Check that the backend is running."],
   ];
   for (const [pattern, replacement] of patterns) {
-    if (pattern.test(value)) return value.replace(pattern, replacement);
+    if (!pattern.test(value)) continue;
+    if (typeof replacement === "function") {
+      return value.replace(pattern, (...args) => replacement(...args));
+    }
+    return value.replace(pattern, replacement);
   }
   return value;
+}
+
+/** Subscribe to UI language for canvas charts / imperative labels. */
+export function useUiLanguage() {
+  const [language, setLanguage] = useState(
+    () => i18n.resolvedLanguage || i18n.language || "uz",
+  );
+  useEffect(() => {
+    const onChange = (lng) => setLanguage(lng || "uz");
+    i18n.on("languageChanged", onChange);
+    return () => i18n.off("languageChanged", onChange);
+  }, []);
+  return language;
 }
 
 export function translateUiText(value, options = {}) {

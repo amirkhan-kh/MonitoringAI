@@ -1,6 +1,6 @@
 # Current Tasks
 
-Oxirgi yangilanish: 2026-07-22
+Oxirgi yangilanish: 2026-07-25
 
 ## Status snapshot
 
@@ -13,6 +13,7 @@ Oxirgi yangilanish: 2026-07-22
 | Signal inbox (xodimlar workflow) | Kod tayyor — guruhda live test |
 | Public Landing / Legal (Meta) | Kod tayyor |
 | Source soft-delete | Kod tayyor |
+| **UI AgentOS cockpit yo‘nalishi** | **Docs/skills tayyor; CSS/JSX HALI o‘zgarmagan** — qarang `design-direction-agentos-cockpit.md` |
 | Docker local | **Docker Desktop ishga tushmadi** (`unable to start`) — engine tuzatilgach `compose up` |
 
 ## Next (prioritet tartibida)

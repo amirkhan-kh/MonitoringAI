@@ -135,8 +135,30 @@ def record_alert(
             "permalink": permalink,
             "attempts": 0,
         }
+        # Persist Telegram location fields so "Javob berish" can rebuild a deep link
+        # even if permalink was null at analysis time.
+        if platform == "telegram" and mention_id is not None:
+            try:
+                from app.models import Mention
+
+                mention = session.get(Mention, mention_id)
+                if mention is not None:
+                    if mention.chat_id is not None:
+                        payload["chat_id"] = mention.chat_id
+                    if mention.message_id is not None:
+                        payload["message_id"] = mention.message_id
+                    if mention.chat_username:
+                        payload["chat_username"] = mention.chat_username
+                    if not payload.get("permalink") and mention.permalink:
+                        payload["permalink"] = mention.permalink
+            except Exception:  # noqa: BLE001
+                pass
         # Prefer the live-bound Supports group over a stale personal chat id in env.
         delivery_target = resolve_alert_chat_id(session, settings, brand_id)
+        # Never queue a "customer" alert whose origin is the staff Supports inbox itself.
+        if platform == "telegram" and delivery_target and payload.get("chat_id") is not None:
+            if str(payload.get("chat_id")).strip() == str(delivery_target).strip():
+                return None
         event = AlertEvent(
             brand_id=brand_id,
             # mention_id FK only exists for telegram mentions; others live in payload.
@@ -199,10 +221,12 @@ def build_alert_text(payload: dict, event: AlertEvent | None = None, *, lang: st
 
 
 def build_status_lines(event: AlertEvent, *, lang: str | None = None) -> list[str]:
-    """The workflow footer: open → tahlil qilinmoqda → javob berildi."""
+    """Compact professional footer: open → tahlil qilinmoqda → javob berildi.
+
+    No inline comment links or long 'waiting' instructions — deep-link lives on the button.
+    """
     lang = lang or DEFAULT_LANG
     work_status = event.work_status or WORK_STATUS_OPEN
-    payload = event.payload or {}
     lines: list[str] = []
     if work_status == WORK_STATUS_ANSWERED:
         answered_at = _as_utc(event.answered_at)
@@ -215,23 +239,144 @@ def build_status_lines(event: AlertEvent, *, lang: str | None = None) -> list[st
         )
     elif work_status == WORK_STATUS_CHECKED:
         lines.append(f"📌 {t('status', lang)}: ⏳ {t('status_checking', lang)}")
-        lines.append(
-            f"👤 {event.checked_by or '-'} · {local_time_text(event.checked_at)}"
-        )
-        lines.append(f"💬 {t('status_waiting_reply', lang)}")
-        permalink = payload.get("permalink")
-        if permalink:
-            lines.append(f"🔗 {t('status_open_link', lang)}: {permalink}")
+        lines.append(f"👤 {event.checked_by or '-'} · {local_time_text(event.checked_at)}")
     else:
         lines.append(f"📌 {t('status', lang)}: 🆕 {t('status_open', lang)}")
     return lines
 
 
-def build_alert_keyboard(event: AlertEvent, *, lang: str | None = None) -> dict:
-    """Only two staff actions: Javob berish (claim + open) and Javob berdim (AI verify + close)."""
+def _telegram_message_url(chat_id: Any, message_id: Any, username: str | None = None) -> str | None:
+    """Build a t.me deep link from chat + message ids (public username preferred)."""
+    if message_id is None or message_id == "":
+        return None
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        return None
+    username = (username or "").strip().lstrip("@")
+    if username:
+        return f"https://t.me/{username}/{mid}"
+    if chat_id is None or chat_id == "":
+        return None
+    raw = str(chat_id).strip()
+    # Supergroup/channel internal links: -100xxxxxxxxxx → t.me/c/xxxxxxxxxx/msg
+    if raw.startswith("-100") and len(raw) > 4:
+        return f"https://t.me/c/{raw[4:]}/{mid}"
+    if raw.lstrip("-").isdigit() and raw.startswith("-"):
+        # Basic groups have no stable public message link.
+        return None
+    return None
+
+
+def resolve_comment_open_url(
+    payload: dict | None,
+    *,
+    staff_chat_id: str | None = None,
+    session: Session | None = None,
+    mention_id=None,
+) -> str | None:
+    """Best URL to open the original platform comment for reply (any platform).
+
+    Rebuilds Telegram/YouTube links from stored ids when permalink is missing.
+    Rejects links that point at the staff Supports group itself (self-ingested cards).
+    """
+    payload = dict(payload or {})
+    # Optional live fallback: fill gaps from the original Telegram mention row.
+    if session is not None and mention_id is not None and (payload.get("platform") or "telegram") == "telegram":
+        try:
+            from app.models import Mention
+
+            mention = session.get(Mention, mention_id)
+            if mention is not None:
+                if not payload.get("permalink") and mention.permalink:
+                    payload["permalink"] = mention.permalink
+                if payload.get("chat_id") is None and mention.chat_id is not None:
+                    payload["chat_id"] = mention.chat_id
+                if payload.get("message_id") is None and mention.message_id is not None:
+                    payload["message_id"] = mention.message_id
+                if not payload.get("chat_username") and mention.chat_username:
+                    payload["chat_username"] = mention.chat_username
+        except Exception:  # noqa: BLE001 - never fail button press over a lookup
+            pass
+
+    candidates: list[str] = []
+    for key in ("permalink", "comment_url", "url", "link", "post_url", "media_permalink"):
+        value = payload.get(key)
+        if value:
+            candidates.append(str(value).strip())
+
+    # Telegram rebuild when only chat/message ids were stored.
+    rebuilt_tg = _telegram_message_url(
+        payload.get("chat_id"),
+        payload.get("message_id"),
+        payload.get("chat_username") or payload.get("username"),
+    )
+    if rebuilt_tg:
+        candidates.append(rebuilt_tg)
+
+    # YouTube style rebuild if we only stored ids
+    if payload.get("platform") == "youtube" and payload.get("video_id"):
+        vid = payload.get("video_id")
+        cid = payload.get("comment_id")
+        if cid:
+            candidates.append(f"https://www.youtube.com/watch?v={vid}&lc={cid}")
+        else:
+            candidates.append(f"https://www.youtube.com/watch?v={vid}")
+
+    staff_ids: set[str] = set()
+    staff_internal: str | None = None
+    if staff_chat_id:
+        raw = str(staff_chat_id).strip()
+        if raw:
+            staff_ids.add(raw)
+            if raw.startswith("-100"):
+                staff_internal = raw[4:]
+                staff_ids.add(staff_internal)
+            elif raw.startswith("-"):
+                staff_internal = raw.lstrip("-")
+                staff_ids.add(staff_internal)
+
+    # Also reject when the payload itself is the staff Supports chat (self-ingest).
+    payload_chat = str(payload.get("chat_id") or "").strip()
+    if payload_chat and payload_chat in staff_ids:
+        # Still allow a non-staff permalink if one somehow exists; skip rebuilt staff URLs below.
+        pass
+
+    for raw in candidates:
+        if not raw:
+            continue
+        url = raw if raw.startswith("http://") or raw.startswith("https://") else f"https://{raw.lstrip('/')}"
+        bare = url.replace("https://", "").replace("http://", "")
+        if staff_internal and f"t.me/c/{staff_internal}/" in bare:
+            continue  # never open the staff-card / staff-group message as "the customer comment"
+        # Public username link to the staff group itself (rare but possible).
+        if payload_chat and payload_chat in staff_ids and "t.me/" in bare:
+            # If we know the original chat is staff, drop all telegram deep links for it.
+            if "t.me/" in bare and "instagram.com" not in bare and "youtube.com" not in bare and "facebook.com" not in bare:
+                continue
+        if "t.me/c/" in bare or "t.me/" in bare or "instagram.com" in bare or "facebook.com" in bare or "fb.com" in bare or "youtube.com" in bare or "youtu.be" in bare:
+            return url
+        if url.startswith("https://") or url.startswith("http://"):
+            return url
+    return None
+
+
+def build_alert_keyboard(event: AlertEvent, *, lang: str | None = None, session: Session | None = None) -> dict:
+    """Javob berish (claim → open platform comment) + Javob berdim (AI close).
+
+    While claimed, the first button stays «Tahlil qilinmoqda…» and is a *url* button to the
+    original comment so staff can re-open Telegram/IG/FB/YouTube in one tap.
+    """
     lang = lang or DEFAULT_LANG
     work_status = event.work_status or WORK_STATUS_OPEN
     event_id = str(event.id)
+    payload = event.payload or {}
+    open_url = resolve_comment_open_url(
+        payload,
+        staff_chat_id=event.telegram_chat_id or event.delivery_target,
+        session=session,
+        mention_id=event.mention_id,
+    )
 
     if work_status == WORK_STATUS_ANSWERED:
         return {
@@ -242,12 +387,17 @@ def build_alert_keyboard(event: AlertEvent, *, lang: str | None = None) -> dict:
 
     if work_status == WORK_STATUS_CHECKED:
         reply_label = f"⏳ {t('btn_replying', lang)} · {_short_name(event.checked_by)}"
+        if open_url:
+            # URL button opens app/web on the original comment (reply context on TG/IG/FB/YT).
+            reply_btn = {"text": reply_label, "url": open_url}
+        else:
+            reply_btn = {"text": reply_label, "callback_data": f"alert:reply:{event_id}"}
     else:
-        reply_label = f"💬 {t('btn_reply', lang)}"
+        reply_btn = {"text": f"💬 {t('btn_reply', lang)}", "callback_data": f"alert:reply:{event_id}"}
 
     return {
         "inline_keyboard": [
-            [{"text": reply_label, "callback_data": f"alert:reply:{event_id}"}],
+            [reply_btn],
             [{"text": f"✅ {t('btn_answer', lang)}", "callback_data": f"alert:answer:{event_id}"}],
         ]
     }
@@ -316,7 +466,7 @@ def bind_staff_chat(
     chat_type: str | None = None,
 ) -> dict:
     """Persist the support group that should receive AI risk cards."""
-    from app.models import AppState
+    from app.models import AppState, TelegramSource
 
     value = {
         "chat_id": str(chat_id),
@@ -340,6 +490,16 @@ def bind_staff_chat(
     pending = session.get(AppState, PENDING_STAFF_INVITE_KEY)
     if pending is not None:
         session.delete(pending)
+    # Staff inbox must never be monitored as a customer source (self-alert loop).
+    try:
+        staff_chat_int = int(str(chat_id).strip())
+    except (TypeError, ValueError):
+        staff_chat_int = None
+    if staff_chat_int is not None:
+        session.query(TelegramSource).filter(TelegramSource.chat_id == staff_chat_int).update(
+            {TelegramSource.active: False},
+            synchronize_session=False,
+        )
     # Pending cards should retarget to the new group on next dispatch.
     session.query(AlertEvent).filter(
         AlertEvent.delivery_channel == "telegram",

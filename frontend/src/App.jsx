@@ -46,19 +46,19 @@ export default function App() {
     };
   }, []);
 
+  // Official marketing site always lives at /. Dashboard is /umumiy-dashboard.
+  if (path === "/" || path === "") return <Landing key={`${language}:landing`} />;
   if (path.startsWith("/login")) return <Login key={`${language}:login`} />;
   // Legal pages must stay reachable logged out — Meta's reviewer opens them that way.
   if (path.startsWith("/privacy")) return <PrivacyPolicy key={`${language}:privacy`} />;
   if (path.startsWith("/terms")) return <TermsOfService key={`${language}:terms`} />;
   if (path.startsWith("/data-deletion")) return <DataDeletion key={`${language}:data-deletion`} />;
-  // A signed-out visitor at the root gets the public company page, not a bare login box:
-  // Meta checks the website during business verification and App Review.
-  if (path === "/" && !isAuthed()) return <Landing key={`${language}:landing`} />;
   // Everything else is behind auth — no token means back to the login screen.
   if (!isAuthed()) {
     if (!window.location.pathname.startsWith("/login")) window.history.replaceState(null, "", "/login");
     return <Login key={`${language}:login`} />;
   }
+  if (path.startsWith("/umumiy-dashboard")) return <Dashboard key={`${language}:dashboard`} />;
   if (path.startsWith("/profile")) return <Profile key={`${language}:profile`} />;
   if (path.startsWith("/telegram-monitoring")) return <TelegramMonitoring key={`${language}:telegram`} />;
   if (path.startsWith("/youtube-monitoring")) return <YoutubeMonitoring key={`${language}:youtube`} />;
