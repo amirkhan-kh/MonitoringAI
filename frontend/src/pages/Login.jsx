@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { ArrowRight, Eye, EyeOff, LockKeyhole, Radio, User } from "lucide-react";
 import { login as apiLogin } from "../api/client";
 import { navigateTo } from "../navigation";
+import { applyTheme, getStoredTheme, resolveTheme } from "../theme";
 
 const PLATFORMS = [
   {
@@ -86,10 +87,15 @@ export function Login() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // Login defaults to light when user has never toggled; stored choice always wins.
+  useEffect(() => {
+    applyTheme(getStoredTheme() || resolveTheme("/login"), { persist: false });
+  }, []);
+
   async function handleSubmit(event) {
     event.preventDefault();
     if (!username.trim() || !password.trim()) {
-      setError("Login va parolni to'ldiring.");
+      setError("Email (yoki login) va parolni to'ldiring.");
       return;
     }
     setLoading(true);
@@ -200,7 +206,7 @@ export function Login() {
             transition={reduceMotion ? { duration: 0 } : { delay: 0.36, duration: 0.5, ease: easeOut }}
           >
             <label className="field">
-              <span>Login</span>
+              <span>Email yoki login</span>
               <div className="inputWithIcon">
                 <User size={17} aria-hidden />
                 <input
@@ -214,7 +220,7 @@ export function Login() {
             <label className="field">
               <span>Parol</span>
               <div className="inputWithIcon hasPasswordToggle">
-                <LockKeyhole size={17} aria-hidden />
+                <LockKeyhole size={17} strokeWidth={2} aria-hidden />
                 <input
                   className="input"
                   type={showPassword ? "text" : "password"}
@@ -228,9 +234,9 @@ export function Login() {
                   onClick={() => setShowPassword((value) => !value)}
                   aria-label={showPassword ? "Parolni berkitish" : "Parolni ko'rsatish"}
                   aria-pressed={showPassword}
-                  title={showPassword ? "Berkitish" : "Ko'rsatish"}
+                  title={showPassword ? "Parolni berkitish" : "Parolni ko'rsatish"}
                 >
-                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                  {showPassword ? <EyeOff size={18} strokeWidth={2} /> : <Eye size={18} strokeWidth={2} />}
                 </button>
               </div>
             </label>
@@ -256,6 +262,11 @@ export function Login() {
               <span>{loading ? "Kirilmoqda..." : "Kirish"}</span>
               <ArrowRight size={17} />
             </motion.button>
+
+            <p className="loginFooterLink">
+              Akkount yo‘qmi?{" "}
+              <a href="/register">Bepul ro‘yxatdan o‘tish</a>
+            </p>
           </motion.form>
         </motion.section>
       </div>

@@ -339,6 +339,63 @@ def request_language(request: Request) -> str:
     return value if value in SUPPORTED_LANGUAGES else "uz"
 
 
+def _pattern_translate_catalog(value: str, language: str) -> str | None:
+    """Heuristic translations for expanded taxonomy labels (sectors, branches, variants)."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if language == "en":
+        if text.endswith(" va yo'nalish") or text.endswith(" va yo‘nalish"):
+            base = text.rsplit(" va ", 1)[0].strip()
+            return f"{base} industry"
+        if text.endswith(" variant ") or " variant " in text:
+            # e.g. "Education variant 3"
+            return text
+        suffixes = {
+            " brendi": " brand",
+            " platformasi": " platform",
+            " xizmati": " service",
+            " ishlab chiqarish": " manufacturing",
+            " marketplace": " marketplace",
+            " konsalting": " consulting",
+            " texnologiyasi": " technology",
+            " ta'minoti": " supply",
+            " dasturi": " program",
+            " agentligi": " agency",
+            " markazi": " center",
+            " tarmog'i": " network",
+            " tarmog‘i": " network",
+        }
+        for src, dst in suffixes.items():
+            if text.endswith(src):
+                return f"{text[: -len(src)].strip()}{dst}"
+    if language == "ru":
+        if text.endswith(" va yo'nalish") or text.endswith(" va yo‘nalish"):
+            base = text.rsplit(" va ", 1)[0].strip()
+            return f"{base}: направление"
+        suffixes = {
+            " brendi": " бренд",
+            " platformasi": " платформа",
+            " xizmati": " услуга",
+            " ishlab chiqarish": " производство",
+            " marketplace": " маркетплейс",
+            " konsalting": " консалтинг",
+            " texnologiyasi": " технология",
+            " ta'minoti": " поставка",
+            " dasturi": " программа",
+            " agentligi": " агентство",
+            " markazi": " центр",
+            " tarmog'i": " сеть",
+            " tarmog‘i": " сеть",
+        }
+        for src, dst in suffixes.items():
+            if text.endswith(src):
+                return f"{text[: -len(src)].strip()}{dst}"
+        if " variant " in text:
+            return text.replace(" variant ", " вариант ")
+    return None
+
+
 def translate_text(value: str, language: str) -> str:
     if language == "uz" or not value:
         return value
@@ -351,6 +408,9 @@ def translate_text(value: str, language: str) -> str:
     exact = CATALOG_TRANSLATIONS.get(language, {}).get(value)
     if exact:
         return exact
+    patterned = _pattern_translate_catalog(value, language)
+    if patterned:
+        return patterned
     translated = value
     for source, target in sorted(CATALOG_REPLACEMENTS.get(language, {}).items(), key=lambda row: len(row[0]), reverse=True):
         translated = translated.replace(source, target)
@@ -401,6 +461,46 @@ def localize_taxonomy(taxonomy: dict[str, Any], language: str) -> dict[str, Any]
         ]
         for key, values in taxonomy.get("audience_groups", {}).items()
     }
+    # Analysis languages (100+ for smart-fill). Labels follow current UI language (uz|en|ru).
+    # Prefer pinning interface trio first so they stay easy to find.
+    from app.language_labels import language_label
+
+    preferred = ("uz", "ru", "en")
+    languages = []
+    for item in taxonomy.get("languages") or []:
+        row = dict(item) if isinstance(item, dict) else {"value": item, "label": str(item)}
+        code = str(row.get("value") or row.get("key") or "")
+        row["value"] = code
+        row["key"] = row.get("key") or code
+        row["label"] = language_label(code, language) or str(row.get("label") or code)
+        languages.append(row)
+
+    def _lang_sort_key(item: dict[str, Any]) -> tuple:
+        code = str(item.get("value") or "").casefold()
+        try:
+            rank = preferred.index(code)
+        except ValueError:
+            rank = 100
+        return (rank, str(item.get("label") or code).casefold())
+
+    localized["languages"] = sorted(languages, key=_lang_sort_key)
+    catalog = taxonomy.get("catalog") or {}
+    if catalog:
+        localized["catalog"] = {
+            "activities": [
+                _localize_catalog_row(item, language) if isinstance(item, dict) else {"value": item, "label": translate_text(str(item), language)}
+                for item in catalog.get("activities", [])
+            ],
+            "business_models": [
+                _localize_catalog_row(item, language) if isinstance(item, dict) else {"value": item, "label": translate_text(str(item), language)}
+                for item in catalog.get("business_models", [])
+            ],
+            "audience_segments": [
+                _localize_catalog_row(item, language) if isinstance(item, dict) else {"value": item, "label": translate_text(str(item), language)}
+                for item in catalog.get("audience_segments", [])
+            ],
+            "languages": localized["languages"],
+        }
     for goal in localized.get("goals", []):
         goal["label"] = translate_text(str(goal.get("label") or ""), language)
     localized["source_playbooks"] = {

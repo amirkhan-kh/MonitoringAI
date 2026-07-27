@@ -11,9 +11,12 @@
         try {
           var key = "monitoring_ui_theme";
           var stored = localStorage.getItem(key);
+          var path = location.pathname || "";
+          var isLogin = path === "/login" || path.indexOf("/login") === 0;
+          /* Defaults: login light, landing + dashboard dark. Stored toggle wins. */
           var theme = stored === "light" || stored === "dark"
             ? stored
-            : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+            : (isLogin ? "light" : "dark");
           document.documentElement.dataset.theme = theme;
           document.documentElement.style.colorScheme = theme;
         } catch (e) {

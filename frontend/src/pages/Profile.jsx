@@ -28,12 +28,16 @@ import {
 } from "lucide-react";
 import {
   endpoints,
+  isBrandUnlocked,
+  isSuperAdmin,
   logout,
+  markBrandUnlocked,
   readAdminSession,
   readSelectedBrandId,
   resolveSelectedBrandId,
   saveAdminSession,
   saveSelectedBrandId,
+  unlockBrand,
 } from "../api/client";
 import { TelegramIcon, YouTubeIcon } from "../components/BrandIcons";
 import DeleteSourceModal from "../components/DeleteSourceModal";
@@ -284,59 +288,177 @@ function ProfileSummary({ telegramSources, youtubeSources, instagramSources, fac
 }
 
 function ActiveBrandSelector({ brands, selectedBrandId, onChange, onCreate }) {
+  const { t } = useTranslation();
+  const superAdmin = isSuperAdmin();
+  const options = brands.map((brand) => ({
+    value: brand.id,
+    label: superAdmin && brand.owner_email
+      ? `${brand.name} · ${brand.owner_email}`
+      : brand.name,
+    searchTerms: [brand.name, brand.owner_email, brand.owner_name].filter(Boolean),
+  }));
   return (
     <section className="panel activeBrandToolbar">
       <div>
-        <strong>Faol brand</strong>
-        <p>Dashboard va monitoring shu brand bo‘yicha.</p>
+        <strong>{t("Faol brand")}</strong>
+        <p>
+          {superAdmin
+            ? t("Super admin barcha brandlarni ko‘radi. Boshqa mijoz brandiga o‘tishda egasining login/paroli so‘raladi.")
+            : t("Faqat o‘zingiz yaratgan brandlar ko‘rinadi. Dashboard va monitoring shu brand bo‘yicha.")}
+        </p>
       </div>
       <SmartSelect
         value={selectedBrandId}
-        options={brands.map((brand) => ({ value: brand.id, label: brand.name }))}
+        options={options}
         onChange={onChange}
-        emptyLabel="Brand mavjud emas"
-        ariaLabel="Faol brandni qidirish va tanlash"
+        emptyLabel={t("Brand mavjud emas")}
+        ariaLabel={t("Faol brandni qidirish va tanlash")}
       />
       <button className="button secondary" type="button" onClick={onCreate}>
         <Plus size={16} />
-        <span>Yangi brand</span>
+        <span>{t("Yangi brand")}</span>
       </button>
     </section>
   );
 }
 
+function BrandUnlockModal({ brand, onCancel, onUnlocked }) {
+  const { t } = useTranslation();
+  const [email, setEmail] = useState(brand?.owner_email || "");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    if (!brand?.id) return;
+    setBusy(true);
+    setError("");
+    try {
+      await unlockBrand(brand.id, email.trim(), password);
+      markBrandUnlocked(brand.id);
+      onUnlocked?.(brand.id);
+    } catch (err) {
+      setError(err.message || t("Kirish rad etildi"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="brandUnlockOverlay" role="dialog" aria-modal="true" aria-labelledby="brand-unlock-title">
+      <form className="brandUnlockCard panel" onSubmit={handleSubmit}>
+        <h3 id="brand-unlock-title">{t("Brand himoyasi")}</h3>
+        <p>
+          <strong data-i18n-ignore="true">{brand?.name}</strong>{" "}
+          {t("boshqa mijoz ish maydoni. Client xavfsizligi uchun brand egasining login va parolini kiriting.")}
+        </p>
+        {brand?.owner_email ? (
+          <p className="muted small">
+            {t("Ega:")} <span data-i18n-ignore="true">{brand.owner_name || brand.owner_email}</span>
+          </p>
+        ) : null}
+        {error ? <div className="errorBanner">{error}</div> : null}
+        <label className="field">
+          <span>{t("Login (email)")}</span>
+          <input
+            className="input"
+            type="email"
+            autoComplete="username"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+        </label>
+        <label className="field">
+          <span>{t("Parol")}</span>
+          <input
+            className="input"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+        </label>
+        <div className="brandUnlockActions">
+          <button className="button" type="button" onClick={onCancel} disabled={busy}>
+            {t("Bekor qilish")}
+          </button>
+          <button className="button primary" type="submit" disabled={busy || !password}>
+            {busy ? t("Tekshirilmoqda...") : t("Brandni ochish")}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function BrandIntelligencePanel({ brand, taxonomy, onSave, onCreate, saving }) {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const resolvedLanguage = i18n.resolvedLanguage || i18n.language || "uz";
-  const analysisLanguage = ["uz", "ru", "en"].includes(resolvedLanguage) ? resolvedLanguage : "uz";
+  const defaultLanguage = brand?.language || (["uz", "ru", "en"].includes(resolvedLanguage) ? resolvedLanguage : "uz");
   const categories = taxonomy?.categories || [];
   const goals = taxonomy?.goals || [];
-  const [form, setForm] = useState(() => buildBrandForm(brand, analysisLanguage));
+  // Analysis language for smart-fill / AI (100+). Separate from UI chrome (uz|ru|en only).
+  const languageOptions = useMemo(() => {
+    const fromTaxonomy = (taxonomy?.languages || taxonomy?.catalog?.languages || []).map((item) => ({
+      value: item.value || item.key,
+      label: item.label || item.value || item.key,
+    }));
+    if (fromTaxonomy.length) return uniqueCatalogOptions(fromTaxonomy);
+    return [
+      { value: "uz", label: t("O'zbek") },
+      { value: "ru", label: t("Rus") },
+      { value: "en", label: t("Ingliz") },
+    ];
+  }, [t, taxonomy?.catalog?.languages, taxonomy?.languages]);
+  const [form, setForm] = useState(() => buildBrandForm(brand, defaultLanguage));
   const [selectionTouched, setSelectionTouched] = useState(false);
   const [suggestion, setSuggestion] = useState({ status: "idle", message: "", model: "" });
   const suggestionRequestRef = useRef(0);
   const currentSignatureRef = useRef("");
+  const analysisLanguage = form.language || defaultLanguage;
 
   useEffect(() => {
-    setForm(buildBrandForm(brand, analysisLanguage));
+    setForm(buildBrandForm(brand, brand?.language || defaultLanguage));
     setSelectionTouched(false);
     setSuggestion({ status: "idle", message: "", model: "" });
-  }, [analysisLanguage, brand]);
+  }, [brand?.id]);
 
   const selectedCategory = categories.find((item) => catalogMatches(item, form.primary_category));
   const primaryOptions = form.primary_category && !selectedCategory
     ? [{ value: form.primary_category, label: form.primary_category }, ...categories]
     : categories;
   const allChildOptions = useMemo(() => uniqueCatalogOptions(categories.flatMap((category) => category.children || [])), [categories]);
-  const allActivityOptions = useMemo(() => uniqueCatalogOptions(allChildOptions.flatMap((child) => child.activities || [])), [allChildOptions]);
-  const allBusinessModelOptions = useMemo(() => uniqueCatalogOptions(allActivityOptions.flatMap((activity) => activity.business_models || [])), [allActivityOptions]);
-  const allAudienceOptions = useMemo(() => uniqueCatalogOptions(Object.values(taxonomy?.audience_groups || {}).flat()), [taxonomy?.audience_groups]);
+  const catalogActivities = taxonomy?.catalog?.activities || [];
+  const catalogModels = taxonomy?.catalog?.business_models || [];
+  const catalogAudience = taxonomy?.catalog?.audience_segments || [];
+  const allActivityOptions = useMemo(() => {
+    const nested = categories.flatMap((category) => category.activities || [])
+      .concat(categories.flatMap((category) => (category.children || []).flatMap((child) => child.activities || [])));
+    return uniqueCatalogOptions([...(catalogActivities || []), ...nested]);
+  }, [catalogActivities, categories]);
+  const allBusinessModelOptions = useMemo(() => {
+    const nested = allActivityOptions.flatMap((activity) => activity.business_models || []);
+    return uniqueCatalogOptions([...(catalogModels || []), ...nested]);
+  }, [allActivityOptions, catalogModels]);
+  const allAudienceOptions = useMemo(
+    () => uniqueCatalogOptions([
+      ...(catalogAudience || []),
+      ...Object.values(taxonomy?.audience_groups || {}).flat(),
+    ]),
+    [catalogAudience, taxonomy?.audience_groups],
+  );
   const childOptions = uniqueCatalogOptions(selectedCategory?.children || []);
   const selectedChild = allChildOptions.find((item) => catalogMatches(item, form.sub_category));
-  const activityOptions = selectedChild?.activities || [];
-  const selectedActivity = allActivityOptions.find((item) => catalogMatches(item, form.activity));
+  // Activities live on category (lean taxonomy v3) with legacy child fallback.
+  const activityOptions = selectedCategory?.activities || selectedChild?.activities || [];
+  const selectedActivity = allActivityOptions.find((item) => catalogMatches(item, form.activity))
+    || activityOptions.find((item) => catalogMatches(item, form.activity));
   const businessModelOptions = selectedActivity?.business_models || [];
-  const selectedBusinessModel = allBusinessModelOptions.find((item) => catalogMatches(item, form.business_model));
+  const selectedBusinessModel = allBusinessModelOptions.find((item) => catalogMatches(item, form.business_model))
+    || businessModelOptions.find((item) => catalogMatches(item, form.business_model));
   const audienceOptions = uniqueCatalogOptions((selectedBusinessModel?.audience_groups || [])
     .flatMap((groupKey) => taxonomy?.audience_groups?.[groupKey] || []));
   const selectedGoalKeys = new Set(form.monitoring_goals);
@@ -377,23 +499,46 @@ function BrandIntelligencePanel({ brand, taxonomy, onSave, onCreate, saving }) {
 
   useEffect(() => {
     if (!selectionTouched || !suggestionReady) return undefined;
-    const timer = window.setTimeout(() => generateSuggestions(suggestionSignature), 850);
+    // Short debounce: wait until chained selects settle, then fill immediately (fresh = no heavy existing_values).
+    const timer = window.setTimeout(() => {
+      generateSuggestions(suggestionSignature, { fresh: true });
+    }, 160);
     return () => window.clearTimeout(timer);
   }, [selectionTouched, suggestionReady, suggestionSignature]);
 
-  async function generateSuggestions(requestSignature = suggestionSignature) {
+  async function generateSuggestions(requestSignature = suggestionSignature, options = {}) {
+    const fresh = options.fresh !== false;
     if (!suggestionReady) {
       setSuggestion({
         status: "error",
-        message: "Avval yo'nalishdan auditoriya segmentigacha bo'lgan bog'langan tanlovlarni to'ldiring.",
+        message: t("Avval yo'nalishdan auditoriya segmentigacha bo'lgan bog'langan tanlovlarni to'ldiring."),
         model: "",
       });
       return;
     }
+    if (!form.name.trim()) {
+      setSuggestion({ status: "error", message: t("Aqlli to'ldirish uchun brand nomini kiriting."), model: "" });
+      return;
+    }
     const requestId = suggestionRequestRef.current + 1;
     suggestionRequestRef.current = requestId;
-    setSuggestion({ status: "loading", message: "Gemini Pro tanlangan yo'nalishni chuqur tahlil qilmoqda...", model: "" });
+    setSuggestion({ status: "loading", message: t("Gemini Pro profil maydonlarini tayyorlamoqda..."), model: "" });
     try {
+      // Fresh re-fill after taxonomy changes: skip large existing_values so Gemini responds faster.
+      const existing_values = fresh
+        ? {}
+        : {
+            description: form.description.trim(),
+            audience: form.audience.trim(),
+            aliases: textToList(form.aliases),
+            keywords: textToList(form.keywords),
+            products: textToList(form.products),
+            competitors: textToList(form.competitors),
+            risk_keywords: textToList(form.risk_keywords),
+            positive_keywords: textToList(form.positive_keywords),
+            ignore_terms: textToList(form.ignore_terms),
+            monitor_notes: form.monitor_notes.trim(),
+          };
       const response = await endpoints.brandProfileSuggestions({
         name: form.name.trim(),
         website: form.website.trim() || null,
@@ -402,42 +547,35 @@ function BrandIntelligencePanel({ brand, taxonomy, onSave, onCreate, saving }) {
         business_model: form.business_model,
         audience_segment: form.audience_segment || null,
         region: form.region.trim() || null,
-        existing_values: {
-          description: form.description.trim(),
-          audience: form.audience.trim(),
-          aliases: textToList(form.aliases),
-          keywords: textToList(form.keywords),
-          products: textToList(form.products),
-          competitors: textToList(form.competitors),
-          risk_keywords: textToList(form.risk_keywords),
-          positive_keywords: textToList(form.positive_keywords),
-          ignore_terms: textToList(form.ignore_terms),
-          monitor_notes: form.monitor_notes.trim(),
-        },
+        existing_values,
       });
       if (requestId !== suggestionRequestRef.current || requestSignature !== currentSignatureRef.current) return;
       setForm((current) => ({
         ...current,
         description: response.description || "",
         audience: response.audience || "",
-        aliases: listToText(response.aliases),
-        keywords: listToText(response.keywords),
-        products: listToText(response.products),
-        competitors: listToText(response.competitors),
-        risk_keywords: listToText(response.risk_keywords),
-        positive_keywords: listToText(response.positive_keywords),
-        ignore_terms: listToText(response.ignore_terms),
+        aliases: listToText(response.aliases || []),
+        keywords: listToText(response.keywords || []),
+        products: listToText(response.products || []),
+        competitors: listToText(response.competitors || []),
+        risk_keywords: listToText(response.risk_keywords || []),
+        positive_keywords: listToText(response.positive_keywords || []),
+        ignore_terms: listToText(response.ignore_terms || []),
         monitor_notes: response.monitor_notes || "",
       }));
       setSelectionTouched(false);
       setSuggestion({
         status: "success",
-        message: "Maydonlar aqlli tarzda to'ldirildi. Har bir qiymatni qo'lda tahrirlashingiz mumkin.",
+        message: t("Maydonlar aqlli tarzda to'ldirildi. Har bir qiymatni qo'lda tahrirlashingiz mumkin."),
         model: response.model_name || "Gemini Pro",
       });
     } catch (error) {
       if (requestId !== suggestionRequestRef.current) return;
-      setSuggestion({ status: "error", message: error.message, model: "" });
+      setSuggestion({
+        status: "error",
+        message: error?.message || t("Aqlli to'ldirish ishlamadi. Qayta urinib ko'ring."),
+        model: "",
+      });
     }
   }
 
@@ -608,16 +746,15 @@ function BrandIntelligencePanel({ brand, taxonomy, onSave, onCreate, saving }) {
             <label className="field">
               <span>Tahlil tili</span>
               <SmartSelect
-                value={analysisLanguage}
-                options={[
-                  { value: "en", label: "Ingliz" },
-                  { value: "ru", label: "Rus" },
-                  { value: "uz", label: "O'zbek" },
-                ]}
-                disabled
+                value={form.language || analysisLanguage}
+                options={languageOptions}
+                onChange={(value) => {
+                  setSelectionTouched(true);
+                  setForm((current) => ({ ...current, language: value }));
+                }}
                 ariaLabel="Tahlil tilini qidirish va tanlash"
               />
-              <p className="fieldHint">Gemini aqlli to'ldirish va AI xulosalari interfeysda tanlangan joriy tilda yaratiladi.</p>
+              <p className="fieldHint">{t("Gemini aqlli to‘ldirish va AI xulosalari shu tahlil tilida yaratiladi (100+ til). Interfeys tili alohida: o‘zbek, rus, ingliz.")}</p>
             </label>
             <label className="field spanTwo">
               <span>Brand nima qiladi</span>
@@ -644,9 +781,20 @@ function BrandIntelligencePanel({ brand, taxonomy, onSave, onCreate, saving }) {
                 <small>{suggestion.message || "Bog'langan tanlovlar yakunlangach profil maydonlari avtomatik tayyorlanadi."}</small>
               </span>
             </div>
-            <button className="miniButton" type="button" disabled={!suggestionReady || suggestion.status === "loading"} onClick={() => generateSuggestions()}>
+            <button
+              className="miniButton"
+              type="button"
+              disabled={!suggestionReady || suggestion.status === "loading"}
+              onClick={() => generateSuggestions(suggestionSignature, { fresh: true })}
+            >
               <RefreshCw size={15} />
-              <span>{suggestion.status === "loading" ? "Tahlil qilmoqda..." : suggestion.status === "success" ? "Qayta to'ldirish" : "Aqlli to'ldirish"}</span>
+              <span>
+                {suggestion.status === "loading"
+                  ? t("Tahlil qilmoqda...")
+                  : suggestion.status === "success"
+                    ? t("Qayta to'ldirish")
+                    : t("Aqlli to'ldirish")}
+              </span>
             </button>
             {suggestion.model && <em>{suggestion.model}</em>}
           </div>
@@ -748,6 +896,8 @@ function BrandIntelligencePanel({ brand, taxonomy, onSave, onCreate, saving }) {
 
 function buildBrandForm(brand, preferredLanguage = "uz") {
   const config = brand?.profile_config || {};
+  // Analysis language may be any supported ISO code (100+); default to UI preference.
+  const language = brand?.language || preferredLanguage || "uz";
   return {
     name: brand?.name || "",
     description: brand?.description || "",
@@ -757,7 +907,7 @@ function buildBrandForm(brand, preferredLanguage = "uz") {
     activity: brand?.category_path?.[2] || config.activity || "",
     business_model: brand?.category_path?.[3] || config.business_model || "",
     audience_segment: brand?.category_path?.[4] || config.audience_segment || "",
-    language: preferredLanguage,
+    language,
     aliases: listToText(brand?.aliases),
     keywords: listToText(brand?.keywords),
     products: listToText(brand?.products),
@@ -1452,6 +1602,7 @@ function SourceEditorModal({
 }
 
 export function Profile() {
+  const { t, i18n } = useTranslation();
   const [session, setSession] = useState(() => readAdminSession());
   const [botStatus, setBotStatus] = useState(null);
   const [brands, setBrands] = useState([]);
@@ -1470,6 +1621,7 @@ export function Profile() {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [unlockBrandTarget, setUnlockBrandTarget] = useState(null);
 
   const loadProfile = useCallback(async () => {
     setLoading(true);
@@ -1495,7 +1647,17 @@ export function Profile() {
       setInstagramSources(value(5, []));
       setFacebookSources(value(6, []));
       setYoutubeStatus(value(7, null));
-      setSelectedBrandId((current) => resolveSelectedBrandId(brandRows, current));
+      setSelectedBrandId((current) => {
+        const resolved = resolveSelectedBrandId(brandRows, current);
+        const brand = brandRows.find((row) => row.id === resolved);
+        if (brand?.requires_unlock && !isBrandUnlocked(brand.id)) {
+          // Keep list visible, but do not open another client's workspace until unlock.
+          setUnlockBrandTarget(brand);
+          saveSelectedBrandId("");
+          return "";
+        }
+        return resolved;
+      });
       const failed = requests
         .map((request, index) => request.status === "rejected" ? [index, request.reason?.message] : null)
         .filter(Boolean);
@@ -1513,6 +1675,19 @@ export function Profile() {
   useEffect(() => {
     loadProfile();
   }, [loadProfile]);
+
+  // Reload localized taxonomy when UI language changes (uz/en/ru).
+  useEffect(() => {
+    let cancelled = false;
+    endpoints.brandTaxonomy()
+      .then((rows) => {
+        if (!cancelled) setTaxonomy(rows);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [i18n.resolvedLanguage, i18n.language]);
 
   useEffect(() => {
     if (!selectedBrandId) {
@@ -1579,11 +1754,30 @@ export function Profile() {
     logout();
   }
 
+  function brandNeedsUnlock(brand) {
+    if (!brand?.id || !isSuperAdmin()) return false;
+    if (!brand.requires_unlock) return false;
+    return !isBrandUnlocked(brand.id);
+  }
+
   function handleBrandChange(brandId) {
+    const next = brands.find((brand) => brand.id === brandId);
+    if (next && brandNeedsUnlock(next)) {
+      setUnlockBrandTarget(next);
+      return;
+    }
     saveSelectedBrandId(brandId);
     setSelectedBrandId(brandId);
     setTelegramConnection(null);
     setResult(null);
+  }
+
+  function handleUnlockSuccess(brandId) {
+    setUnlockBrandTarget(null);
+    saveSelectedBrandId(brandId);
+    setSelectedBrandId(brandId);
+    setTelegramConnection(null);
+    setResult({ ok: true, message: t("Brand ochildi. Client ish maydoniga kirdingiz.") });
   }
 
   function handleNewBrand() {
@@ -1998,6 +2192,14 @@ export function Profile() {
           onCancel={() => setPendingDelete(null)}
           onConfirm={confirmDeleteSource}
         />
+
+        {unlockBrandTarget ? (
+          <BrandUnlockModal
+            brand={unlockBrandTarget}
+            onCancel={() => setUnlockBrandTarget(null)}
+            onUnlocked={handleUnlockSuccess}
+          />
+        ) : null}
       </main>
     </div>
   );

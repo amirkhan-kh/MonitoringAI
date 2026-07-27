@@ -437,22 +437,33 @@ def resolve_delivery_bot_token(session: Session, settings: Settings, brand_id) -
 
 
 STAFF_CHAT_STATE_KEY = "alert_staff_chat"
+PENDING_STAFF_INVITE_KEY = "alert_staff_pending_invite"
 
 
-def get_bound_staff_chat(session: Session) -> dict | None:
-    """Runtime-bound support group (from /staff, /id, or bot-added-to-group)."""
+def staff_chat_state_key(brand_id=None) -> str:
+    """Global key for platform bot; per-brand key for multi-tenant support groups."""
+    if brand_id is not None:
+        return f"alert_staff_chat:{brand_id}"
+    return STAFF_CHAT_STATE_KEY
+
+
+def pending_staff_invite_key(brand_id=None) -> str:
+    if brand_id is not None:
+        return f"alert_staff_pending_invite:{brand_id}"
+    return PENDING_STAFF_INVITE_KEY
+
+
+def get_bound_staff_chat(session: Session, brand_id=None) -> dict | None:
+    """Runtime-bound support group (from /staff, setup UI, or bot-added-to-group)."""
     from app.models import AppState
 
-    state = session.get(AppState, STAFF_CHAT_STATE_KEY)
+    state = session.get(AppState, staff_chat_state_key(brand_id))
     if not state or not isinstance(state.value, dict):
         return None
     chat_id = str(state.value.get("chat_id") or "").strip()
     if not chat_id:
         return None
     return state.value
-
-
-PENDING_STAFF_INVITE_KEY = "alert_staff_pending_invite"
 
 
 def bind_staff_chat(
@@ -464,8 +475,13 @@ def bind_staff_chat(
     invite_link: str | None = None,
     username: str | None = None,
     chat_type: str | None = None,
+    brand_id=None,
 ) -> dict:
-    """Persist the support group that should receive AI risk cards."""
+    """Persist the support group that should receive AI risk cards.
+
+    When ``brand_id`` is set the bind is brand-scoped (multi-tenant). Global binds
+    remain for the platform monitoring bot / Aviora internal workspace only.
+    """
     from app.models import AppState, TelegramSource
 
     value = {
@@ -475,21 +491,38 @@ def bind_staff_chat(
         "invite_link": (invite_link or "").strip() or None,
         "username": (username or "").strip().lstrip("@") or None,
         "chat_type": (chat_type or "").strip() or None,
+        "brand_id": str(brand_id) if brand_id is not None else None,
         "bound_at": _utcnow().isoformat(),
     }
-    # Preserve previous invite_link if caller didn't pass a new one.
-    existing = session.get(AppState, STAFF_CHAT_STATE_KEY)
+    key = staff_chat_state_key(brand_id)
+    existing = session.get(AppState, key)
     if existing and isinstance(existing.value, dict) and not value["invite_link"]:
         value["invite_link"] = existing.value.get("invite_link")
     if existing is None:
-        session.add(AppState(key=STAFF_CHAT_STATE_KEY, value=value))
+        session.add(AppState(key=key, value=value))
     else:
         existing.value = value
         existing.updated_at = _utcnow()
-    # Clear any pending invite once we have a concrete chat.
-    pending = session.get(AppState, PENDING_STAFF_INVITE_KEY)
+
+    pending = session.get(AppState, pending_staff_invite_key(brand_id))
     if pending is not None:
         session.delete(pending)
+
+    # Mirror onto brand profile so delivery works even if AppState is cleared.
+    if brand_id is not None:
+        brand = session.get(Brand, brand_id)
+        if brand is not None:
+            profile = dict(brand.profile_config or {})
+            profile["alert_chat_id"] = str(chat_id)
+            if value["title"]:
+                profile["alert_chat_title"] = value["title"]
+            if value["invite_link"]:
+                profile["alert_chat_invite"] = value["invite_link"]
+            if value["username"]:
+                profile["alert_chat_username"] = value["username"]
+            brand.profile_config = profile
+            session.add(brand)
+
     # Staff inbox must never be monitored as a customer source (self-alert loop).
     try:
         staff_chat_int = int(str(chat_id).strip())
@@ -500,30 +533,34 @@ def bind_staff_chat(
             {TelegramSource.active: False},
             synchronize_session=False,
         )
-    # Pending cards should retarget to the new group on next dispatch.
-    session.query(AlertEvent).filter(
+    # Retarget only this brand's pending cards (or all if global bind).
+    pending_q = session.query(AlertEvent).filter(
         AlertEvent.delivery_channel == "telegram",
         AlertEvent.status.in_(["pending", "failed"]),
-    ).update(
-        {AlertEvent.delivery_target: str(chat_id)},
-        synchronize_session=False,
     )
+    if brand_id is not None:
+        pending_q = pending_q.filter(AlertEvent.brand_id == brand_id)
+    pending_q.update({AlertEvent.delivery_target: str(chat_id)}, synchronize_session=False)
     session.commit()
     return value
 
 
-def set_pending_staff_invite(session: Session, invite_link: str, *, note: str | None = None) -> dict:
+def set_pending_staff_invite(
+    session: Session, invite_link: str, *, note: str | None = None, brand_id=None
+) -> dict:
     """Remember an invite link until the bot is added as admin and my_chat_member fires."""
     from app.models import AppState
 
     value = {
         "invite_link": invite_link.strip(),
         "note": note,
+        "brand_id": str(brand_id) if brand_id is not None else None,
         "set_at": _utcnow().isoformat(),
     }
-    state = session.get(AppState, PENDING_STAFF_INVITE_KEY)
+    key = pending_staff_invite_key(brand_id)
+    state = session.get(AppState, key)
     if state is None:
-        session.add(AppState(key=PENDING_STAFF_INVITE_KEY, value=value))
+        session.add(AppState(key=key, value=value))
     else:
         state.value = value
         state.updated_at = _utcnow()
@@ -531,14 +568,13 @@ def set_pending_staff_invite(session: Session, invite_link: str, *, note: str | 
     return value
 
 
-def get_pending_staff_invite(session: Session) -> dict | None:
+def get_pending_staff_invite(session: Session, brand_id=None) -> dict | None:
     from app.models import AppState
 
-    state = session.get(AppState, PENDING_STAFF_INVITE_KEY)
+    state = session.get(AppState, pending_staff_invite_key(brand_id))
     if not state or not isinstance(state.value, dict):
         return None
     return state.value if state.value.get("invite_link") else None
-
 
 def parse_telegram_chat_ref(value: str) -> dict:
     """Parse public @username, t.me/username, or private t.me/+hash / joinchat/hash links."""
@@ -605,24 +641,42 @@ def try_resolve_staff_chat_ref(api: "TelegramBotApi", value: str) -> dict:
 
 
 def resolve_alert_chat_id(session: Session, settings: Settings, brand_id) -> str | None:
-    """Staff group chat id priority: brand profile → bound support group → env.
+    """Staff group chat id — **per brand first** (multi-tenant).
 
-    A positive env id is often a private user chat from early setup; a bound group
-    (negative id) always wins so Supports-style groups receive the cards.
+    Priority:
+      1. brand.profile_config.alert_chat_id / support_chat_id
+      2. brand-scoped AppState bind (``alert_staff_chat:{brand_id}``)
+      3. Global bind / ``ALERT_TELEGRAM_CHAT_ID`` **only** for brands without an org
+         or for the internal Aviora workspace (legacy single-tenant).
+
+    Customer tenants never inherit MonitoringTest / platform default group.
     """
-    if brand_id is not None:
-        brand = session.get(Brand, brand_id)
-        profile = (brand.profile_config if brand else None) or {}
+    brand = session.get(Brand, brand_id) if brand_id is not None else None
+    if brand is not None:
+        profile = brand.profile_config or {}
         override = str(profile.get("alert_chat_id") or profile.get("support_chat_id") or "").strip()
         if override:
             return override
+        bound = get_bound_staff_chat(session, brand_id=brand.id)
+        if bound and bound.get("chat_id"):
+            return str(bound["chat_id"])
 
-    bound = get_bound_staff_chat(session)
-    if bound and bound.get("chat_id"):
-        return str(bound["chat_id"])
+        # Multi-tenant customer org: do not leak global platform support chat.
+        if brand.organization_id is not None:
+            try:
+                from app.models.entities import Organization
+
+                org = session.get(Organization, brand.organization_id)
+                if org is not None and (org.slug or "") != "aviora-internal":
+                    return None
+            except Exception:  # noqa: BLE001
+                return None
+
+    bound_global = get_bound_staff_chat(session, brand_id=None)
+    if bound_global and bound_global.get("chat_id"):
+        return str(bound_global["chat_id"])
 
     return str(settings.alert_telegram_chat_id or "").strip() or None
-
 
 def resolve_alert_lang(session: Session, *, chat_id: str | None = None, brand_id=None) -> str:
     """Language for bot copy. Chat override > brand dashboard > global > uz."""

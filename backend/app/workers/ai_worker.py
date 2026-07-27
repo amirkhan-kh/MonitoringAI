@@ -202,6 +202,35 @@ def _facebook_source_name(session, mention: FacebookMention) -> str | None:
     return mention.post_id
 
 
+def _org_allows_analysis(session, brand_id) -> bool:
+    """Respect tenant AI quota / trial / suspension before spending Vertex."""
+    if not brand_id:
+        return False
+    brand = session.get(Brand, brand_id)
+    if brand is None or not brand.organization_id:
+        # Legacy rows without org still analyze (internal seed attaches them on boot).
+        return True
+    from app.models.entities import Organization
+    from app.services.billing import org_can_analyze
+
+    org = session.get(Organization, brand.organization_id)
+    ok, reason = org_can_analyze(session, org)
+    if not ok:
+        logger.info("Skip AI brand=%s org=%s reason=%s", brand_id, brand.organization_id, reason)
+    return ok
+
+
+def _record_usage(session, brand_id) -> None:
+    if not brand_id:
+        return
+    brand = session.get(Brand, brand_id)
+    if brand is None or not brand.organization_id:
+        return
+    from app.services.billing import increment_ai_usage
+
+    increment_ai_usage(session, brand.organization_id, 1)
+
+
 def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableError | None:
     """Analyze one mention in its own DB session (safe to run across threads).
 
@@ -215,7 +244,12 @@ def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableEr
                 mention = session.get(Mention, mention_id)
                 if mention is None:
                     return None
+                if not _org_allows_analysis(session, mention.brand_id):
+                    return None
                 analysis = analyze_mention(session, settings, client, mention)
+                if analysis and not analysis.error:
+                    _record_usage(session, mention.brand_id)
+                    session.commit()
                 if not analysis.error:
                     record_alert(
                         session, settings, platform="telegram", brand_id=mention.brand_id,
@@ -228,7 +262,11 @@ def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableEr
                 mention = session.get(InstagramMention, mention_id)
                 if mention is None:
                     return None
+                if not _org_allows_analysis(session, mention.brand_id):
+                    return None
                 analysis = analyze_instagram_mention(session, settings, client, mention)
+                if analysis and not analysis.error:
+                    _record_usage(session, mention.brand_id)
                 if not analysis.error:
                     record_alert(
                         session, settings, platform="instagram", brand_id=mention.brand_id,
@@ -240,7 +278,11 @@ def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableEr
                 mention = session.get(FacebookMention, mention_id)
                 if mention is None:
                     return None
+                if not _org_allows_analysis(session, mention.brand_id):
+                    return None
                 analysis = analyze_facebook_mention(session, settings, client, mention)
+                if analysis and not analysis.error:
+                    _record_usage(session, mention.brand_id)
                 if not analysis.error:
                     record_alert(
                         session, settings, platform="facebook", brand_id=mention.brand_id,
@@ -254,7 +296,11 @@ def _process_one(settings, client, kind: str, mention_id) -> ProviderRetryableEr
                 mention = session.get(YouTubeMention, mention_id)
                 if mention is None:
                     return None
+                if not _org_allows_analysis(session, mention.brand_id):
+                    return None
                 analysis = analyze_youtube_mention(session, settings, client, mention)
+                if analysis and not analysis.error:
+                    _record_usage(session, mention.brand_id)
                 if not analysis.error:
                     record_alert(
                         session, settings, platform="youtube", brand_id=mention.brand_id,

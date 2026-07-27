@@ -56,6 +56,9 @@ function dynamicTranslation(value, language) {
     [/^(\d+) ta komment AI tahlilga yuborildi\. Natijalar bir necha soniyada pastda ko'rinadi\.$/, language === "ru" ? "$1 комментариев отправлено на анализ ИИ. Результаты появятся ниже через несколько секунд." : "$1 comments were sent for AI analysis. Results will appear below in a few seconds."],
     [/^Sync tugadi: (\d+) ta video, (\d+) ta comment tekshirildi\.$/, language === "ru" ? "Синхронизация завершена: проверено видео — $1, комментариев — $2." : "Sync finished: checked $1 videos and $2 comments."],
     [/^Serverga ulanib bo'lmadi \((.+)\)\. Backend ishga tushganini tekshiring\.$/, language === "ru" ? "Не удалось подключиться к серверу ($1). Проверьте, запущен ли backend." : "Could not connect to the server ($1). Check that the backend is running."],
+    [/^AI profil tavsiyasi hozir olinmadi: (.+)$/, language === "ru" ? "Сейчас не удалось получить рекомендации ИИ для профиля: $1" : "AI profile suggestions are currently unavailable: $1"],
+    [/^Qisman yuklandi: (.+)\. Qolgan bo'limlar ishlashda davom etadi\.$/, language === "ru" ? "Частично загружено: $1. Остальные разделы продолжают работать." : "Partially loaded: $1. Other sections keep working."],
+    [/^Brand limiti tugadi \((.+)\)\. Super admin orqali tarifni yangilang\.$/, language === "ru" ? "Лимит брендов исчерпан ($1). Обновите тариф через супер-админа." : "Brand limit reached ($1). Upgrade the plan via super admin."],
   ];
   for (const [pattern, replacement] of patterns) {
     if (!pattern.test(value)) continue;

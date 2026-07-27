@@ -5,7 +5,10 @@ import {
   ArrowUpRight,
   Bell,
   Check,
+  ExternalLink,
+  Globe2,
   Link2,
+  Mail,
   Menu,
   MessageCircle,
   Moon,
@@ -31,7 +34,9 @@ import { applyTheme, resolveTheme, toggleTheme } from "../theme";
 
 const COMPANY = "Aviora AI";
 const PRODUCT = "MonitoringAI";
-const CONTACT_EMAIL = "amirhonhodisaliev@gmail.com";
+const CONTACT_EMAIL = "avioraai1@gmail.com";
+const SITE_URL = "https://monitoring.avioraai.uz";
+const SITE_HOST = "monitoring.avioraai.uz";
 
 const VERTEX_COST_PER_MENTION = 0.025;
 const PLATFORM_BASE_USD = 70;
@@ -416,7 +421,8 @@ export function Landing() {
   const language = i18n.resolvedLanguage || i18n.language || "uz";
 
   useEffect(() => {
-    applyTheme(theme);
+    // Paint only — toggleTheme() is what persists user choice
+    applyTheme(theme, { persist: false });
   }, [theme]);
 
   useEffect(() => {
@@ -512,8 +518,8 @@ export function Landing() {
           >
             {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
           </button>
-          <a className="button primary solid landingHeadCta" href={authed ? "/umumiy-dashboard" : "/login"}>
-            {authed ? t("Dashboard") : t("Kirish")}
+          <a className="button primary solid landingHeadCta" href={authed ? "/umumiy-dashboard" : "/register"}>
+            {authed ? t("Dashboard") : t("Bepul boshlash")}
           </a>
           <button
             className="landingMenuToggle"
@@ -556,10 +562,10 @@ export function Landing() {
           </div>
           <a
             className="button primary solid landingMobileCta"
-            href={authed ? "/umumiy-dashboard" : "/login"}
+            href={authed ? "/umumiy-dashboard" : "/register"}
             onClick={() => setMenuOpen(false)}
           >
-            {authed ? t("Dashboard") : t("Kirish")}
+            {authed ? t("Dashboard") : t("Bepul boshlash")}
           </a>
         </div>
       </div>
@@ -595,8 +601,8 @@ export function Landing() {
               )}
             </p>
             <div className="landingCtaRow">
-              <a className="button primary landingCtaPrimary" href={authed ? "/umumiy-dashboard" : "/login"}>
-                {authed ? t("Dashboardga o'tish") : t("Boshlash")}
+              <a className="button primary landingCtaPrimary" href={authed ? "/umumiy-dashboard" : "/register"}>
+                {authed ? t("Dashboardga o'tish") : t("Bepul boshlash")}
                 <ArrowUpRight size={16} />
               </a>
               <a
@@ -846,11 +852,7 @@ export function Landing() {
             <h2>{t("Sizga mos reja")}</h2>
             <p>
               {t(
-                "Har bir tarif: platforma asosi {{base}} + Vertex AI mention tahlili xarajati (taxminan {{per}} / mention).",
-                {
-                  base: formatUsd(PLATFORM_BASE_USD),
-                  per: formatUsd(VERTEX_COST_PER_MENTION),
-                },
+                "Monitoring hajmi va jamoa ehtiyojiga qarab tanlang. AI tahlil, alertlar va asosiy imkoniyatlar paket ichida.",
               )}
             </p>
           </Reveal>
@@ -872,10 +874,7 @@ export function Landing() {
                       <b>{formatMentions(plan.mentions, language)}</b> {t("mention / oy")}
                     </span>
                     <span className="landingPlanBreakdown">
-                      {t("Vertex ~{{vertex}} + baza {{base}}", {
-                        vertex: formatUsd(plan.vertexCost),
-                        base: formatUsd(PLATFORM_BASE_USD),
-                      })}
+                      {t("AI tahlil va monitoring paketi")}
                     </span>
                   </div>
                   <ul>
@@ -888,7 +887,7 @@ export function Landing() {
                   </ul>
                   <a
                     className={`button${plan.popular ? " primary" : ""} landingPlanCta`}
-                    href={authed ? "/umumiy-dashboard" : "/login"}
+                    href={authed ? "/umumiy-dashboard" : `/register?plan=${plan.id}`}
                   >
                     {authed ? t("Dashboard") : t("Tanlash")}
                   </a>
@@ -900,44 +899,85 @@ export function Landing() {
         </section>
 
         <section className="landingSection landingContact" id="aloqa">
-          <Reveal reduceMotion={reduceMotion} y={32}>
-            <SpotlightCard as="div" className="landingContactCard">
-              <div className="landingContactCopy">
-                <h2>{t("Loyihani birga boshlaylik")}</h2>
-                <p>
-                  {t("Demo, integratsiya yoki maxsus tarif bo'yicha yozing. Jamoa tez javob beradi.")}
+          <Reveal className="landingSectionHead" reduceMotion={reduceMotion}>
+            <h2>{t("Aloqa")}</h2>
+            <p>{t("Savol, demo yoki hamkorlik uchun yozing — ish kunida javob beramiz.")}</p>
+          </Reveal>
+          <Reveal reduceMotion={reduceMotion} y={24}>
+            <div className="landingContactPanel">
+              <div className="landingContactMain">
+                <p className="landingContactKicker">{COMPANY}</p>
+                <h3 className="landingContactTitle">{t("Biz bilan bog'laning")}</h3>
+                <p className="landingContactLead">
+                  {t("MonitoringAI bo'yicha demo, integratsiya yoki maxsus tarif so'rovi qoldiring.")}
                 </p>
-                <a className="button primary landingContactCta" href={`mailto:${CONTACT_EMAIL}`}>
-                  {t("Xabar yozish")}
-                  <ArrowUpRight size={16} />
-                </a>
+                <div className="landingContactActions">
+                  <a className="button primary solid landingContactCta" href={`mailto:${CONTACT_EMAIL}`}>
+                    <Mail size={16} aria-hidden />
+                    {t("Email yozish")}
+                  </a>
+                  <a className="button landingContactSecondary" href={authed ? "/umumiy-dashboard" : "/register"}>
+                    {authed ? t("Dashboard") : t("Bepul boshlash")}
+                    <ArrowUpRight size={15} aria-hidden />
+                  </a>
+                </div>
               </div>
-              <div className="landingContactDetails">
-                <strong>{COMPANY}</strong>
-                <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
-                <a href="https://monitoring.avioraai.uz">monitoring.avioraai.uz</a>
-                <div className="landingContactLegal">
+
+              <aside className="landingContactAside" aria-label={t("Aloqa ma'lumotlari")}>
+                <div className="landingContactRow">
+                  <span className="landingContactIcon" aria-hidden>
+                    <Mail size={16} />
+                  </span>
+                  <div>
+                    <span className="landingContactLabel">{t("Email")}</span>
+                    <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
+                  </div>
+                </div>
+                <div className="landingContactRow">
+                  <span className="landingContactIcon" aria-hidden>
+                    <Globe2 size={16} />
+                  </span>
+                  <div>
+                    <span className="landingContactLabel">{t("Veb-sayt")}</span>
+                    <a href={SITE_URL} target="_blank" rel="noreferrer">
+                      {SITE_HOST}
+                      <ExternalLink size={12} aria-hidden />
+                    </a>
+                  </div>
+                </div>
+                <div className="landingContactMeta">
+                  <span>{PRODUCT}</span>
+                  <span aria-hidden>·</span>
+                  <span>{COMPANY}</span>
+                </div>
+                <nav className="landingContactLegal" aria-label={t("Huquqiy")}>
                   <a href="/privacy">{t("Maxfiylik")}</a>
                   <a href="/terms">{t("Shartlar")}</a>
                   <a href="/data-deletion">{t("Ma'lumotni o'chirish")}</a>
-                </div>
-              </div>
-              <span className="landingContactOrb" aria-hidden="true" />
-            </SpotlightCard>
+                </nav>
+              </aside>
+            </div>
           </Reveal>
         </section>
       </main>
 
       <footer className="landingFooter">
-        <span>
-          © 2026 {COMPANY} · {PRODUCT}
-        </span>
-        <nav className="landingFooterNav">
-          <a href="/privacy">{t("Privacy")}</a>
-          <a href="/terms">{t("Terms")}</a>
-          <a href="/data-deletion">{t("Data deletion")}</a>
-          <a href={authed ? "/umumiy-dashboard" : "/login"}>{authed ? t("Dashboard") : t("Kirish")}</a>
-        </nav>
+        <div className="landingFooterInner">
+          <div className="landingFooterBrand">
+            <strong>{PRODUCT}</strong>
+            <span>
+              © 2026 {COMPANY}. {t("Barcha huquqlar himoyalangan.")}
+            </span>
+          </div>
+          <nav className="landingFooterNav" aria-label="Footer">
+            <a href="/privacy">{t("Maxfiylik")}</a>
+            <a href="/terms">{t("Shartlar")}</a>
+            <a href="/data-deletion">{t("Ma'lumotni o'chirish")}</a>
+            <a href={`mailto:${CONTACT_EMAIL}`}>{t("Aloqa")}</a>
+            <a href={authed ? "/umumiy-dashboard" : "/login"}>{authed ? t("Dashboard") : t("Kirish")}</a>
+            {!authed ? <a href="/register">{t("Bepul boshlash")}</a> : null}
+          </nav>
+        </div>
       </footer>
     </div>
   );

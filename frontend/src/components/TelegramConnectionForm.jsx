@@ -118,6 +118,10 @@ function readableWarning(value) {
     channel_monitoring_not_verified: "Kanal monitoringi hali bot yoki Telethon worker tomonidan tasdiqlanmagan.",
     discussion_monitoring_not_verified: "Discussion monitoringi hali bot yoki Telethon worker tomonidan tasdiqlanmagan.",
     telethon_access_is_unverified_until_worker_reads_chat: "Telethon access worker chatni muvaffaqiyatli o'qigandan keyin tasdiqlanadi.",
+    staff_support_group_not_configured: "Xodimlar support guruhi hali ulanmagan — risk kartochkalari kutib turadi.",
+    staff_group_invite_pending_bot_join: "Support guruh invite saqlandi: botni guruhga admin qilib qo'shing.",
+    staff_group_ref_unresolved: "Support guruh linki ochilmadi — bot a'zo bo'lgach /staff yozing yoki chat ID kiriting.",
+    staff_group_saved_without_bot_token: "Support guruh saqlandi; kartochka yuborish uchun brand bot tokenini ham ulang.",
   };
   return warnings[value] || String(value || "").replaceAll("_", " ");
 }
@@ -205,6 +209,7 @@ export function TelegramConnectionForm({
   const [botModeTouched, setBotModeTouched] = useState(false);
   const [channelRef, setChannelRef] = useState("");
   const [discussionRef, setDiscussionRef] = useState("");
+  const [staffGroupRef, setStaffGroupRef] = useState("");
   const [monitorFrom, setMonitorFrom] = useState(todayInputValue);
   const [collectPosts, setCollectPosts] = useState(true);
   const [collectComments, setCollectComments] = useState(true);
@@ -229,6 +234,14 @@ export function TelegramConnectionForm({
     setBotModeTouched(false);
     setChannelRef(sourceReference(channel));
     setDiscussionRef(sourceReference(discussion));
+    const staff = initialConnection?.staff_group || {};
+    setStaffGroupRef(
+      staff.invite_link
+        || (staff.username ? `https://t.me/${String(staff.username).replace(/^@/, "")}` : "")
+        || staff.ref
+        || staff.chat_id
+        || "",
+    );
     setMonitorFrom(dateInputValue(initialConnection?.monitor_from || source?.monitor_from));
     setCollectPosts(initialConnection?.collect_posts ?? source?.collect_posts ?? true);
     setCollectComments(initialConnection?.collect_comments ?? source?.collect_comments ?? true);
@@ -274,13 +287,14 @@ export function TelegramConnectionForm({
       botToken: botToken.trim(),
       channelRef: channelRef.trim(),
       discussionRef: discussionRef.trim(),
+      staffGroupRef: staffGroupRef.trim(),
     };
     if (!selectedBrandId) {
       setValidationError("Avval brandni tanlang.");
       return;
     }
     if (!Object.values(normalized).some(Boolean)) {
-      setValidationError("Bot link/token, kanal yoki discussion groupdan kamida bittasini kiriting.");
+      setValidationError("Bot, kanal, discussion yoki support guruhidan kamida bittasini kiriting.");
       return;
     }
     if (
@@ -303,6 +317,7 @@ export function TelegramConnectionForm({
     if (normalized.botToken) payload.bot_token = normalized.botToken;
     if (normalized.channelRef) payload.channel_ref = normalized.channelRef;
     if (normalized.discussionRef) payload.discussion_ref = normalized.discussionRef;
+    if (normalized.staffGroupRef) payload.staff_group_ref = normalized.staffGroupRef;
     const outcome = await onSubmit(payload);
     if (outcome?.ok !== false) setBotToken("");
   }
@@ -364,6 +379,39 @@ export function TelegramConnectionForm({
           </label>
         </section>
 
+        <section className="telegramConnectorInputCard discussion">
+          <div className="telegramConnectorInputHead">
+            <span className="telegramConnectorStepBadge" aria-hidden="true">3</span>
+            <ShieldAlert size={18} />
+            <div>
+              <strong>Xodimlar support guruhi</strong>
+              <span>AI risk kartochkalari shu yerga keladi</span>
+            </div>
+          </div>
+          <label className="field">
+            <span>Support guruh linki, @username yoki chat ID</span>
+            <input
+              className="input"
+              value={staffGroupRef}
+              onChange={(event) => setStaffGroupRef(event.target.value)}
+              autoComplete="off"
+              spellCheck="false"
+            />
+            <p className="fieldHint">
+              O‘zingizning support guruhingiz (masalan MonitoringTest). Botni guruhga admin qilib qo‘shing —
+              mention/risk signallariga shu guruhda tugmalar bilan javob beriladi. Global monitoring bot
+              guruhiga bog‘lanmaydi.
+            </p>
+          </label>
+          {initialConnection?.staff_group?.chat_id ? (
+            <p className="fieldHint" style={{ marginTop: 8 }}>
+              Ulangan: <strong>{initialConnection.staff_group.title || initialConnection.staff_group.chat_id}</strong>
+              {" · "}
+              ID {initialConnection.staff_group.chat_id}
+            </p>
+          ) : null}
+        </section>
+
         <section className={`telegramConnectorInputCard bot ${botPanelOpen ? "open" : ""}`}>
           <button
             className="telegramBotAccordionHead"
@@ -371,11 +419,11 @@ export function TelegramConnectionForm({
             aria-expanded={botPanelOpen}
             onClick={() => setBotPanelOpen((current) => !current)}
           >
-            <span className="telegramConnectorStepBadge" aria-hidden="true">3</span>
+            <span className="telegramConnectorStepBadge" aria-hidden="true">4</span>
             <Bot size={18} aria-hidden="true" />
             <span className="telegramBotAccordionTitle">
               <strong>Sizning Telegram botingiz bormi?</strong>
-              <span>Ixtiyoriy — kanal va group busiz ham kuzatiladi</span>
+              <span>Support guruhga kartochka yuborish uchun tavsiya etiladi</span>
             </span>
             <ChevronDown size={17} className="telegramBotAccordionChevron" aria-hidden="true" />
           </button>

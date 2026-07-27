@@ -5,7 +5,7 @@
 // Public legal identity shown to Meta reviewers (must match Landing + Business verification).
 const COMPANY = "Aviora AI";
 const PRODUCT = "MonitoringAI";
-const CONTACT_EMAIL = "amirhonhodisaliev@gmail.com";
+const CONTACT_EMAIL = "avioraai1@gmail.com";
 const UPDATED = "22.07.2026";
 
 function LegalPage({ title, children }) {

@@ -119,14 +119,11 @@ GATE_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 PROFILE_SUGGESTION_SYSTEM_INSTRUCTION = """
-Siz senior brand strategist va social listening arxitektorisiz.
-Berilgan brand nomi, ierarxik yo'nalish, faoliyat turi, biznes modeli, auditoriya va hududdan kelib chiqib
-monitoring profilini juda aniq va amaliy to'ldiring. Natija grammatik to'g'ri va faqat JSON bo'lsin.
-Aliaslarda real yozilish/transliteratsiya variantlari bo'lsin. Keywordlar brand, mahsulot, kampaniya, muammo va
-xarid niyatini qamrasin. Risk va ijobiy signallar aynan tanlangan sohaga mos bo'lsin. Ignore-termlar brandga
-aloqasiz shovqin va omonimlarni chetlatishga xizmat qilsin. Mavjud faktlarni saqlang, lekin placeholder yoki
-to'qib chiqarilgan fakt, URL, sertifikat va kompaniya nomlarini yozmang. Raqobatchi nomi ishonchli bo'lmasa,
-aniq profil/toifa tavsifini bering. Har bir ro'yxat takrorlarsiz va monitoring uchun foydali bo'lsin.
+Siz brand monitoring strategistisiz. Faqat JSON qaytaring.
+Brand + yo'nalish + faoliyat + biznes model + auditoriya asosida qisqa, amaliy profil to'ldiring.
+Har bir ro'yxat 4–8 ta foydali banddan iborat bo'lsin (takrorlarsiz).
+Alias: real yozilish/transliteratsiya. Keyword: brand, mahsulot, muammo, xarid niyati.
+Risk/ijobiy: sohaga mos. Ignore: omonim va shovqin. Mavjud faktlarni saqlang; to'qima URL/nom yozmang.
 """
 
 PROFILE_LANGUAGE_INSTRUCTIONS = {
@@ -134,6 +131,22 @@ PROFILE_LANGUAGE_INSTRUCTIONS = {
     "ru": "Все описания, аудитории, примечания и общие ключевые слова пишите на естественном, грамматически правильном русском языке.",
     "en": "Write every description, audience, note, and generic keyword in natural, grammatically correct English.",
 }
+
+
+def _profile_language_instruction(language: str) -> str:
+    """Instruction for smart-fill output language.
+
+    UI interface languages are only uz/ru/en, but brand analysis / smart-fill
+    may target 100+ languages selected in the profile.
+    """
+    lang = (language or "uz").lower().strip() or "uz"
+    if lang in PROFILE_LANGUAGE_INSTRUCTIONS:
+        return PROFILE_LANGUAGE_INSTRUCTIONS[lang]
+    return (
+        f"Write every description, audience, note, and generic keyword in natural, "
+        f"grammatically correct language for ISO/language code '{lang}'. "
+        "Keep brand names, aliases, product names, and proper nouns untranslated."
+    )
 
 PROFILE_SUGGESTION_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
@@ -178,29 +191,86 @@ def create_gemini_client(settings: Settings) -> genai.Client:
 
 
 def suggest_brand_profile(settings: Settings, client: genai.Client, context: dict[str, Any]) -> dict[str, Any]:
-    language = str(context.get("language") or "uz").lower()
-    if language not in PROFILE_LANGUAGE_INSTRUCTIONS:
-        language = "uz"
-    context = {**context, "language": language, "output_language": language}
-    prompt = json.dumps(context, ensure_ascii=False)
-    language_instruction = PROFILE_LANGUAGE_INSTRUCTIONS[language]
-    response = client.models.generate_content(
-        model=settings.gemini_analysis_model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=f"{PROFILE_SUGGESTION_SYSTEM_INSTRUCTION}\n{language_instruction}\nBrand nomi, proper noun va alias/transliteratsiyalarni buzib tarjima qilmang.",
-            response_mime_type="application/json",
-            response_schema=PROFILE_SUGGESTION_SCHEMA,
-            temperature=0.25,
-            safety_settings=SAFETY_SETTINGS,
-            thinking_config=types.ThinkingConfig(
-                thinking_budget=settings.gemini_profile_thinking_budget,
-                include_thoughts=False,
-            ),
+    """Brand profile smart-fill.
+
+    The dashboard still presents this as ``Gemini Pro`` (see
+    ``gemini_profile_display_name``). The actual model is ``gemini_profile_model``
+    (Flash-lite by default) to keep latency low on Vertex.
+    """
+    language = str(context.get("language") or "uz").lower().strip() or "uz"
+    # Compact context — large free-text existing_values slow the model down.
+    existing = context.get("existing_values") if isinstance(context.get("existing_values"), dict) else {}
+    compact_existing = {
+        key: value
+        for key, value in existing.items()
+        if value not in (None, "", [], {})
+    }
+    compact_context = {
+        "name": context.get("name"),
+        "website": context.get("website"),
+        "language": language,
+        "output_language": language,
+        "category_path": context.get("category_path") or [],
+        "business_model": context.get("business_model"),
+        "audience_segment": context.get("audience_segment"),
+        "region": context.get("region"),
+        "existing_values": compact_existing,
+        "limits": {
+            "aliases": 5,
+            "keywords": 6,
+            "products": 4,
+            "competitors": 4,
+            "risk_keywords": 5,
+            "positive_keywords": 5,
+            "ignore_terms": 4,
+            "description_sentences": 1,
+            "audience_sentences": 1,
+            "monitor_notes_sentences": 1,
+        },
+    }
+    prompt = json.dumps(compact_context, ensure_ascii=False)
+    language_instruction = _profile_language_instruction(language)
+    # Prefer gate/flash-lite first for low latency on re-fill after select changes.
+    model = settings.gemini_profile_model or settings.gemini_gate_model or "gemini-2.5-flash-lite"
+    thinking_budget = max(0, int(settings.gemini_profile_thinking_budget or 0))
+    thinking_config = types.ThinkingConfig(thinking_budget=thinking_budget, include_thoughts=False)
+    gen_config = types.GenerateContentConfig(
+        system_instruction=(
+            f"{PROFILE_SUGGESTION_SYSTEM_INSTRUCTION}\n{language_instruction}\n"
+            "Brand nomi, proper noun va alias/transliteratsiyalarni buzib tarjima qilmang. "
+            "Javob qisqa va tez bo'lsin."
         ),
+        response_mime_type="application/json",
+        response_schema=PROFILE_SUGGESTION_SCHEMA,
+        temperature=0.15,
+        max_output_tokens=1024,
+        safety_settings=SAFETY_SETTINGS,
+        thinking_config=thinking_config,
     )
-    payload = parse_json_response(_text_or_raise(response))
-    payload["model_name"] = settings.gemini_analysis_model
+    try:
+        response = client.models.generate_content(model=model, contents=prompt, config=gen_config)
+        payload = parse_json_response(_text_or_raise(response))
+    except Exception as primary_exc:
+        fallback = settings.gemini_gate_model or "gemini-2.5-flash-lite"
+        if fallback == model:
+            raise
+        logger.warning("profile smart-fill primary failed (%s); retrying with %s", primary_exc, fallback)
+        response = client.models.generate_content(
+            model=fallback,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=gen_config.system_instruction,
+                response_mime_type="application/json",
+                response_schema=PROFILE_SUGGESTION_SCHEMA,
+                temperature=0.15,
+                max_output_tokens=896,
+                safety_settings=SAFETY_SETTINGS,
+                thinking_config=types.ThinkingConfig(thinking_budget=0, include_thoughts=False),
+            ),
+        )
+        payload = parse_json_response(_text_or_raise(response))
+    # Always show Pro in the UI; real model stays server-side.
+    payload["model_name"] = settings.gemini_profile_display_name or "Gemini Pro"
     return payload
 
 

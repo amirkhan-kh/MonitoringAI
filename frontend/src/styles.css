@@ -588,7 +588,6 @@ button {
 }
 
 .appShell {
-  --shell-bg-image: url("/images/dashboard-bg.png");
   position: relative;
   isolation: isolate;
   min-height: 100vh;
@@ -601,35 +600,62 @@ button {
 }
 
 /*
-  Full-bleed dashboard art.
-  Dark: soft blur, full color (signature).
-  Light: brighter + soft blur so frosted white chrome sits well on the teal art.
-  Login uses .loginShell only — never these layers.
+  Full-bleed dashboard art — progressive paint:
+  1) solid --bg (instant)
+  2) tiny LQIP (~124B, blurred) so the page never looks empty
+  3) full webp (~79KB) / jpg fallback when ready (.isBgReady)
+  Never load the 5.7MB PNG. Login uses .loginShell only — not these layers.
 */
 .appShell::before {
   content: "";
   position: fixed;
-  inset: -16px;
+  inset: -12px;
   z-index: 0;
   pointer-events: none;
   background-color: var(--bg);
-  background-image: var(--shell-bg-image);
+  background-image: url("/images/dashboard-bg-lqip.webp");
   background-position: center center;
   background-size: cover;
   background-repeat: no-repeat;
-  filter: blur(3px);
+  filter: blur(18px) brightness(0.9) saturate(1.05);
   opacity: 1;
   transform: none;
   image-rendering: auto;
+  will-change: auto;
+  contain: strict;
+}
+
+/* Full art after decode — light live blur (source is already soft at 1600px) */
+.appShell.isBgReady::before {
+  /* jpg first as fallback; image-set overrides in supporting browsers */
+  background-image: url("/images/dashboard-bg.jpg");
+  background-image: -webkit-image-set(
+    url("/images/dashboard-bg.webp") type("image/webp"),
+    url("/images/dashboard-bg.jpg") type("image/jpeg")
+  );
+  background-image: image-set(
+    url("/images/dashboard-bg.webp") type("image/webp"),
+    url("/images/dashboard-bg.jpg") type("image/jpeg")
+  );
+  filter: blur(2px) brightness(0.92) saturate(1.05);
+  transition: filter 0.35s var(--ease-smooth);
 }
 
 /* Light: lift the dark teal art so the whole page feels airy, not muddy */
 :root[data-theme="light"] .appShell::before {
-  filter: blur(5px) brightness(1.55) saturate(0.88) contrast(0.96);
+  filter: blur(20px) brightness(1.45) saturate(0.88) contrast(0.96);
+}
+
+:root[data-theme="light"] .appShell.isBgReady::before {
+  filter: blur(4px) brightness(1.5) saturate(0.88) contrast(0.96);
 }
 
 :root[data-theme="dark"] .appShell::before {
-  filter: blur(3px) brightness(0.92) saturate(1.05);
+  filter: blur(18px) brightness(0.88) saturate(1.05);
+}
+
+:root[data-theme="dark"] .appShell.isBgReady::before {
+  filter: blur(2px) brightness(0.92) saturate(1.05);
 }
 
 /* Light only: soft white veil (no dark scrim) — keeps glass readable */
@@ -678,7 +704,11 @@ button {
   gap: 18px;
   box-shadow: none;
   z-index: 30;
-  overflow: hidden;
+  /* Layout same as before; only enable vertical scroll when content (e.g. Logout) overflows */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   transition:
     width var(--duration-base) var(--ease-smooth),
     padding var(--duration-base) var(--ease-smooth),
@@ -1190,15 +1220,56 @@ button {
 
 .smartSelectMenu {
   position: absolute;
-  z-index: 40;
+  z-index: 80;
   top: calc(100% + 6px);
   left: 0;
   width: max(100%, 280px);
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
-  background: var(--surface);
-  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.18);
+  /* Fully opaque — never glass/opacity over page text */
+  background: #121826 !important;
+  background-color: #121826 !important;
+  opacity: 1 !important;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.45);
+  isolation: isolate;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+:root[data-theme="light"] .smartSelectMenu {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+}
+
+:root[data-theme="dark"] .smartSelectMenu {
+  background: #121826 !important;
+  background-color: #121826 !important;
+  border-color: #3b4455;
+}
+
+.smartSelectMenu,
+.smartSelectMenu * {
+  opacity: 1 !important;
+}
+
+.smartSelectOptions,
+.smartSelectOption,
+.smartSelectMeta,
+.smartSelectNoResults {
+  background-color: transparent;
+  opacity: 1 !important;
+}
+
+.smartSelectOption.isActive,
+.smartSelectOption:hover {
+  background: color-mix(in srgb, var(--accent, #6366f1) 16%, #121826) !important;
+}
+
+:root[data-theme="light"] .smartSelectOption.isActive,
+:root[data-theme="light"] .smartSelectOption:hover {
+  background: color-mix(in srgb, var(--accent, #6366f1) 12%, #ffffff) !important;
 }
 
 .smartSelectMeta {
@@ -2669,7 +2740,12 @@ button {
   backdrop-filter: none !important;
 }
 
-.scopeStrip div,
+/*
+  Only direct children are cards (skeleton placeholders + .scopeCard).
+  Nested divs inside gauges (chartShell, scopeCardHead) must NOT get card chrome —
+  that was stacking white panels over the speedometer.
+*/
+.scopeStrip > div,
 .scopeCard {
   min-height: 62px;
   padding: 11px 12px;
@@ -2677,6 +2753,27 @@ button {
   border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: var(--shadow-soft);
+}
+
+/* Gauge chart area is transparent — only the outer card chrome remains */
+.scopeCard--gauge .chartShell,
+.scopeCard--gauge .chartShell--gauge {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  min-height: 0;
+  padding: 0;
+  margin-inline: 0;
+}
+
+.scopeCard--gauge .scopeCardHead {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  min-height: 0;
+  padding: 0;
 }
 
 .scopeStrip span,
@@ -4412,6 +4509,37 @@ button {
   color: var(--text);
 }
 
+.loginIntroHint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.4;
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.loginPanelWide {
+  width: min(440px, 100%);
+}
+
+.loginFooterLink {
+  margin: 4px 0 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+  opacity: 0.9;
+}
+
+.loginFooterLink a {
+  color: var(--accent);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.loginFooterLink a:hover {
+  text-decoration: underline;
+}
+
 .loginForm {
   position: relative;
   z-index: 1;
@@ -4422,29 +4550,51 @@ button {
 
 .loginForm .field span {
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: 7px;
   color: var(--muted);
   font-size: 13px;
-  font-weight: 600;
-  opacity: 0.88;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  opacity: 0.92;
 }
 
 .loginForm .input {
-  min-height: 48px;
+  min-height: 50px;
   border-radius: 14px;
-  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
-  border-color: color-mix(in srgb, var(--input-border) 90%, transparent);
+  padding-top: 12px;
+  padding-bottom: 12px;
+  font-size: 15px;
+  font-weight: 520;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  background: color-mix(in srgb, var(--input-bg) 96%, var(--surface) 4%);
+  border: 1px solid color-mix(in srgb, var(--input-border) 88%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent),
+    0 1px 2px color-mix(in srgb, var(--text) 4%, transparent);
   transition:
     border-color var(--duration-fast) var(--ease-smooth),
     box-shadow var(--duration-fast) var(--ease-smooth),
-    background var(--duration-fast) var(--ease-smooth),
-    transform var(--duration-fast) var(--ease-smooth);
+    background var(--duration-fast) var(--ease-smooth);
+}
+
+.loginForm .input::placeholder {
+  color: var(--input-placeholder, var(--muted));
+  opacity: 0.72;
+  font-weight: 480;
+}
+
+.loginForm .input:hover:not(:disabled):not(:focus) {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--input-border));
+  background: color-mix(in srgb, var(--input-bg-hover, var(--input-bg)) 96%, var(--accent) 4%);
 }
 
 .loginForm .input:focus {
-  background: var(--input-bg-focus);
-  border-color: color-mix(in srgb, var(--accent) 50%, var(--input-border));
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--input-bg-focus, var(--input-bg));
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--input-border));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 .loginSubmit {
@@ -4457,55 +4607,99 @@ button {
 
 .inputWithIcon {
   position: relative;
+  display: block;
+}
+
+.loginForm .inputWithIcon {
+  isolation: isolate;
+}
+
+.loginForm .inputWithIcon::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 1px;
+  bottom: 1px;
+  width: 42px;
+  border-radius: 13px 0 0 13px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.85;
+  transition: background var(--duration-fast) var(--ease-smooth), opacity var(--duration-fast) var(--ease-smooth);
+}
+
+.loginForm .inputWithIcon:focus-within::before {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  opacity: 1;
 }
 
 .inputWithIcon.hasPasswordToggle .input {
-  padding-right: 44px;
+  padding-right: 48px;
 }
 
 .inputWithIcon > svg {
   position: absolute;
-  left: 12px;
+  left: 13px;
   top: 50%;
   transform: translateY(-50%);
+  z-index: 1;
   color: var(--muted);
-  opacity: 0.72;
+  opacity: 0.78;
   pointer-events: none;
+  transition: color var(--duration-fast) var(--ease-smooth), opacity var(--duration-fast) var(--ease-smooth);
+}
+
+.loginForm .inputWithIcon:focus-within > svg {
+  color: var(--accent);
+  opacity: 1;
 }
 
 .inputWithIcon .input {
-  padding-left: 40px;
+  position: relative;
+  z-index: 1;
+  padding-left: 44px;
 }
 
 .passwordToggle {
   position: absolute;
-  right: 6px;
+  right: 7px;
   top: 50%;
   transform: translateY(-50%);
-  z-index: 2;
+  z-index: 3;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
   margin: 0;
   padding: 0;
   border: 0;
-  border-radius: var(--radius-sm, 10px);
-  background: transparent;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface-soft, var(--surface)) 55%, transparent);
   color: var(--muted);
   cursor: pointer;
   pointer-events: auto;
+  transition:
+    color var(--duration-fast) var(--ease-smooth),
+    background var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-fast) var(--ease-smooth);
 }
 
 .passwordToggle:hover {
   color: var(--text);
-  background: color-mix(in srgb, var(--surface-soft, var(--surface)) 80%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-soft, var(--surface)));
+}
+
+.passwordToggle[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .passwordToggle:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .passwordToggle svg {
@@ -4515,6 +4709,38 @@ button {
   transform: none;
   pointer-events: none;
   color: inherit;
+  opacity: 1;
+  width: 18px;
+  height: 18px;
+}
+
+:root[data-theme="light"] .loginForm .input {
+  background: #fff;
+  border-color: color-mix(in srgb, var(--input-border) 80%, #cbd5e1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+:root[data-theme="light"] .loginForm .input:focus {
+  background: #fff;
+  border-color: color-mix(in srgb, var(--accent) 55%, #94a3b8);
+}
+
+:root[data-theme="dark"] .loginForm .input {
+  background: color-mix(in srgb, var(--input-bg) 88%, #0b1220 12%);
+  border-color: color-mix(in srgb, var(--input-border) 70%, #64748b 30%);
+}
+
+:root[data-theme="dark"] .passwordToggle {
+  background: color-mix(in srgb, #fff 6%, transparent);
+  color: color-mix(in srgb, var(--muted) 80%, #fff 20%);
+}
+
+:root[data-theme="dark"] .passwordToggle:hover,
+:root[data-theme="dark"] .passwordToggle[aria-pressed="true"] {
+  color: #fff;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .errorBanner.compact {
@@ -8060,7 +8286,8 @@ button {
 
 .landingCtaPrimary,
 .landingCtaGhost,
-.landingContactCopy .button,
+.landingContactCta,
+.landingContactSecondary,
 .landingPlanCta {
   display: inline-flex;
   align-items: center;
@@ -8539,8 +8766,7 @@ button {
   box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 12%, transparent);
 }
 
-.landingSectionHead h2,
-.landingContactCopy h2 {
+.landingSectionHead h2 {
   margin: 0 0 12px;
   font-size: clamp(26px, 3.2vw, 36px);
   font-weight: 760;
@@ -8549,8 +8775,7 @@ button {
   line-height: 1.12;
 }
 
-.landingSectionHead p,
-.landingContactCopy p {
+.landingSectionHead p {
   margin: 0;
   color: var(--text-muted);
   font-size: 15px;
@@ -9911,129 +10136,228 @@ button {
   color: var(--text);
 }
 
-/* Contact */
-.landingContactCard {
+/* Contact — clean editorial panel (no glow/orb chrome) */
+.landingContactPanel {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr);
-  gap: 22px;
-  padding: 32px;
-  border: 1px solid var(--glass-hairline);
-  border-radius: calc(var(--radius-xl) + 4px);
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, var(--glass-bg)), var(--glass-bg));
-  -webkit-backdrop-filter: blur(22px) saturate(155%);
-  backdrop-filter: blur(22px) saturate(155%);
-  box-shadow: var(--shadow-float), var(--glass-highlight), var(--glow-soft);
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.85fr);
+  gap: 0;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 20px;
   overflow: hidden;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent);
 }
 
-.landingContactOrb {
-  position: absolute;
-  right: -8%;
-  top: -20%;
-  width: 46%;
-  height: 90%;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 28%, transparent);
-  filter: blur(48px);
-  pointer-events: none;
-  z-index: 0;
-  animation: landingOrbFloat 11s ease-in-out infinite alternate;
+.landingContactMain {
+  padding: clamp(28px, 4vw, 40px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: center;
+  border-right: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
 }
 
-.landingContactCopy,
-.landingContactDetails {
-  position: relative;
-  z-index: 1;
+.landingContactKicker {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.landingContactTitle {
+  margin: 0;
+  font-size: clamp(1.35rem, 2.2vw, 1.7rem);
+  font-weight: 740;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.landingContactLead {
+  margin: 0 0 8px;
+  max-width: 42ch;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.landingContactActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .landingContactCta,
-.landingContactCopy .button {
-  margin-top: 18px;
+.landingContactSecondary {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  box-shadow: var(--glow-soft);
-  transition: transform 0.2s var(--ease-smooth), box-shadow 0.2s var(--ease-smooth);
+  min-height: 44px;
+  border-radius: 12px;
+  font-weight: 680;
 }
 
-.landingContactCta:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--glow-accent);
+.landingContactSecondary {
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  background: transparent;
 }
 
-.landingContactDetails {
+.landingContactSecondary:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.landingContactAside {
+  padding: clamp(22px, 3vw, 28px);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
   justify-content: center;
-  padding: 20px;
-  border: 1px solid var(--glass-hairline);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--glass-bg-strong) 88%, transparent);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
-  box-shadow: var(--glass-highlight);
+  background: color-mix(in srgb, var(--bg) 55%, var(--surface) 45%);
 }
 
-.landingContactDetails strong {
+.landingContactRow {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.landingContactIcon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   color: var(--text);
-  font-size: 16px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
 }
 
-.landingContactDetails a {
-  color: var(--accent);
-  font-size: 14px;
+.landingContactLabel {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 12px;
   font-weight: 650;
-  text-decoration: none;
-  transition: opacity 0.2s var(--ease-smooth);
+  color: var(--muted);
+  letter-spacing: 0.02em;
 }
 
-.landingContactDetails a:hover {
-  text-decoration: underline;
-  opacity: 0.9;
+.landingContactAside a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 620;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.landingContactAside a:hover {
+  color: var(--accent);
+}
+
+.landingContactMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
 }
 
 .landingContactLegal {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 8px;
+  gap: 10px 14px;
 }
 
 .landingContactLegal a {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.landingContactLegal a:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.landingFooter {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 24px 40px;
   color: var(--text-muted);
   font-size: 13px;
 }
 
-.landingFooter {
+.landingFooterInner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 14px;
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 18px 24px 36px;
-  border-top: 1px solid var(--glass-hairline);
-  color: var(--text-muted);
-  font-size: 13px;
+  gap: 18px 28px;
+  padding-top: 22px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+}
+
+.landingFooterBrand {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: min(100%, 220px);
+}
+
+.landingFooterBrand strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+}
+
+.landingFooterBrand span {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
 }
 
 .landingFooterNav {
   display: flex;
   flex-wrap: wrap;
-  gap: 14px;
+  gap: 8px 16px;
+  align-items: center;
 }
 
 .landingFooterNav a {
-  color: var(--text-muted);
-  font-weight: 650;
+  color: var(--muted);
+  font-weight: 620;
+  font-size: 13px;
   text-decoration: none;
 }
 
 .landingFooterNav a:hover {
-  color: var(--accent);
+  color: var(--text);
+}
+
+@media (max-width: 800px) {
+  .landingContactPanel {
+    grid-template-columns: 1fr;
+  }
+
+  .landingContactMain {
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  }
 }
 
 
@@ -10056,7 +10380,6 @@ button {
   .landingHowEyebrow i,
   .landingHowStage::before,
   .landingPlanBadge,
-  .landingContactOrb,
   .landingAboutBlob,
   .landingAboutFrameBorder,
   .landingAboutMainInner::before,
@@ -10093,8 +10416,8 @@ button {
   .landingHowCard,
   .landingClientChip,
   .landingPlanCard,
-  .landingContactCard,
-  .landingContactDetails {
+  .landingContactPanel,
+  .landingContactAside {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     background: var(--surface-raised);
@@ -10366,7 +10689,6 @@ button {
   }
 
   .landingAboutShell,
-  .landingContactCard,
   .landingBento {
     grid-template-columns: 1fr;
   }
@@ -10413,15 +10735,15 @@ button {
     min-height: 180px;
   }
 
-  .landingContactCard {
-    padding: 22px 18px;
+  .landingContactActions {
+    flex-direction: column;
+    align-items: stretch;
   }
 
-  .landingContactCopy .button,
-  .landingContactCta {
+  .landingContactCta,
+  .landingContactSecondary {
     width: 100%;
     justify-content: center;
-    min-height: 44px;
   }
 }
 
@@ -10542,19 +10864,17 @@ button {
     border-radius: 16px;
   }
 
-  .landingFooter {
+  .landingFooterInner {
     flex-direction: column;
     align-items: flex-start;
-    gap: 12px;
-    padding-top: 16px;
+    gap: 14px;
   }
 
   .landingFooterNav {
     gap: 10px 14px;
   }
 
-  .landingSectionHead h2,
-  .landingContactCopy h2 {
+  .landingSectionHead h2 {
     font-size: clamp(22px, 7vw, 28px);
   }
 }
@@ -11175,4 +11495,194 @@ textarea:focus-visible {
 }
 .chartSummary .total strong {
   color: var(--chart-total);
+}
+
+/* --- Super Admin (aligned with app panels) --- */
+.superAdminToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.superAdminSearch {
+  flex: 1 1 220px;
+  min-width: 180px;
+  margin: 0;
+}
+
+.superAdminStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.statChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.statChip.ok {
+  color: var(--teal, #34d399);
+  border-color: color-mix(in srgb, var(--teal, #34d399) 35%, var(--border));
+}
+
+.superAdminTablePanel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.superAdminTableWrap {
+  overflow-x: auto;
+}
+
+.superAdminTable {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 920px;
+}
+
+.superAdminTable th,
+.superAdminTable td {
+  padding: 14px 16px;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+}
+
+.superAdminTable th {
+  font-size: 12px;
+  font-weight: 720;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--surface-soft);
+}
+
+.superAdminTable tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.superAdminOrgName {
+  color: var(--text);
+  font-weight: 720;
+}
+
+.superAdminUsage {
+  font-variant-numeric: tabular-nums;
+  font-weight: 680;
+}
+
+.superAdminActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.superAdminPlanSelect {
+  min-width: 140px;
+  max-width: 180px;
+  opacity: 1 !important;
+}
+
+.superAdminPlanSelect .smartSelectMenu {
+  width: max(100%, 160px);
+}
+
+.superAdminEmpty {
+  padding: 28px 16px !important;
+  text-align: center;
+}
+
+.sectionLead {
+  margin: -6px 0 16px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.small {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* Opaque native select menus (browser chrome may still theme; keep control solid) */
+select.input,
+select.select,
+.input.select {
+  opacity: 1 !important;
+  background-color: var(--input-bg);
+  color: var(--text);
+}
+
+select.input option,
+select.select option,
+.input.select option {
+  background-color: #121826;
+  color: #f8fafc;
+  opacity: 1;
+}
+
+:root[data-theme="light"] select.input option,
+:root[data-theme="light"] select.select option,
+:root[data-theme="light"] .input.select option {
+  background-color: #ffffff;
+  color: #0f172a;
+}
+
+/* Brand unlock modal for super-admin impersonation */
+.brandUnlockOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(2, 6, 23, 0.62);
+}
+
+.brandUnlockCard {
+  width: min(420px, 100%);
+  padding: 22px;
+  border-radius: var(--radius-lg, 16px);
+  border: 1px solid var(--border);
+  background: var(--surface-solid, var(--surface));
+  background-color: #121826;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  opacity: 1;
+}
+
+:root[data-theme="light"] .brandUnlockCard {
+  background-color: #ffffff;
+}
+
+.brandUnlockCard h3 {
+  margin: 0 0 8px;
+  font-size: 1.15rem;
+}
+
+.brandUnlockCard p {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.brandUnlockActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
 }

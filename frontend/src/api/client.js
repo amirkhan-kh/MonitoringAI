@@ -79,6 +79,16 @@ export function clearApiCache(prefixes = null) {
   }
 }
 
+function resetWorkspaceLocalState() {
+  // Never keep another tenant's selected brand after auth switch.
+  try {
+    window.localStorage.removeItem(SELECTED_BRAND_KEY);
+  } catch {
+    /* ignore */
+  }
+  clearApiCache();
+}
+
 export async function login(username, password) {
   const response = await fetch(`${API_BASE_URL}/auth/login`, {
     method: "POST",
@@ -89,8 +99,101 @@ export async function login(username, password) {
     throw new Error(await friendlyError(response));
   }
   const session = await response.json();
+  resetWorkspaceLocalState();
   window.localStorage.setItem(TOKEN_KEY, JSON.stringify(session));
   return session;
+}
+
+export async function register({ email, password, full_name, organization_name, plan_code }) {
+  const response = await fetch(`${API_BASE_URL}/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email,
+      password,
+      full_name: full_name || null,
+      organization_name,
+      plan_code: plan_code || null,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await friendlyError(response));
+  }
+  const session = await response.json();
+  resetWorkspaceLocalState();
+  window.localStorage.setItem(TOKEN_KEY, JSON.stringify(session));
+  return session;
+}
+
+export function isSuperAdmin() {
+  return !!getSession()?.is_super_admin;
+}
+
+export async function fetchBillingSummary() {
+  return api("/billing/summary");
+}
+
+export async function fetchPlans() {
+  const response = await fetch(`${API_BASE_URL}/plans`);
+  if (!response.ok) throw new Error(await friendlyError(response));
+  return response.json();
+}
+
+export async function superAdminListOrgs() {
+  return api("/super-admin/organizations");
+}
+
+export async function superAdminActivateOrg(orgId, planCode, periodDays = 30) {
+  return api(`/super-admin/organizations/${orgId}/activate`, {
+    method: "POST",
+    body: JSON.stringify({ plan_code: planCode, period_days: periodDays }),
+  });
+}
+
+export async function superAdminExtendTrial(orgId, days = 7) {
+  return api(`/super-admin/organizations/${orgId}/extend-trial`, {
+    method: "POST",
+    body: JSON.stringify({ days }),
+  });
+}
+
+export async function superAdminSuspendOrg(orgId) {
+  return api(`/super-admin/organizations/${orgId}/suspend`, { method: "POST" });
+}
+
+const UNLOCKED_BRANDS_KEY = "monitoring_unlocked_brands";
+
+export function getUnlockedBrandIds() {
+  try {
+    const raw = window.sessionStorage.getItem(UNLOCKED_BRANDS_KEY);
+    const rows = JSON.parse(raw || "[]");
+    return Array.isArray(rows) ? rows.filter((id) => validUuid(id)) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function markBrandUnlocked(brandId) {
+  if (!validUuid(brandId)) return getUnlockedBrandIds();
+  const next = Array.from(new Set([...getUnlockedBrandIds(), brandId]));
+  try {
+    window.sessionStorage.setItem(UNLOCKED_BRANDS_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore */
+  }
+  return next;
+}
+
+export function isBrandUnlocked(brandId) {
+  if (!validUuid(brandId)) return false;
+  return getUnlockedBrandIds().includes(brandId);
+}
+
+export async function unlockBrand(brandId, email, password) {
+  return api(uuidPath("/brands", brandId) + "/unlock", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
 }
 
 export function logout() {
@@ -112,19 +215,31 @@ export function saveAdminSession(patch) {
 export async function api(path, options = {}) {
   const token = getToken();
   const method = (options.method || "GET").toUpperCase();
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const { timeoutMs: _ignoredTimeout, signal: outerSignal, headers: optionHeaders, ...fetchOptions } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller
+    ? window.setTimeout(() => controller.abort(), timeoutMs)
+    : null;
   let response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
+      ...fetchOptions,
       headers: {
         "Content-Type": "application/json",
         "Accept-Language": getUiLanguage(),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(options.headers || {}),
+        ...(optionHeaders || {}),
       },
-      ...options,
+      signal: controller?.signal || outerSignal,
     });
-  } catch {
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(translateUiText("So'rov vaqti tugadi. Qayta urinib ko'ring."));
+    }
     throw new Error(translateUiText(`Serverga ulanib bo'lmadi (${API_BASE_URL}). Backend ishga tushganini tekshiring.`));
+  } finally {
+    if (timer) window.clearTimeout(timer);
   }
 
   if (response.status === 401) {
@@ -357,7 +472,10 @@ export const endpoints = {
     api("/brands/profile-suggestions", {
       method: "POST",
       body: JSON.stringify(payload),
+      // Fail faster so the user can retry after changing selects.
+      timeoutMs: 25000,
     }),
+  unlockBrand: (brandId, email, password) => unlockBrand(brandId, email, password),
   botStatus: () => cachedApi("/telegram/bot/status", 10000),
   telegramConnection: (brandId) => api(`${uuidPath("/brands", brandId)}/telegram/connection`),
   telegramSetup: (brandId, payload) =>
@@ -416,7 +534,7 @@ export const endpoints = {
     }),
   youtubeDeleteSource: (sourceId, purgeMentions = true) =>
     api(`${uuidPath("/youtube/sources", sourceId)}?purge_mentions=${purgeMentions}`, { method: "DELETE" }),
-  youtubeSyncSource: (sourceId, payload = { max_pages: 1, comments_per_video: 100 }) =>
+  youtubeSyncSource: (sourceId, payload = { max_pages: 3, comments_per_video: 100, full_resync: true }) =>
     api(`/youtube/sources/${sourceId}/sync`, {
       method: "POST",
       body: JSON.stringify(payload),

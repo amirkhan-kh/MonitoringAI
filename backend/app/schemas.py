@@ -8,8 +8,17 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
 class LoginRequest(BaseModel):
+    # Email or legacy admin username
     username: str
     password: str
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=8, max_length=128)
+    full_name: str | None = None
+    organization_name: str = Field(min_length=1, max_length=255)
+    plan_code: str | None = None  # preferred after trial: start|growth|business|scale
 
 
 class TokenResponse(BaseModel):
@@ -17,6 +26,26 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     username: str
     expires_at: int
+    email: str | None = None
+    full_name: str | None = None
+    user_id: str | None = None
+    org_id: str | None = None
+    org_name: str | None = None
+    org_status: str | None = None
+    role: str | None = None
+    is_super_admin: bool = False
+    plan: dict[str, Any] | None = None
+    usage: dict[str, Any] | None = None
+
+
+class SuperAdminActivateRequest(BaseModel):
+    plan_code: str = Field(min_length=1, max_length=64)
+    period_days: int = Field(default=30, ge=1, le=366)
+    notes: str | None = None
+
+
+class SuperAdminExtendTrialRequest(BaseModel):
+    days: int = Field(default=7, ge=1, le=90)
 
 
 class BrandCreate(BaseModel):
@@ -68,14 +97,31 @@ class BrandOut(BrandCreate):
     id: uuid.UUID
     active: bool
     created_at: datetime
+    created_by_user_id: uuid.UUID | None = None
+    owner_email: str | None = None
+    owner_name: str | None = None
+    requires_unlock: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class BrandUnlockRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class BrandUnlockResponse(BaseModel):
+    ok: bool = True
+    brand_id: uuid.UUID
+    owner_email: str | None = None
+    unlocked: bool = True
 
 
 class BrandProfileSuggestRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     website: str | None = None
-    language: str = Field(default="uz", pattern="^(uz|ru|en)$")
+    # Analysis / smart-fill language (ISO-ish code). UI chrome stays uz|ru|en only.
+    language: str = Field(default="uz", min_length=2, max_length=16)
     category_path: list[str] = Field(min_length=3, max_length=5)
     business_model: str
     audience_segment: str | None = None
@@ -271,6 +317,8 @@ class TelegramSetupRequest(BaseModel):
     bot_mode: Literal["reference", "polling"] = "reference"
     channel_ref: int | str | None = None
     discussion_ref: int | str | None = None
+    # Staff support group that receives AI risk cards + reply buttons (per brand).
+    staff_group_ref: int | str | None = None
     monitor_from: date | None = None
     collect_posts: bool = True
     collect_comments: bool = True
@@ -278,9 +326,11 @@ class TelegramSetupRequest(BaseModel):
     @model_validator(mode="after")
     def require_connector_input(self) -> "TelegramSetupRequest":
         token = self.bot_token.get_secret_value().strip() if self.bot_token else ""
-        values = (self.bot_link, token, self.channel_ref, self.discussion_ref)
+        values = (self.bot_link, token, self.channel_ref, self.discussion_ref, self.staff_group_ref)
         if not any(value is not None and str(value).strip() for value in values):
-            raise ValueError("bot_link, bot_token, channel_ref yoki discussion_ref dan kamida bittasi kerak")
+            raise ValueError(
+                "bot_link, bot_token, channel_ref, discussion_ref yoki staff_group_ref dan kamida bittasi kerak"
+            )
         return self
 
 
@@ -314,6 +364,7 @@ class TelegramSetupResponse(BaseModel):
     sources: list[TelegramSourceOut] = Field(default_factory=list)
     capabilities: TelegramCapabilities = Field(default_factory=TelegramCapabilities)
     warnings: list[str] = Field(default_factory=list)
+    staff_group: dict[str, Any] | None = None
 
 
 class TelegramConnectionDeleteResult(BaseModel):
@@ -354,6 +405,9 @@ class YouTubeSourceUpdate(BaseModel):
 class YouTubeSourceSyncRequest(BaseModel):
     max_pages: int = Field(default=1, ge=1, le=5)
     comments_per_video: int = Field(default=100, ge=0, le=500)
+    # Manual Sync / first import: rewalk from monitor_from instead of the
+    # incremental watermark. Worker leaves this false so polling stays cheap.
+    full_resync: bool = False
 
 
 class YouTubeSourceSyncResult(BaseModel):

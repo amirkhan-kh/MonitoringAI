@@ -671,10 +671,14 @@ def finalize_staff_group_bind(
     source: str,
     chat_type: str | None = None,
     username: str | None = None,
+    brand_id=None,
 ) -> dict:
     """Bind support group, store invite link, pin summary, send status message."""
     settings = get_settings()
     invite_link, invite_warning = _capture_group_invite_link(api, chat_id)
+    # If brand not passed, try to match the bot token's brand connection.
+    if brand_id is None:
+        brand_id = _brand_id_for_delivery_bot(session, api)
     bound = bind_staff_chat(
         session,
         chat_id,
@@ -683,12 +687,15 @@ def finalize_staff_group_bind(
         invite_link=invite_link,
         username=username,
         chat_type=chat_type,
+        brand_id=brand_id,
     )
     lines = [
         f"✅ Support guruh ulandi: {title or chat_id}",
         f"Chat ID: {chat_id}",
         f"Turi: {chat_type or 'group/supergroup'}",
     ]
+    if brand_id is not None:
+        lines.append(f"Brand: {brand_id}")
     if invite_link:
         lines.append(f"Invite link: {invite_link}")
     if invite_warning:
@@ -697,8 +704,8 @@ def finalize_staff_group_bind(
     lines.extend(
         [
             "",
-            "AI tahlildan o'tgan riskli mentionlar (Telegram, YouTube, Instagram, Facebook)",
-            "shu guruhga kartochka + tugmalar bilan keladi. Pin hisoblagich yoqiladi.",
+            "Shu brandning AI risk kartochkalari shu guruhga keladi.",
+            "Botni guruhda admin qiling (pin + message edit).",
             "",
             "Komandalar: /ochiq · /xodimlar · /statistika · /til · /jamlanma · /staff",
         ]
@@ -708,12 +715,46 @@ def finalize_staff_group_bind(
         sync_summary_message(api, session, settings, force=True)
     except Exception:  # noqa: BLE001
         logger.debug("Could not pin summary after staff bind", exc_info=True)
-    logger.info("Bound staff alert chat id=%s title=%s invite=%s", chat_id, title, invite_link)
+    logger.info(
+        "Bound staff alert chat id=%s title=%s invite=%s brand=%s",
+        chat_id,
+        title,
+        invite_link,
+        brand_id,
+    )
     return bound
 
 
-def handle_my_chat_member(api: TelegramBotApi, session: Session, update: dict[str, Any]) -> bool:
-    """When the bot is added as admin to a group, bind it as the support inbox (public or private)."""
+def _brand_id_for_delivery_bot(session: Session, api: TelegramBotApi):
+    """Map the current bot API instance to a brand connection when possible."""
+    try:
+        me = api.get_me() or {}
+        bot_id = me.get("id")
+        if bot_id is None:
+            return None
+        from app.models import TelegramBotConnection
+
+        row = (
+            session.query(TelegramBotConnection)
+            .filter(
+                TelegramBotConnection.bot_id == int(bot_id),
+                TelegramBotConnection.active.is_(True),
+            )
+            .one_or_none()
+        )
+        return row.brand_id if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def handle_my_chat_member(
+    api: TelegramBotApi,
+    session: Session,
+    update: dict[str, Any],
+    *,
+    brand_id=None,
+) -> bool:
+    """When the bot is added as admin to a group, bind it as that brand's support inbox."""
     event = update.get("my_chat_member")
     if not event:
         return False
@@ -733,7 +774,6 @@ def handle_my_chat_member(api: TelegramBotApi, session: Session, update: dict[st
     if chat_id is None:
         return True
 
-    # Prefer admin; if only member, still bind but warn that pin/admin rights help.
     finalize_staff_group_bind(
         api,
         session,
@@ -742,6 +782,7 @@ def handle_my_chat_member(api: TelegramBotApi, session: Session, update: dict[st
         source=f"my_chat_member:{status}",
         chat_type=chat_type,
         username=username,
+        brand_id=brand_id,
     )
     if status != "administrator":
         _safe_send(
@@ -751,7 +792,6 @@ def handle_my_chat_member(api: TelegramBotApi, session: Session, update: dict[st
             "pin hisoblagich va kartochka tahrirlash to'liq ishlashi uchun.",
         )
     return True
-
 
 def handle_staff_private_message(api: TelegramBotApi, session: Session, update: dict[str, Any]) -> bool:
     """Private chat: /staff <invite|@username> or a bare t.me link to register support group."""

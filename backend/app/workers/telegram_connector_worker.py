@@ -224,7 +224,28 @@ def poll_connection(connection_id: uuid.UUID) -> None:
                 if connection.last_update_id is not None and int(update_id) <= connection.last_update_id:
                     continue
                 try:
-                    ingest_connector_update(session, update, connection)
+                    # Staff support workflow (buttons + /staff) on the brand's own bot.
+                    from app.services.alert_workflow import (
+                        handle_alert_group_message,
+                        handle_callback_query,
+                        handle_my_chat_member,
+                        handle_staff_private_message,
+                    )
+
+                    handled = False
+                    brand_id = connection.brand_id
+                    if update.get("callback_query"):
+                        handled = handle_callback_query(api, session, update)
+                    elif update.get("my_chat_member"):
+                        handled = handle_my_chat_member(
+                            api, session, update, brand_id=brand_id
+                        )
+                    elif handle_staff_private_message(api, session, update):
+                        handled = True
+                    elif handle_alert_group_message(api, session, update):
+                        handled = True
+                    if not handled:
+                        ingest_connector_update(session, update, connection)
                     connection.last_update_id = int(update_id)
                     connection.status = "active"
                     connection.status_detail = "Polling faol"

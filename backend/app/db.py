@@ -35,6 +35,18 @@ def init_db() -> None:
                 connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
                 connection.commit()
 
+    # Seed plans / super_admin / attach legacy brands (idempotent).
+    try:
+        from app.services.saas_seed import seed_saas
+
+        with SessionLocal() as session:
+            seed_saas(session)
+    except Exception:
+        # Never block boot if seed fails; logs surface in app startup.
+        import logging
+
+        logging.getLogger("db").exception("SaaS seed failed")
+
 
 def ensure_schema_upgrades() -> None:
     inspector = inspect(engine)
@@ -63,10 +75,43 @@ def ensure_schema_upgrades() -> None:
             brand_statements.append("ALTER TABLE brands ADD COLUMN positive_keywords JSONB NOT NULL DEFAULT '[]'::jsonb")
         if "profile_config" not in brand_columns:
             brand_statements.append("ALTER TABLE brands ADD COLUMN profile_config JSONB NOT NULL DEFAULT '{}'::jsonb")
+        if "organization_id" not in brand_columns:
+            brand_statements.append("ALTER TABLE brands ADD COLUMN organization_id UUID")
+        if "created_by_user_id" not in brand_columns:
+            brand_statements.append("ALTER TABLE brands ADD COLUMN created_by_user_id UUID")
         if brand_statements:
             with engine.begin() as connection:
                 for statement in brand_statements:
                     connection.execute(text(statement))
+        # Multi-tenant: drop global unique on brand name (Postgres).
+        if engine.dialect.name == "postgresql":
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE brands DROP CONSTRAINT IF EXISTS brands_name_key"))
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_brands_org_name "
+                        "ON brands (organization_id, name) WHERE organization_id IS NOT NULL"
+                    )
+                )
+                connection.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_brands_organization_id ON brands (organization_id)")
+                )
+                connection.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_brands_created_by_user_id ON brands (created_by_user_id)")
+                )
+                # Backfill creator from organization owner when possible.
+                connection.execute(
+                    text(
+                        """
+                        UPDATE brands b
+                        SET created_by_user_id = o.owner_user_id
+                        FROM organizations o
+                        WHERE b.created_by_user_id IS NULL
+                          AND b.organization_id = o.id
+                          AND o.owner_user_id IS NOT NULL
+                        """
+                    )
+                )
 
     columns = {column["name"] for column in inspector.get_columns("telegram_sources")}
     statements: list[str] = []

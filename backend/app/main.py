@@ -40,8 +40,12 @@ from app.models import (
     InstagramMention,
     InstagramSource,
     Mention,
+    Organization,
+    OrganizationMember,
+    Plan,
     TelegramBotConnection,
     TelegramSource,
+    User,
     YouTubeAnalysis,
     YouTubeMention,
     YouTubeSource,
@@ -54,9 +58,14 @@ from app.schemas import (
     BrandOut,
     BrandProfileSuggestRequest,
     BrandProfileSuggestion,
+    BrandUnlockRequest,
+    BrandUnlockResponse,
     BrandUpdate,
     DashboardSummary,
     LoginRequest,
+    RegisterRequest,
+    SuperAdminActivateRequest,
+    SuperAdminExtendTrialRequest,
     TokenResponse,
     FacebookAnalysisOut,
     FacebookManualIngest,
@@ -121,7 +130,35 @@ from app.services.alert_workflow import (
     today_stats,
 )
 from app.services.alerts import OPEN_WORK_STATUSES, record_alert
-from app.services.auth import create_token, verify_credentials, verify_token
+from app.services.auth import (
+    authenticate_user,
+    decode_token,
+    hash_password,
+    is_valid_email,
+    issue_session_token,
+    normalize_email,
+    primary_membership,
+    token_response_dict,
+    verify_token,
+)
+from app.services.billing import (
+    activate_org_plan,
+    create_trial_org,
+    effective_brands_limit,
+    ensure_default_plans,
+    get_plan,
+    plan_summary,
+    usage_summary,
+)
+from app.services.tenancy import (
+    apply_brand_scope,
+    brands_query_for_user,
+    get_org,
+    load_brand_for_user,
+    require_auth_context,
+    require_super_admin,
+    resolve_brand_scope,
+)
 from app.services.facebook_api import (
     FacebookApi,
     FacebookApiError,
@@ -406,6 +443,8 @@ async def lifespan(_: FastAPI):
 AUTH_PUBLIC_PATHS = {
     "/health",
     "/auth/login",
+    "/auth/register",
+    "/plans",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -430,7 +469,7 @@ async def require_auth(request: Request) -> None:
         return
     header = request.headers.get("Authorization", "")
     token = header[7:] if header.startswith("Bearer ") else None
-    if verify_token(settings, token) is None:
+    if decode_token(settings, token) is None:
         raise HTTPException(status_code=401, detail="Avtorizatsiya talab qilinadi. Qaytadan kiring.")
 
 
@@ -444,25 +483,243 @@ app.add_middleware(
 )
 
 
-@app.post("/auth/login", response_model=TokenResponse)
-def auth_login(payload: LoginRequest) -> TokenResponse:
+DbSession = Annotated[Session, Depends(get_session)]
+LOCAL_TZ = timezone(timedelta(hours=5))
+
+
+def assert_user_brand(session: Session, request: Request, brand_id: uuid.UUID) -> Brand:
+    """Load brand and enforce org isolation (super_admin sees all)."""
+    return load_brand_for_user(session, require_auth_context(request), brand_id)
+
+
+@app.post("/auth/register")
+def auth_register(payload: RegisterRequest, session: DbSession) -> dict[str, object]:
     settings = get_settings()
-    if not verify_credentials(settings, payload.username, payload.password):
+    email = normalize_email(payload.email)
+    if not is_valid_email(email):
+        raise HTTPException(status_code=400, detail="Email formati noto'g'ri")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Parol kamida 8 ta belgi bo'lishi kerak")
+    if session.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=409, detail="Bu email allaqachon ro'yxatdan o'tgan")
+
+    user = User(
+        email=email,
+        password_hash=hash_password(payload.password),
+        full_name=(payload.full_name or "").strip() or None,
+        is_super_admin=False,
+        status="active",
+    )
+    session.add(user)
+    session.flush()
+    org = create_trial_org(
+        session,
+        name=payload.organization_name,
+        owner_user_id=user.id,
+        preferred_plan_code=payload.plan_code,
+    )
+    session.add(OrganizationMember(organization_id=org.id, user_id=user.id, role="owner"))
+    session.commit()
+    session.refresh(user)
+    session.refresh(org)
+
+    token, expires_at, ctx = issue_session_token(session, settings, user)
+    plan = get_plan(session, org.plan_id)
+    return token_response_dict(
+        token=token,
+        expires_at=expires_at,
+        user=user,
+        ctx=ctx,
+        org=org,
+        plan_summary=plan_summary(plan),
+        usage_summary=usage_summary(session, org),
+    )
+
+
+@app.post("/auth/login")
+def auth_login(payload: LoginRequest, session: DbSession) -> dict[str, object]:
+    settings = get_settings()
+    user = authenticate_user(session, settings, payload.username, payload.password)
+    if user is None:
         raise HTTPException(status_code=401, detail="Login yoki parol noto'g'ri")
-    token, expires_at = create_token(settings, payload.username)
-    return TokenResponse(access_token=token, username=payload.username, expires_at=expires_at)
+    # Ensure super_admin has an org membership (seed may have created both).
+    if user.is_super_admin and primary_membership(session, user) is None:
+        from app.services.saas_seed import seed_saas
+
+        seed_saas(session)
+        session.refresh(user)
+
+    token, expires_at, ctx = issue_session_token(session, settings, user)
+    org = get_org(session, ctx.org_id)
+    plan = get_plan(session, org.plan_id) if org else None
+    return token_response_dict(
+        token=token,
+        expires_at=expires_at,
+        user=user,
+        ctx=ctx,
+        org=org,
+        plan_summary=plan_summary(plan),
+        usage_summary=usage_summary(session, org),
+    )
 
 
 @app.get("/auth/me")
-def auth_me(request: Request) -> dict[str, object]:
+def auth_me(request: Request, session: DbSession) -> dict[str, object]:
     settings = get_settings()
-    header = request.headers.get("Authorization", "")
-    token = header[7:] if header.startswith("Bearer ") else None
-    username = verify_token(settings, token)
-    return {"username": username, "auth_enabled": settings.auth_enabled}
+    ctx = require_auth_context(request)
+    user = session.get(User, ctx.user_id) if ctx.user_id else None
+    org = get_org(session, ctx.org_id)
+    plan = get_plan(session, org.plan_id) if org else None
+    return {
+        "username": ctx.email,
+        "email": ctx.email,
+        "full_name": user.full_name if user else None,
+        "user_id": str(ctx.user_id) if ctx.user_id else None,
+        "org_id": str(ctx.org_id) if ctx.org_id else None,
+        "org_name": org.name if org else None,
+        "org_status": org.status if org else None,
+        "role": ctx.role,
+        "is_super_admin": ctx.is_super_admin,
+        "auth_enabled": settings.auth_enabled,
+        "plan": plan_summary(plan),
+        "usage": usage_summary(session, org),
+    }
 
-DbSession = Annotated[Session, Depends(get_session)]
-LOCAL_TZ = timezone(timedelta(hours=5))
+
+@app.get("/plans")
+def list_public_plans(session: DbSession) -> list[dict[str, object]]:
+    ensure_default_plans(session)
+    session.commit()
+    rows = (
+        session.query(Plan)
+        .filter(Plan.active.is_(True), Plan.code != "trial")
+        .order_by(Plan.sort_order.asc())
+        .all()
+    )
+    return [plan_summary(p) for p in rows if p]
+
+
+@app.get("/billing/summary")
+def billing_summary(request: Request, session: DbSession) -> dict[str, object]:
+    ctx = require_auth_context(request)
+    org = get_org(session, ctx.org_id)
+    plan = get_plan(session, org.plan_id) if org else None
+    return {
+        "org": {
+            "id": str(org.id) if org else None,
+            "name": org.name if org else None,
+            "status": org.status if org else None,
+            "trial_ends_at": org.trial_ends_at.isoformat() if org and org.trial_ends_at else None,
+        },
+        "plan": plan_summary(plan),
+        "usage": usage_summary(session, org),
+    }
+
+
+@app.get("/super-admin/organizations")
+def super_admin_list_orgs(request: Request, session: DbSession) -> list[dict[str, object]]:
+    ctx = require_auth_context(request)
+    require_super_admin(ctx)
+    orgs = session.query(Organization).order_by(Organization.created_at.desc()).limit(200).all()
+    out: list[dict[str, object]] = []
+    for org in orgs:
+        plan = get_plan(session, org.plan_id)
+        out.append(
+            {
+                "id": str(org.id),
+                "name": org.name,
+                "slug": org.slug,
+                "status": org.status,
+                "trial_ends_at": org.trial_ends_at.isoformat() if org.trial_ends_at else None,
+                "plan": plan_summary(plan),
+                "usage": usage_summary(session, org),
+                "notes": org.notes,
+                "created_at": org.created_at.isoformat() if org.created_at else None,
+            }
+        )
+    return out
+
+
+@app.post("/super-admin/organizations/{org_id}/activate")
+def super_admin_activate_org(
+    org_id: uuid.UUID,
+    payload: SuperAdminActivateRequest,
+    request: Request,
+    session: DbSession,
+) -> dict[str, object]:
+    ctx = require_auth_context(request)
+    require_super_admin(ctx)
+    org = session.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    ensure_default_plans(session)
+    plan = session.query(Plan).filter(Plan.code == payload.plan_code).one_or_none()
+    if not plan or plan.code == "trial":
+        raise HTTPException(status_code=400, detail="Noto'g'ri plan_code")
+    activate_org_plan(
+        session,
+        org,
+        plan,
+        activated_by=ctx.user_id,
+        period_days=payload.period_days,
+    )
+    if payload.notes:
+        org.notes = (org.notes or "") + f"\n{payload.notes}"
+        session.add(org)
+    session.commit()
+    session.refresh(org)
+    return {
+        "ok": True,
+        "org_id": str(org.id),
+        "status": org.status,
+        "plan": plan_summary(plan),
+        "usage": usage_summary(session, org),
+    }
+
+
+@app.post("/super-admin/organizations/{org_id}/extend-trial")
+def super_admin_extend_trial(
+    org_id: uuid.UUID,
+    payload: SuperAdminExtendTrialRequest,
+    request: Request,
+    session: DbSession,
+) -> dict[str, object]:
+    from datetime import timedelta
+
+    ctx = require_auth_context(request)
+    require_super_admin(ctx)
+    org = session.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    base = org.trial_ends_at or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    if base < datetime.now(timezone.utc):
+        base = datetime.now(timezone.utc)
+    org.trial_ends_at = base + timedelta(days=payload.days)
+    org.status = "trial"
+    session.add(org)
+    session.commit()
+    return {
+        "ok": True,
+        "org_id": str(org.id),
+        "trial_ends_at": org.trial_ends_at.isoformat(),
+        "status": org.status,
+    }
+
+
+@app.post("/super-admin/organizations/{org_id}/suspend")
+def super_admin_suspend_org(org_id: uuid.UUID, request: Request, session: DbSession) -> dict[str, object]:
+    ctx = require_auth_context(request)
+    require_super_admin(ctx)
+    org = session.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    org.status = "suspended"
+    session.add(org)
+    session.commit()
+    return {"ok": True, "org_id": str(org.id), "status": org.status}
+
 
 
 def today_local_date() -> date:
@@ -786,10 +1043,33 @@ def telegram_setup_response(
     ):
         warning_list.append("telethon_access_is_unverified_until_worker_reads_chat")
 
+    brand = session.get(Brand, brand_id)
+    profile = (brand.profile_config if brand else None) or {}
+    staff_group = None
+    if profile.get("alert_chat_id") or profile.get("support_chat_id"):
+        staff_group = {
+            "chat_id": profile.get("alert_chat_id") or profile.get("support_chat_id"),
+            "title": profile.get("alert_chat_title"),
+            "invite_link": profile.get("alert_chat_invite") or profile.get("support_chat_ref"),
+            "username": profile.get("alert_chat_username"),
+            "ref": profile.get("support_chat_ref"),
+        }
+    elif not any(
+        (
+            role_monitoring_ready("channel"),
+            role_monitoring_ready("discussion"),
+            polling_active,
+        )
+    ):
+        pass
+    if staff_group is None and not profile.get("alert_chat_id"):
+        warning_list.append("staff_support_group_not_configured")
+
     return TelegramSetupResponse(
         brand_id=brand_id,
         connection=telegram_connection_out(connection),
         sources=sources,
+        staff_group=staff_group,
         capabilities=TelegramCapabilities(
             bot_reference=bool(connection and connection.bot_username),
             bot_polling=polling_active,
@@ -1536,6 +1816,13 @@ def sync_youtube_source(session: Session, source: YouTubeSource, api: YouTubeApi
             enrich_youtube_source(source, api)
             session.flush()
 
+        # Manual / first-import full_resync: drop the incremental watermark so
+        # the window starts at monitor_from again. An earlier empty sync must not
+        # permanently hide older (but still in-window) comments.
+        if payload.full_resync:
+            source.last_checked_at = None
+            session.flush()
+
         window = youtube_sync_window(source, overlap_seconds=settings.youtube_sync_overlap_seconds)
         cache = YouTubeIngestCache()
         pending_events: list[YouTubeMention] = []
@@ -1979,11 +2266,10 @@ async def realtime_events(request: Request) -> StreamingResponse:
 def setup_brand_telegram(
     brand_id: uuid.UUID,
     payload: TelegramSetupRequest,
+    request: Request,
     session: DbSession,
 ) -> TelegramSetupResponse:
-    brand = session.get(Brand, brand_id)
-    if brand is None:
-        raise HTTPException(status_code=404, detail="Brand not found")
+    brand = assert_user_brand(session, request, brand_id)
 
     settings = get_settings()
     warnings: list[str] = []
@@ -2230,6 +2516,71 @@ def setup_brand_telegram(
                     warnings.append("discussion_ref_differs_from_telegram_linked_chat")
                 channel_source.linked_discussion_chat_id = discussion_source.chat_id
 
+        # Per-brand staff support group (AI risk cards + reply buttons).
+        staff_ref = str(payload.staff_group_ref or "").strip()
+        if staff_ref:
+            from app.services.alerts import (
+                bind_staff_chat,
+                set_pending_staff_invite,
+                try_resolve_staff_chat_ref,
+            )
+
+            api_for_staff = None
+            if token_for_api:
+                api_for_staff = TelegramBotApi(token_for_api)
+            elif settings.telegram_bot_token:
+                api_for_staff = TelegramBotApi(settings.telegram_bot_token)
+            if api_for_staff is not None:
+                resolved = try_resolve_staff_chat_ref(api_for_staff, staff_ref)
+                chat = resolved.get("chat") or {}
+                parsed = resolved.get("parsed") or {}
+                if chat.get("id") is not None:
+                    bind_staff_chat(
+                        session,
+                        chat["id"],
+                        title=chat.get("title"),
+                        source="telegram_setup",
+                        username=chat.get("username"),
+                        chat_type=chat.get("type"),
+                        brand_id=brand_id,
+                    )
+                elif parsed.get("kind") == "invite":
+                    set_pending_staff_invite(
+                        session,
+                        parsed.get("invite_link") or staff_ref,
+                        note="telegram_setup",
+                        brand_id=brand_id,
+                    )
+                    profile = dict(brand.profile_config or {})
+                    profile["support_chat_ref"] = staff_ref
+                    profile["alert_chat_invite"] = parsed.get("invite_link") or staff_ref
+                    brand.profile_config = profile
+                    session.add(brand)
+                    warnings.append("staff_group_invite_pending_bot_join")
+                else:
+                    # Store raw ref for operator; delivery waits until bot joins / id resolves.
+                    profile = dict(brand.profile_config or {})
+                    profile["support_chat_ref"] = staff_ref
+                    if parsed.get("kind") == "id" and parsed.get("chat_id"):
+                        profile["alert_chat_id"] = str(parsed["chat_id"])
+                        bind_staff_chat(
+                            session,
+                            parsed["chat_id"],
+                            title=None,
+                            source="telegram_setup_id",
+                            brand_id=brand_id,
+                        )
+                    else:
+                        brand.profile_config = profile
+                        session.add(brand)
+                        warnings.append("staff_group_ref_unresolved")
+            else:
+                profile = dict(brand.profile_config or {})
+                profile["support_chat_ref"] = staff_ref
+                brand.profile_config = profile
+                session.add(brand)
+                warnings.append("staff_group_saved_without_bot_token")
+
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -2242,9 +2593,10 @@ def setup_brand_telegram(
 
 
 @app.get("/brands/{brand_id}/telegram/connection", response_model=TelegramSetupResponse)
-def get_brand_telegram_connection(brand_id: uuid.UUID, session: DbSession) -> TelegramSetupResponse:
-    if session.get(Brand, brand_id) is None:
-        raise HTTPException(status_code=404, detail="Brand not found")
+def get_brand_telegram_connection(
+    brand_id: uuid.UUID, request: Request, session: DbSession
+) -> TelegramSetupResponse:
+    assert_user_brand(session, request, brand_id)
     return telegram_setup_response(session, brand_id)
 
 
@@ -2330,9 +2682,72 @@ async def telegram_backfill_session_status() -> TelegramSessionStatus:
             pass
 
 
+def _brand_owner_map(session: Session, brands: list[Brand]) -> dict[uuid.UUID, User]:
+    owner_ids = {b.created_by_user_id for b in brands if b.created_by_user_id}
+    if not owner_ids:
+        return {}
+    rows = session.query(User).filter(User.id.in_(owner_ids)).all()
+    return {row.id: row for row in rows}
+
+
+def serialize_brand_out(brand: Brand, ctx, owner: User | None = None) -> BrandOut:
+    requires_unlock = bool(
+        ctx.is_super_admin
+        and brand.created_by_user_id
+        and ctx.user_id
+        and brand.created_by_user_id != ctx.user_id
+    )
+    return BrandOut(
+        id=brand.id,
+        name=brand.name,
+        description=brand.description,
+        industry=brand.industry,
+        primary_category=brand.primary_category,
+        category_path=brand.category_path or [],
+        website=brand.website,
+        language=brand.language or "uz",
+        aliases=brand.aliases or [],
+        keywords=brand.keywords or [],
+        products=brand.products or [],
+        competitors=brand.competitors or [],
+        ignore_terms=brand.ignore_terms or [],
+        audience=brand.audience,
+        region=brand.region,
+        monitoring_goals=brand.monitoring_goals or [],
+        risk_keywords=brand.risk_keywords or [],
+        positive_keywords=brand.positive_keywords or [],
+        monitor_notes=brand.monitor_notes,
+        profile_config=brand.profile_config or {},
+        active=bool(brand.active),
+        created_at=brand.created_at,
+        created_by_user_id=brand.created_by_user_id,
+        owner_email=owner.email if owner else None,
+        owner_name=owner.full_name if owner else None,
+        requires_unlock=requires_unlock,
+    )
+
+
 @app.post("/brands", response_model=BrandOut)
-def create_brand(payload: BrandCreate, session: DbSession) -> Brand:
-    brand = Brand(**payload.model_dump())
+def create_brand(payload: BrandCreate, request: Request, session: DbSession) -> BrandOut:
+    ctx = require_auth_context(request)
+    if not ctx.is_super_admin and ctx.org_id is None:
+        raise HTTPException(status_code=400, detail="Organization topilmadi")
+    org = get_org(session, ctx.org_id) if ctx.org_id else None
+    if not ctx.is_super_admin:
+        plan = get_plan(session, org.plan_id) if org else None
+        limit = effective_brands_limit(org, plan) if org else 1
+        used = brands_query_for_user(session, ctx).count()
+        if used >= limit:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Brand limiti tugadi ({used}/{limit}). Super admin orqali tarifni yangilang.",
+            )
+    data = payload.model_dump()
+    if ctx.org_id:
+        data["organization_id"] = ctx.org_id
+    if ctx.user_id:
+        data["created_by_user_id"] = ctx.user_id
+    brand = Brand(**data)
     session.add(brand)
     try:
         session.commit()
@@ -2341,7 +2756,8 @@ def create_brand(payload: BrandCreate, session: DbSession) -> Brand:
         raise HTTPException(status_code=409, detail="Bu nomdagi brand allaqachon mavjud") from exc
     session.refresh(brand)
     invalidate_brand_cache()
-    return brand
+    owner = session.get(User, brand.created_by_user_id) if brand.created_by_user_id else None
+    return serialize_brand_out(brand, ctx, owner)
 
 
 @app.get("/brands/taxonomy")
@@ -2357,7 +2773,7 @@ def brand_taxonomy_stable(request: Request) -> dict[str, Any]:
 @app.post("/brands/profile-suggestions", response_model=BrandProfileSuggestion)
 def brand_profile_suggestions(payload: BrandProfileSuggestRequest, request: Request) -> dict[str, Any]:
     settings = get_settings()
-    language = request_language(request)
+    language = (payload.language or request_language(request) or "uz").lower()
     try:
         client = create_gemini_client(settings)
         context = payload.model_dump()
@@ -2368,28 +2784,74 @@ def brand_profile_suggestions(payload: BrandProfileSuggestRequest, request: Requ
             "uz": "AI profil tavsiyasi hozir olinmadi",
             "ru": "Сейчас не удалось получить рекомендации ИИ для профиля",
             "en": "AI profile suggestions are currently unavailable",
-        }[language]
+        }.get(request_language(request), "AI profil tavsiyasi hozir olinmadi")
         raise HTTPException(status_code=503, detail=f"{prefix}: {exc}") from exc
 
 
 @app.get("/brands", response_model=list[BrandOut])
-def list_brands(session: DbSession) -> list[Brand]:
-    return session.query(Brand).order_by(Brand.created_at.desc()).all()
+def list_brands(request: Request, session: DbSession) -> list[BrandOut]:
+    ctx = require_auth_context(request)
+    brands = brands_query_for_user(session, ctx).order_by(Brand.created_at.desc()).all()
+    owners = _brand_owner_map(session, brands)
+    return [serialize_brand_out(brand, ctx, owners.get(brand.created_by_user_id)) for brand in brands]
 
 
 @app.get("/brands/{brand_id}", response_model=BrandOut)
-def get_brand(brand_id: uuid.UUID, session: DbSession) -> Brand:
+def get_brand(brand_id: uuid.UUID, request: Request, session: DbSession) -> BrandOut:
+    ctx = require_auth_context(request)
+    brand = load_brand_for_user(session, ctx, brand_id)
+    owner = session.get(User, brand.created_by_user_id) if brand.created_by_user_id else None
+    return serialize_brand_out(brand, ctx, owner)
+
+
+@app.post("/brands/{brand_id}/unlock", response_model=BrandUnlockResponse)
+def unlock_brand_workspace(
+    brand_id: uuid.UUID,
+    payload: BrandUnlockRequest,
+    request: Request,
+    session: DbSession,
+) -> BrandUnlockResponse:
+    """Super-admin gate: verify brand owner credentials before opening another client's workspace."""
+    ctx = require_auth_context(request)
+    lang = request_language(request)
+    if not ctx.is_super_admin:
+        detail = {
+            "uz": "Faqat super admin",
+            "en": "Super admin only",
+            "ru": "Только супер-админ",
+        }[lang]
+        raise HTTPException(status_code=403, detail=detail)
     brand = session.get(Brand, brand_id)
-    if not brand:
-        raise HTTPException(status_code=404, detail="Brand not found")
-    return brand
+    if brand is None:
+        detail = {"uz": "Brand topilmadi", "en": "Brand not found", "ru": "Бренд не найден"}[lang]
+        raise HTTPException(status_code=404, detail=detail)
+    owner = session.get(User, brand.created_by_user_id) if brand.created_by_user_id else None
+    if owner is None and brand.organization_id:
+        org = session.get(Organization, brand.organization_id)
+        if org and org.owner_user_id:
+            owner = session.get(User, org.owner_user_id)
+    if owner is None:
+        # Legacy brand without owner — allow super admin through without client password.
+        return BrandUnlockResponse(brand_id=brand.id, owner_email=None, unlocked=True)
+
+    email = normalize_email(payload.email)
+    bad_creds = {
+        "uz": "Brand egasining login/paroli noto'g'ri",
+        "en": "Brand owner login/password is incorrect",
+        "ru": "Неверный логин/пароль владельца бренда",
+    }[lang]
+    if email != normalize_email(owner.email):
+        raise HTTPException(status_code=401, detail=bad_creds)
+    user = authenticate_user(session, get_settings(), payload.email, payload.password)
+    if user is None or user.id != owner.id:
+        raise HTTPException(status_code=401, detail=bad_creds)
+    return BrandUnlockResponse(brand_id=brand.id, owner_email=owner.email, unlocked=True)
 
 
 @app.patch("/brands/{brand_id}", response_model=BrandOut)
-def update_brand(brand_id: uuid.UUID, payload: BrandUpdate, session: DbSession) -> Brand:
-    brand = session.get(Brand, brand_id)
-    if not brand:
-        raise HTTPException(status_code=404, detail="Brand not found")
+def update_brand(brand_id: uuid.UUID, payload: BrandUpdate, request: Request, session: DbSession) -> BrandOut:
+    ctx = require_auth_context(request)
+    brand = load_brand_for_user(session, ctx, brand_id)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(brand, field, value)
     try:
@@ -2399,7 +2861,8 @@ def update_brand(brand_id: uuid.UUID, payload: BrandUpdate, session: DbSession) 
         raise HTTPException(status_code=409, detail="Bu nomdagi brand allaqachon mavjud") from exc
     session.refresh(brand)
     invalidate_brand_cache()
-    return brand
+    owner = session.get(User, brand.created_by_user_id) if brand.created_by_user_id else None
+    return serialize_brand_out(brand, ctx, owner)
 
 
 @app.post("/telegram/sources", response_model=TelegramSourceOut)
@@ -2649,13 +3112,11 @@ def import_telegram_sources(payload: TelegramSourceImport, session: DbSession) -
 
 
 @app.get("/telegram/sources", response_model=list[TelegramSourceOut])
-def list_telegram_sources(session: DbSession) -> list[TelegramSource]:
-    return (
-        session.query(TelegramSource)
-        .filter(TelegramSource.deleted_at.is_(None))
-        .order_by(TelegramSource.created_at.desc())
-        .all()
-    )
+def list_telegram_sources(request: Request, session: DbSession) -> list[TelegramSource]:
+    _, allowed, _ = resolve_brand_scope(session, request)
+    query = session.query(TelegramSource).filter(TelegramSource.deleted_at.is_(None))
+    query = apply_brand_scope(query, TelegramSource.brand_id, allowed)
+    return query.order_by(TelegramSource.created_at.desc()).all()
 
 
 @app.patch("/telegram/sources/{source_id}", response_model=TelegramSourceOut)
@@ -2831,13 +3292,11 @@ def youtube_source_categories(request: Request) -> list[dict[str, str]]:
 
 
 @app.get("/youtube/sources", response_model=list[YouTubeSourceOut])
-def list_youtube_sources(session: DbSession) -> list[YouTubeSource]:
-    return (
-        session.query(YouTubeSource)
-        .filter(YouTubeSource.deleted_at.is_(None))
-        .order_by(YouTubeSource.created_at.desc())
-        .all()
-    )
+def list_youtube_sources(request: Request, session: DbSession) -> list[YouTubeSource]:
+    _, allowed, _ = resolve_brand_scope(session, request)
+    query = session.query(YouTubeSource).filter(YouTubeSource.deleted_at.is_(None))
+    query = apply_brand_scope(query, YouTubeSource.brand_id, allowed)
+    return query.order_by(YouTubeSource.created_at.desc()).all()
 
 
 @app.post("/youtube/sources/import", response_model=list[YouTubeSourceImportResult])
@@ -2873,7 +3332,42 @@ def import_youtube_sources(payload: YouTubeSourceImport, session: DbSession) -> 
             session.commit()
             session.refresh(source)
             publish_youtube_source_event(session, source)
-            results.append(YouTubeSourceImportResult(ref=ref, status="resolved" if api.configured else "cataloged", source=source))
+
+            # First pull immediately so the mentions panel is not empty until the
+            # background worker's next cycle (and so a "today" monitor_from is
+            # visible as "0 imported" rather than "never tried").
+            if api.configured and source.active and source.deleted_at is None:
+                sync_result = sync_youtube_source(
+                    session,
+                    source,
+                    api,
+                    YouTubeSourceSyncRequest(
+                        max_pages=max(settings.youtube_sync_max_pages, 3),
+                        comments_per_video=settings.youtube_comments_per_video,
+                        full_resync=True,
+                    ),
+                )
+                session.refresh(source)
+                status = "synced" if sync_result.ok else "resolved"
+                if not sync_result.ok and sync_result.error:
+                    results.append(
+                        YouTubeSourceImportResult(
+                            ref=ref,
+                            status="resolved",
+                            source=source,
+                            error=f"Source saqlandi, lekin birinchi sync: {sync_result.error}",
+                        )
+                    )
+                    continue
+                results.append(YouTubeSourceImportResult(ref=ref, status=status, source=source))
+            else:
+                results.append(
+                    YouTubeSourceImportResult(
+                        ref=ref,
+                        status="resolved" if api.configured else "cataloged",
+                        source=source,
+                    )
+                )
         except IntegrityError as exc:
             session.rollback()
             results.append(YouTubeSourceImportResult(ref=ref, status="error", error=str(exc.orig)))
@@ -2930,15 +3424,16 @@ def sync_youtube_source_endpoint(
 
 @app.get("/youtube/mentions", response_model=list[YouTubeMentionOut])
 def list_youtube_mentions(
+    request: Request,
     session: DbSession,
     brand_id: uuid.UUID | None = None,
     item_type: str | None = None,
     limit: int | None = Query(default=100, ge=1, le=10000),
 ) -> list[YouTubeMentionOut]:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     latest_time = func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at)
     query = session.query(YouTubeMention).order_by(latest_time.desc(), YouTubeMention.created_at.desc())
-    if brand_id:
-        query = query.filter(YouTubeMention.brand_id == brand_id)
+    query = apply_brand_scope(query, YouTubeMention.brand_id, allowed, scoped_brand)
     if item_type:
         query = query.filter(YouTubeMention.item_type == item_type)
     if limit:
@@ -2963,7 +3458,10 @@ def list_youtube_mentions(
 
 
 @app.get("/youtube/summary", response_model=YouTubeSummary)
-def youtube_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> YouTubeSummary:
+def youtube_summary(
+    request: Request, session: DbSession, brand_id: uuid.UUID | None = None
+) -> YouTubeSummary:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     source_query = session.query(YouTubeSource).filter(YouTubeSource.deleted_at.is_(None))
     mention_query = session.query(YouTubeMention)
     analysis_query = (
@@ -2971,10 +3469,9 @@ def youtube_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> Yo
         .join(YouTubeMention, YouTubeAnalysis.youtube_mention_id == YouTubeMention.id)
         .filter(YouTubeAnalysis.error.is_(None))
     )
-    if brand_id:
-        source_query = source_query.filter(YouTubeSource.brand_id == brand_id)
-        mention_query = mention_query.filter(YouTubeMention.brand_id == brand_id)
-        analysis_query = analysis_query.filter(YouTubeMention.brand_id == brand_id)
+    source_query = apply_brand_scope(source_query, YouTubeSource.brand_id, allowed, scoped_brand)
+    mention_query = apply_brand_scope(mention_query, YouTubeMention.brand_id, allowed, scoped_brand)
+    analysis_query = apply_brand_scope(analysis_query, YouTubeMention.brand_id, allowed, scoped_brand)
 
     mentions_total = mention_query.count()
     analyzed_total = analysis_query.count()
@@ -3251,12 +3748,14 @@ def forecast_payload(
 
 @app.get("/dashboard/analytics")
 def dashboard_analytics(
+    request: Request,
     session: DbSession,
     brand_id: uuid.UUID | None = None,
     days: int = Query(default=30, ge=1, le=180),
     interval: str | None = Query(default=None, pattern="^(hour|day|week|month)$"),
     client_timezone: str | None = Query(default=None, alias="timezone", max_length=80),
 ) -> dict[str, Any]:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     days = bounded_days(days)
     interval = normalize_interval(days, interval)
     tz, tz_name = dashboard_timezone(client_timezone)
@@ -3307,23 +3806,22 @@ def dashboard_analytics(
         .filter(func.coalesce(FacebookMention.published_at, FacebookMention.created_at) >= start_at)
     )
 
-    if brand_id:
-        telegram_query = telegram_query.filter(Mention.brand_id == brand_id)
-        youtube_query = youtube_query.filter(YouTubeMention.brand_id == brand_id)
-        instagram_query = instagram_query.filter(InstagramMention.brand_id == brand_id)
-        facebook_query = facebook_query.filter(FacebookMention.brand_id == brand_id)
-        previous_telegram_query = previous_telegram_query.filter(Mention.brand_id == brand_id)
-        previous_youtube_query = previous_youtube_query.filter(YouTubeMention.brand_id == brand_id)
-        previous_instagram_query = previous_instagram_query.filter(InstagramMention.brand_id == brand_id)
-        previous_facebook_query = previous_facebook_query.filter(FacebookMention.brand_id == brand_id)
-        telegram_sources_query = telegram_sources_query.filter(TelegramSource.brand_id == brand_id)
-        youtube_sources_query = youtube_sources_query.filter(YouTubeSource.brand_id == brand_id)
-        instagram_sources_query = instagram_sources_query.filter(InstagramSource.brand_id == brand_id)
-        facebook_sources_query = facebook_sources_query.filter(FacebookSource.brand_id == brand_id)
-        analysis_query = analysis_query.filter(Mention.brand_id == brand_id)
-        youtube_analysis_query = youtube_analysis_query.filter(YouTubeMention.brand_id == brand_id)
-        instagram_analysis_query = instagram_analysis_query.filter(InstagramMention.brand_id == brand_id)
-        facebook_analysis_query = facebook_analysis_query.filter(FacebookMention.brand_id == brand_id)
+    telegram_query = apply_brand_scope(telegram_query, Mention.brand_id, allowed, scoped_brand)
+    youtube_query = apply_brand_scope(youtube_query, YouTubeMention.brand_id, allowed, scoped_brand)
+    instagram_query = apply_brand_scope(instagram_query, InstagramMention.brand_id, allowed, scoped_brand)
+    facebook_query = apply_brand_scope(facebook_query, FacebookMention.brand_id, allowed, scoped_brand)
+    previous_telegram_query = apply_brand_scope(previous_telegram_query, Mention.brand_id, allowed, scoped_brand)
+    previous_youtube_query = apply_brand_scope(previous_youtube_query, YouTubeMention.brand_id, allowed, scoped_brand)
+    previous_instagram_query = apply_brand_scope(previous_instagram_query, InstagramMention.brand_id, allowed, scoped_brand)
+    previous_facebook_query = apply_brand_scope(previous_facebook_query, FacebookMention.brand_id, allowed, scoped_brand)
+    telegram_sources_query = apply_brand_scope(telegram_sources_query, TelegramSource.brand_id, allowed, scoped_brand)
+    youtube_sources_query = apply_brand_scope(youtube_sources_query, YouTubeSource.brand_id, allowed, scoped_brand)
+    instagram_sources_query = apply_brand_scope(instagram_sources_query, InstagramSource.brand_id, allowed, scoped_brand)
+    facebook_sources_query = apply_brand_scope(facebook_sources_query, FacebookSource.brand_id, allowed, scoped_brand)
+    analysis_query = apply_brand_scope(analysis_query, Mention.brand_id, allowed, scoped_brand)
+    youtube_analysis_query = apply_brand_scope(youtube_analysis_query, YouTubeMention.brand_id, allowed, scoped_brand)
+    instagram_analysis_query = apply_brand_scope(instagram_analysis_query, InstagramMention.brand_id, allowed, scoped_brand)
+    facebook_analysis_query = apply_brand_scope(facebook_analysis_query, FacebookMention.brand_id, allowed, scoped_brand)
 
     telegram_event_time = func.coalesce(Mention.message_date, Mention.created_at).label("event_time")
     youtube_event_time = func.coalesce(YouTubeMention.published_at, YouTubeMention.created_at).label("event_time")
@@ -3657,15 +4155,16 @@ def dashboard_analytics(
 
 @app.get("/mentions", response_model=list[MentionOut])
 def list_mentions(
+    request: Request,
     session: DbSession,
     brand_id: uuid.UUID | None = None,
     source_type: str | None = None,
     limit: int | None = Query(default=100, ge=1, le=10000),
 ) -> list[MentionOut]:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     latest_time = func.coalesce(Mention.message_date, Mention.created_at)
     query = session.query(Mention).order_by(latest_time.desc(), Mention.created_at.desc())
-    if brand_id:
-        query = query.filter(Mention.brand_id == brand_id)
+    query = apply_brand_scope(query, Mention.brand_id, allowed, scoped_brand)
     if source_type:
         query = query.filter(Mention.source_type == source_type)
     if limit:
@@ -3696,12 +4195,14 @@ def get_mention(mention_id: uuid.UUID, session: DbSession) -> Mention:
 
 
 @app.get("/dashboard/summary", response_model=DashboardSummary)
-def dashboard_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> DashboardSummary:
+def dashboard_summary(
+    request: Request, session: DbSession, brand_id: uuid.UUID | None = None
+) -> DashboardSummary:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     mention_query = session.query(Mention)
     analysis_query = session.query(Analysis).join(Mention)
-    if brand_id:
-        mention_query = mention_query.filter(Mention.brand_id == brand_id)
-        analysis_query = analysis_query.filter(Mention.brand_id == brand_id)
+    mention_query = apply_brand_scope(mention_query, Mention.brand_id, allowed, scoped_brand)
+    analysis_query = apply_brand_scope(analysis_query, Mention.brand_id, allowed, scoped_brand)
 
     mentions_total = mention_query.count()
     analyzed_total = analysis_query.count()
@@ -3730,43 +4231,78 @@ def dashboard_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> 
 
 @app.get("/dashboard/timeseries")
 def dashboard_timeseries(
+    request: Request,
     session: DbSession,
     brand_id: uuid.UUID | None = None,
     interval: str = Query(default="hour", pattern="^(hour|day)$"),
 ) -> list[dict[str, object]]:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     bucket = func.date_trunc(interval, Mention.message_date)
     query = session.query(bucket.label("bucket"), func.count(Mention.id).label("count")).filter(Mention.message_date.is_not(None))
-    if brand_id:
-        query = query.filter(Mention.brand_id == brand_id)
+    query = apply_brand_scope(query, Mention.brand_id, allowed, scoped_brand)
     rows = query.group_by(bucket).order_by(bucket.asc()).all()
     return [{"bucket": row.bucket, "count": row.count} for row in rows]
 
 
 @app.get("/alerts/events", response_model=list[AlertEventOut])
 def list_alert_events(
+    request: Request,
     session: DbSession,
     limit: int = Query(default=100, le=500),
     work_status: str | None = Query(default=None, description="open | checked | answered | unanswered"),
     platform: str | None = None,
     brand_id: uuid.UUID | None = None,
 ) -> list[AlertEvent]:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     query = session.query(AlertEvent)
+    query = apply_brand_scope(query, AlertEvent.brand_id, allowed, scoped_brand)
     if work_status == "unanswered":
         query = query.filter(AlertEvent.work_status.in_(OPEN_WORK_STATUSES))
     elif work_status:
         query = query.filter(AlertEvent.work_status == work_status)
     if platform:
         query = query.filter(AlertEvent.payload["platform"].astext == platform)
-    if brand_id:
-        query = query.filter(AlertEvent.brand_id == brand_id)
     return query.order_by(AlertEvent.created_at.desc()).limit(limit).all()
 
 
 @app.get("/alerts/summary", response_model=AlertSummaryOut)
-def alert_summary(session: DbSession) -> AlertSummaryOut:
-    """The same numbers the pinned Telegram message shows — how much work is still open."""
+def alert_summary(request: Request, session: DbSession) -> AlertSummaryOut:
+    """Open work counts — scoped to the caller's organization brands."""
+    _, allowed, _ = resolve_brand_scope(session, request)
+    # Non-super tenants: only count alerts for their brand set (empty → zeros).
+    if allowed is not None and not allowed:
+        return AlertSummaryOut(
+            open=0,
+            checked=0,
+            oldest_created_at=None,
+            by_risk={},
+            by_source={},
+            answered_today=0,
+            avg_response_seconds=None,
+            by_person={},
+        )
     counts = open_alert_counts(session)
     stats = today_stats(session)
+    if allowed is not None:
+        open_q = session.query(AlertEvent).filter(
+            AlertEvent.work_status.in_(OPEN_WORK_STATUSES),
+            AlertEvent.brand_id.in_(allowed),
+        )
+        checked_q = session.query(AlertEvent).filter(
+            AlertEvent.work_status == "checked",
+            AlertEvent.brand_id.in_(allowed),
+        )
+        oldest = open_q.order_by(AlertEvent.created_at.asc()).first()
+        return AlertSummaryOut(
+            open=open_q.count(),
+            checked=checked_q.count(),
+            oldest_created_at=oldest.created_at if oldest else None,
+            by_risk={},
+            by_source={},
+            answered_today=stats["answered"],
+            avg_response_seconds=stats["avg_response_seconds"],
+            by_person=stats["by_person"],
+        )
     return AlertSummaryOut(
         open=counts["open"],
         checked=counts["checked"],
@@ -3858,13 +4394,11 @@ def instagram_source_categories(request: Request) -> list[dict[str, str]]:
 
 
 @app.get("/instagram/sources", response_model=list[InstagramSourceOut])
-def list_instagram_sources(session: DbSession) -> list[InstagramSource]:
-    return (
-        session.query(InstagramSource)
-        .filter(InstagramSource.deleted_at.is_(None))
-        .order_by(InstagramSource.created_at.asc())
-        .all()
-    )
+def list_instagram_sources(request: Request, session: DbSession) -> list[InstagramSource]:
+    _, allowed, _ = resolve_brand_scope(session, request)
+    query = session.query(InstagramSource).filter(InstagramSource.deleted_at.is_(None))
+    query = apply_brand_scope(query, InstagramSource.brand_id, allowed)
+    return query.order_by(InstagramSource.created_at.asc()).all()
 
 
 def _upsert_instagram_account(
@@ -4219,11 +4753,14 @@ def delete_instagram_source(
 
 @app.get("/instagram/mentions", response_model=list[InstagramMentionOut])
 def list_instagram_mentions(
-    session: DbSession, brand_id: uuid.UUID | None = None, limit: int = Query(default=100, le=500)
+    request: Request,
+    session: DbSession,
+    brand_id: uuid.UUID | None = None,
+    limit: int = Query(default=100, le=500),
 ) -> list[InstagramMentionOut]:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     query = session.query(InstagramMention)
-    if brand_id:
-        query = query.filter(InstagramMention.brand_id == brand_id)
+    query = apply_brand_scope(query, InstagramMention.brand_id, allowed, scoped_brand)
     rows = query.order_by(InstagramMention.created_at.desc()).limit(limit).all()
     if not rows:
         return []
@@ -4362,12 +4899,14 @@ def _analyze_instagram_mentions_now(mention_ids: list[uuid.UUID]) -> None:
 
 
 @app.get("/instagram/summary", response_model=InstagramSummary)
-def instagram_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> InstagramSummary:
+def instagram_summary(
+    request: Request, session: DbSession, brand_id: uuid.UUID | None = None
+) -> InstagramSummary:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     source_q = session.query(InstagramSource).filter(InstagramSource.deleted_at.is_(None))
     mention_q = session.query(InstagramMention)
-    if brand_id:
-        source_q = source_q.filter(InstagramSource.brand_id == brand_id)
-        mention_q = mention_q.filter(InstagramMention.brand_id == brand_id)
+    source_q = apply_brand_scope(source_q, InstagramSource.brand_id, allowed, scoped_brand)
+    mention_q = apply_brand_scope(mention_q, InstagramMention.brand_id, allowed, scoped_brand)
     mentions_total = mention_q.count()
     posts_total = mention_q.filter(InstagramMention.item_type.in_(["post", "caption"])).count()
     comments_total = mention_q.filter(InstagramMention.item_type == "comment").count()
@@ -4384,10 +4923,8 @@ def instagram_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> 
         .join(InstagramMention, InstagramMention.id == InstagramAnalysis.instagram_mention_id)
         .filter(InstagramAnalysis.error.is_(None))
     )
+    analyzed_total = apply_brand_scope(analyzed_total, InstagramMention.brand_id, allowed, scoped_brand)
     high_risk = analyzed_total.filter(InstagramAnalysis.risk_level.in_(["high", "critical"]))
-    if brand_id:
-        analyzed_total = analyzed_total.filter(InstagramMention.brand_id == brand_id)
-        high_risk = high_risk.filter(InstagramMention.brand_id == brand_id)
     latest = mention_q.order_by(InstagramMention.created_at.desc()).limit(20).all()
     return InstagramSummary(
         sources_total=source_q.count(),
@@ -4538,13 +5075,11 @@ def facebook_source_categories(request: Request) -> list[dict[str, str]]:
 
 
 @app.get("/facebook/sources", response_model=list[FacebookSourceOut])
-def list_facebook_sources(session: DbSession) -> list[FacebookSource]:
-    return (
-        session.query(FacebookSource)
-        .filter(FacebookSource.deleted_at.is_(None))
-        .order_by(FacebookSource.created_at.asc())
-        .all()
-    )
+def list_facebook_sources(request: Request, session: DbSession) -> list[FacebookSource]:
+    _, allowed, _ = resolve_brand_scope(session, request)
+    query = session.query(FacebookSource).filter(FacebookSource.deleted_at.is_(None))
+    query = apply_brand_scope(query, FacebookSource.brand_id, allowed)
+    return query.order_by(FacebookSource.created_at.asc()).all()
 
 
 @app.post("/facebook/sources", response_model=FacebookSourceOut)
@@ -4651,11 +5186,14 @@ def delete_facebook_source(
 
 @app.get("/facebook/mentions", response_model=list[FacebookMentionOut])
 def list_facebook_mentions(
-    session: DbSession, brand_id: uuid.UUID | None = None, limit: int = Query(default=100, le=500)
+    request: Request,
+    session: DbSession,
+    brand_id: uuid.UUID | None = None,
+    limit: int = Query(default=100, le=500),
 ) -> list[FacebookMentionOut]:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     query = session.query(FacebookMention)
-    if brand_id:
-        query = query.filter(FacebookMention.brand_id == brand_id)
+    query = apply_brand_scope(query, FacebookMention.brand_id, allowed, scoped_brand)
     rows = query.order_by(FacebookMention.created_at.desc()).limit(limit).all()
     if not rows:
         return []
@@ -4676,12 +5214,14 @@ def list_facebook_mentions(
 
 
 @app.get("/facebook/summary", response_model=FacebookSummary)
-def facebook_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> FacebookSummary:
+def facebook_summary(
+    request: Request, session: DbSession, brand_id: uuid.UUID | None = None
+) -> FacebookSummary:
+    _, allowed, scoped_brand = resolve_brand_scope(session, request, brand_id)
     source_q = session.query(FacebookSource).filter(FacebookSource.deleted_at.is_(None))
     mention_q = session.query(FacebookMention)
-    if brand_id:
-        source_q = source_q.filter(FacebookSource.brand_id == brand_id)
-        mention_q = mention_q.filter(FacebookMention.brand_id == brand_id)
+    source_q = apply_brand_scope(source_q, FacebookSource.brand_id, allowed, scoped_brand)
+    mention_q = apply_brand_scope(mention_q, FacebookMention.brand_id, allowed, scoped_brand)
     mentions_total = mention_q.count()
     comments_total = mention_q.filter(FacebookMention.item_type.in_(["comment", "reply"])).count()
     analyzed_total = (
@@ -4689,10 +5229,8 @@ def facebook_summary(session: DbSession, brand_id: uuid.UUID | None = None) -> F
         .join(FacebookMention, FacebookMention.id == FacebookAnalysis.facebook_mention_id)
         .filter(FacebookAnalysis.error.is_(None))
     )
+    analyzed_total = apply_brand_scope(analyzed_total, FacebookMention.brand_id, allowed, scoped_brand)
     high_risk = analyzed_total.filter(FacebookAnalysis.risk_level.in_(["high", "critical"]))
-    if brand_id:
-        analyzed_total = analyzed_total.filter(FacebookMention.brand_id == brand_id)
-        high_risk = high_risk.filter(FacebookMention.brand_id == brand_id)
     latest = mention_q.order_by(FacebookMention.created_at.desc()).limit(20).all()
     return FacebookSummary(
         sources_total=source_q.count(),

@@ -110,7 +110,12 @@ class Settings(BaseSettings):
     gemini_relevance_gate: bool = True
     gemini_gate_model: str = "gemini-2.5-flash-lite"
     gemini_analysis_model: str = "gemini-2.5-pro"
-    gemini_profile_thinking_budget: int = 32768
+    # Profile "Gemini Pro" smart-fill: UI still says Pro, but the call uses a cheap
+    # flash-lite model for low latency. Display name is fixed in suggest_brand_profile.
+    gemini_profile_model: str = "gemini-2.5-flash-lite"
+    gemini_profile_display_name: str = "Gemini Pro"
+    # Keep thinking off for snappy profile fill.
+    gemini_profile_thinking_budget: int = 0
 
     # Used only when gemini_relevance_gate is off (legacy tiered path in analyze_payload):
     # flash-lite primary + Pro escalation on high risk.

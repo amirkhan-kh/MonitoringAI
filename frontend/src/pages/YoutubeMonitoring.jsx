@@ -86,6 +86,14 @@ function todayInputValue() {
   return now.toISOString().slice(0, 10);
 }
 
+/** Default YouTube lookback: today captures almost nothing for an existing channel. */
+function defaultYouTubeMonitorFrom(days = 14) {
+  const now = new Date();
+  now.setDate(now.getDate() - days);
+  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+  return now.toISOString().slice(0, 10);
+}
+
 function sourceRef(source) {
   if (source.channel_handle) return source.channel_handle;
   if (source.channel_id) return source.channel_id;
@@ -382,7 +390,12 @@ export function YoutubeMonitoring() {
     setNotice("");
     setSyncingSourceId(source.id);
     try {
-      const sync = await endpoints.youtubeSyncSource(source.id, { max_pages: 1, comments_per_video: 100 });
+      // full_resync rewalks from monitor_from so an empty first sync can recover.
+      const sync = await endpoints.youtubeSyncSource(source.id, {
+        max_pages: 3,
+        comments_per_video: 100,
+        full_resync: true,
+      });
       // The row has no result panel of its own, so the outcome goes to the page
       // banner — otherwise a quota failure here would be completely silent.
       if (sync?.ok === false) {
@@ -749,7 +762,7 @@ function YoutubeSourceForm({ categories, brands, selectedBrandId, initialCategor
   const [hashtags, setHashtags] = useState([]);
   const [category, setCategory] = useState(initialCategory || "owned");
   const [mode, setMode] = useState("brand_matches_only");
-  const [monitorFrom, setMonitorFrom] = useState(todayInputValue);
+  const [monitorFrom, setMonitorFrom] = useState(() => defaultYouTubeMonitorFrom(14));
   const [notes, setNotes] = useState("");
   const [collectVideos, setCollectVideos] = useState(true);
   const [collectComments, setCollectComments] = useState(true);
@@ -1051,7 +1064,10 @@ function YoutubeSourceForm({ categories, brands, selectedBrandId, initialCategor
       <label className="field">
         <span>Kuzatuv sanasi</span>
         <input className="input" type="date" value={monitorFrom} onChange={(event) => setMonitorFrom(event.target.value)} required />
-        <p className="fieldHint">Sync shu sanadan keyingi video va commentlarni import qiladi.</p>
+        <p className="fieldHint">
+          Shu sanadan keyingi video va commentlar olinadi. Default 14 kun orqaga — bugungi sana bo‘lsa eski
+          kanaldagi commentlar umuman kelmaydi.
+        </p>
       </label>
 
       <label className="field full">

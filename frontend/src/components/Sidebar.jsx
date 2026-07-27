@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
-import { Bot, Facebook, Instagram, Languages, LayoutDashboard, LogOut, Menu, MoonStar, Sun, UserCog, X } from "lucide-react";
+import { Facebook, Instagram, Languages, LayoutDashboard, LogOut, Menu, MoonStar, Shield, Sun, UserCog, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { clearApiCache, logout } from "../api/client";
+import { clearApiCache, isSuperAdmin, logout } from "../api/client";
 import { applyTheme, resolveTheme, toggleTheme } from "../theme";
 import { TelegramIcon, YouTubeIcon } from "./BrandIcons";
 
 const SIDEBAR_STATE_KEY = "monitoring_sidebar_collapsed";
 
-export function Sidebar({ botStatus, activePath = window.location.pathname }) {
+export function Sidebar({ activePath = window.location.pathname }) {
   const { t, i18n } = useTranslation();
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -18,7 +18,6 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
   });
   const [theme, setTheme] = useState(() => resolveTheme());
   const language = i18n.resolvedLanguage || i18n.language || "uz";
-  const botLabel = botStatus?.ok && botStatus.username ? `@${botStatus.username}` : t("Bot ulanmagan");
   const navItems = [
     { href: "/umumiy-dashboard", label: t("Umumiy dashboard"), icon: LayoutDashboard },
     { href: "/telegram-monitoring", label: t("Telegram monitoring"), icon: TelegramIcon },
@@ -26,6 +25,7 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
     { href: "/instagram-monitoring", label: t("Instagram monitoring"), icon: Instagram },
     { href: "/facebook-monitoring", label: t("Facebook monitoring"), icon: Facebook },
     { href: "/profile", label: t("Profil va source"), icon: UserCog },
+    ...(isSuperAdmin() ? [{ href: "/super-admin", label: t("Super Admin"), icon: Shield }] : []),
   ];
 
   function changeLanguage(nextLanguage) {
@@ -49,7 +49,8 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
   }, [collapsed]);
 
   useEffect(() => {
-    applyTheme(theme);
+    // Paint only — toggleTheme() is what persists user choice
+    applyTheme(theme, { persist: false });
   }, [theme]);
 
   return (
@@ -116,17 +117,6 @@ export function Sidebar({ botStatus, activePath = window.location.pathname }) {
             ))}
           </div>
         </div>
-      </div>
-
-      <div className="botStatus">
-        <div className="botIcon">
-          <Bot size={18} />
-        </div>
-        <div>
-          <span>{t("Monitoring bot")}</span>
-          <strong>{botLabel}</strong>
-        </div>
-        <em className={botStatus?.ok ? "state ok" : "state bad"}>{botStatus?.ok ? "online" : "offline"}</em>
       </div>
 
       <button className="navItem logoutItem" type="button" onClick={logout}>

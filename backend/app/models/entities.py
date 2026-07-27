@@ -15,11 +15,143 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class Brand(Base):
-    __tablename__ = "brands"
+# --- SaaS multi-tenant layer (Brand24-style) ---------------------------------
+
+
+class User(Base):
+    __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(32), default="active")  # active | disabled
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    memberships: Mapped[list["OrganizationMember"]] = relationship(back_populates="user")
+
+
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    price_usd: Mapped[int] = mapped_column(Integer, default=0)
+    price_uzs: Mapped[int] = mapped_column(Integer, default=0)
+    ai_mention_limit_monthly: Mapped[int] = mapped_column(Integer, default=100)
+    brands_limit: Mapped[int] = mapped_column(Integer, default=1)
+    seats_limit: Mapped[int] = mapped_column(Integer, default=1)
+    platforms: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    features: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # trial | active | past_due | suspended
+    status: Mapped[str] = mapped_column(String(32), default="trial", index=True)
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # During trial, hard AI cap (default 100). After paid activation, plan limit applies.
+    trial_ai_mention_limit: Mapped[int] = mapped_column(Integer, default=100)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    plan: Mapped["Plan | None"] = relationship()
+    members: Mapped[list["OrganizationMember"]] = relationship(back_populates="organization")
+    brands: Mapped[list["Brand"]] = relationship(back_populates="organization")
+
+
+class OrganizationMember(Base):
+    __tablename__ = "organization_members"
+    __table_args__ = (UniqueConstraint("organization_id", "user_id", name="uq_org_member"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # owner | admin | member | viewer
+    role: Mapped[str] = mapped_column(String(32), default="owner")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    organization: Mapped["Organization"] = relationship(back_populates="members")
+    user: Mapped["User"] = relationship(back_populates="memberships")
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("plans.id", ondelete="RESTRICT"), nullable=False
+    )
+    # trial | active | cancelled | past_due
+    status: Mapped[str] = mapped_column(String(32), default="trial", index=True)
+    current_period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # manual | payme | click | stripe
+    payment_provider: Mapped[str] = mapped_column(String(32), default="manual")
+    external_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    activated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class UsageMonthly(Base):
+    __tablename__ = "usage_monthly"
+    __table_args__ = (UniqueConstraint("organization_id", "year_month", name="uq_usage_org_month"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    year_month: Mapped[str] = mapped_column(String(7), nullable=False)  # YYYY-MM
+    mentions_ingested: Mapped[int] = mapped_column(Integer, default=0)
+    ai_analyses: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    cost_est_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class Brand(Base):
+    __tablename__ = "brands"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_brands_org_name"),
+        Index("ix_brands_organization_id", "organization_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True
+    )
+    # Creator / login-owner of this brand workspace (privacy boundary for non-super users).
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     industry: Mapped[str | None] = mapped_column(String(255))
     primary_category: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -42,6 +174,7 @@ class Brand(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
+    organization: Mapped["Organization | None"] = relationship(back_populates="brands")
     telegram_sources: Mapped[list["TelegramSource"]] = relationship(back_populates="brand")
     telegram_bot_connection: Mapped["TelegramBotConnection | None"] = relationship(
         back_populates="brand",

@@ -16,6 +16,7 @@ backend/.secrets/
 *.session
 *.session-journal
 postgres_data/
+backups/
 .obsidian/workspace.json
 .obsidian/workspace-mobile.json
 .obsidian/cache/
