@@ -4,9 +4,6 @@ import {
   BarChart3,
   Check,
   Copy,
-  Eye,
-  EyeOff,
-  HelpCircle,
   Heart,
   Instagram,
   KeyRound,
@@ -17,9 +14,11 @@ import {
   Trash2,
   Webhook,
   MessageCircle,
+  X,
 } from "lucide-react";
 import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId, saveSelectedBrandId } from "../api/client";
 import DeleteSourceModal from "../components/DeleteSourceModal";
+import { MetaConnectForm } from "../components/MetaConnectForm";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { MentionsAnalysisPanels } from "../components/RecentMentions";
 import { PageHeader } from "../components/PageHeader";
@@ -73,7 +72,6 @@ export function InstagramMonitoring() {
   const [form, setForm] = useState(emptyForm);
   const [demo, setDemo] = useState({ brand_id: "", author: "", text: "" });
   const [demoSubmitting, setDemoSubmitting] = useState(false);
-  const [showToken, setShowToken] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
   const [syncingSourceId, setSyncingSourceId] = useState("");
@@ -83,6 +81,7 @@ export function InstagramMonitoring() {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [copied, setCopied] = useState("");
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const brandRef = useRef("");
   const refreshTimer = useRef(null);
 
@@ -158,6 +157,15 @@ export function InstagramMonitoring() {
     loadData(selectedBrandId);
   }, [selectedBrandId, loadData]);
 
+  useEffect(() => {
+    if (!isAddModalOpen) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") setIsAddModalOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isAddModalOpen]);
+
   // Realtime: reload (debounced) when an Instagram mention / analysis event arrives.
   useEffect(() => {
     const source = endpoints.eventsStream();
@@ -196,6 +204,25 @@ export function InstagramMonitoring() {
   // Preferred path: the account owner approves us on Meta's own consent screen and the
   // token never touches anyone's clipboard. Falls back to the paste-a-token form below
   // for accounts whose token was generated elsewhere.
+  function handleOpenAdd() {
+    setForm((current) => ({
+      ...emptyForm,
+      brand_id: current.brand_id || selectedBrandId || brands[0]?.id || "",
+    }));
+    setError("");
+    setIsAddModalOpen(true);
+  }
+
+  function handleFormChange(next) {
+    const brandId = next.brand_id || "";
+    if (brandId && brandId !== selectedBrandId) {
+      const saved = saveSelectedBrandId(brandId);
+      brandRef.current = saved;
+      setSelectedBrandId(saved);
+    }
+    setForm(next);
+  }
+
   const handleOauthConnect = async () => {
     if (!form.brand_id) {
       setError("Avval brand tanlang.");
@@ -233,6 +260,7 @@ export function InstagramMonitoring() {
         monitoring_mode: form.monitoring_mode,
       });
       setForm({ ...emptyForm, brand_id: form.brand_id });
+      setIsAddModalOpen(false);
       try {
         const synced = await endpoints.instagramSyncSource(created.id);
         setNotice(
@@ -397,11 +425,15 @@ export function InstagramMonitoring() {
 
         <section className="monitoringWorkspace">
           <section className="recentSection">
-            <div className="sectionHeader">
+            <div className="sectionHeader metaConnectSectionHeader">
               <div>
                 <span className="eyebrow">Instagram API</span>
                 <h2>Yangi akkaunt ulash</h2>
               </div>
+              <button className="button primary addSourceButton" type="button" onClick={handleOpenAdd}>
+                <Plus size={17} />
+                <span>Qo'shish</span>
+              </button>
             </div>
 
             <div className="connectedAccountsPanel">
@@ -418,7 +450,11 @@ export function InstagramMonitoring() {
                   <div className="emptyState connectedAccountsEmpty">
                     <Instagram size={22} />
                     <strong>Hali akkaunt ulanmagan</strong>
-                    <span>Username, token va brandni kiriting, so‘ng “Akkauntni ulash” tugmasini bosing.</span>
+                    <span>«Qo'shish» tugmasi orqali username va token kiriting yoki qo'llanmani ko'ring.</span>
+                    <button className="button primary" type="button" onClick={handleOpenAdd}>
+                      <Plus size={16} />
+                      <span>Akkaunt ulash</span>
+                    </button>
                   </div>
                 )}
                 {visibleSources.map((source) => (
@@ -468,127 +504,6 @@ export function InstagramMonitoring() {
                     </div>
                   </div>
                 ))}
-              </div>
-            </div>
-
-            <div className="igOauthCard">
-              <div className="igOauthText">
-                <strong>Instagram bilan ulanish</strong>
-                <span>
-                  Akkaunt egasi Meta'ning rasmiy oynasida ruxsat beradi — token qo'lda nusxalanmaydi va
-                  60 kunlik uzoq muddatli token avtomatik olinadi.
-                </span>
-              </div>
-              <button
-                className="button primary"
-                type="button"
-                disabled={oauthBusy}
-                onClick={handleOauthConnect}
-              >
-                <Instagram size={17} />
-                <span>{oauthBusy ? "Yo'naltirilmoqda..." : "Instagram bilan ulanish"}</span>
-              </button>
-            </div>
-
-            <div className="igOrDivider"><span>yoki tokenni qo'lda kiritish</span></div>
-
-            <form className="loginForm" onSubmit={handleConnect} style={{ marginBottom: 18 }}>
-              <label className="field">
-                <span>Instagram username (ixtiyoriy)</span>
-                <input
-                  className="input"
-                  value={form.username}
-                  onChange={(e) => setForm({ ...form, username: e.target.value })}
-                  autoComplete="off"
-                />
-                <small>Masalan, <strong>brand_nomi</strong>. Token to'g'ri bo'lsa profil avtomatik aniqlanadi.</small>
-              </label>
-              <label className="field">
-                <span>Access token</span>
-                <div className="tokenInputWrap">
-                  <input
-                    className="input"
-                    type={showToken ? "text" : "password"}
-                    value={form.access_token}
-                    onChange={(e) => setForm({ ...form, access_token: e.target.value })}
-                    autoComplete="off"
-                  />
-                  <button
-                    type="button"
-                    className="eyeBtn"
-                    onClick={() => setShowToken((v) => !v)}
-                    title={showToken ? "Yashirish" : "Ko'rsatish"}
-                  >
-                    {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-                <small>Meta bergan tokenni kiriting. Token brauzer tarixiga yoki loglarga chiqarilmaydi.</small>
-              </label>
-              <label className="field">
-                <span>Brand</span>
-                <select
-                  className="input select"
-                  value={form.brand_id}
-                  onChange={(e) => {
-                    const brandId = saveSelectedBrandId(e.target.value);
-                    brandRef.current = brandId;
-                    setSelectedBrandId(brandId);
-                    setForm({ ...form, brand_id: brandId });
-                  }}
-                  required
-                >
-                  <option value="">{translateUiText("Brand tanlang")}</option>
-                  {brands.map((b) => (
-                    <option key={b.id} value={b.id}>{b.name}</option>
-                  ))}
-                </select>
-              </label>
-              <button className="button primary fullButton" type="submit" disabled={submitting}>
-                <Plus size={17} />
-                <span>{submitting ? "Ulanmoqda..." : "Akkauntni ulash"}</span>
-              </button>
-            </form>
-
-            <div className="igGuide">
-              <div className="igGuideHead">
-                <HelpCircle size={15} />
-                <strong>
-                  {form.username.trim()
-                    ? `@${form.username.trim()} profili tokenini olish`
-                    : "Bu profil tokenini qayerdan olaman?"}
-                </strong>
-              </div>
-              <div className="igGuideBody">
-                <p className="igGuideNote">
-                  Joriy <strong>Instagram Login</strong> tokeni Facebook Page'siz ham ishlayapti. Agar Facebook Login yo'lidan foydalanmoqchi bo'lsangiz,
-                  Instagram va qolgan yagona Facebook Page bir-biriga bog'lanishi kerak. Blok muddati tugamaguncha qayta-qayta urinmang.
-                </p>
-                <ol>
-                  <li>
-                    Instagram <strong>@{form.username.trim() || "brand_profili"}</strong> profilini <strong>Business yoki Creator</strong> qiling.
-                  </li>
-                  <li>
-                    Facebook'da kerakli Page'ga switch qiling → <strong>Settings & privacy → Settings → Permissions → Linked accounts → Instagram → Connect account</strong>.
-                    Facebook useringiz shu Page uchun Full control yoki kerakli task access'ga ega bo'lsin.
-                  </li>
-                  <li>
-                    Meta Developer App'da <strong>Facebook Login</strong> va <strong>Instagram Graph API</strong> mahsulotlarini yoqing.
-                    Development mode'da Facebook user va Instagram profilni App Roles/Testers'ga qo'shing.
-                  </li>
-                  <li>
-                    Graph API Explorer yoki o'z Facebook Login oqimingizdan User token yarating. Ruxsatlar:
-                    {" "}<code>instagram_basic</code>, <code>instagram_manage_comments</code>,
-                    {" "}<code>pages_show_list</code>, <code>pages_read_engagement</code>.
-                  </li>
-                  <li>
-                    Tokenni nusxalab yuqoridagi <strong>Access token</strong> ga joylang → <strong>Akkauntni ulash</strong>.
-                    Profil avtomatik aniqlanadi.
-                  </li>
-                </ol>
-                <p className="igGuideNote">
-                  “Something went wrong” yana chiqsa yangi Page yaratmang: Page access, professional account va Instagram'da boshqa Page ulanmaganini tekshiring,
-                  Facebook/Instagram ilovalaridan qayta login qiling va bitta urinish qiling.
-                </p>
               </div>
             </div>
 
@@ -741,6 +656,42 @@ export function InstagramMonitoring() {
           loading={loading}
           platformLabel="Instagram"
         />
+
+        {isAddModalOpen && (
+          <div className="modalOverlay" role="presentation" onMouseDown={() => setIsAddModalOpen(false)}>
+            <section
+              className="modalPanel"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="add-instagram-source-title"
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="modalHeader">
+                <div>
+                  <h2 id="add-instagram-source-title">Instagram akkaunt ulash</h2>
+                  <p>Username va access tokenni kiriting yoki OAuth orqali ulang. Qo‘llanma telefon simulyatorida.</p>
+                </div>
+                <button className="iconButton" type="button" aria-label="Yopish" onClick={() => setIsAddModalOpen(false)}>
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="modalContent">
+                <MetaConnectForm
+                  platform="instagram"
+                  brands={brands}
+                  selectedBrandId={selectedBrandId}
+                  selectedBrandName={brands.find((brand) => brand.id === (form.brand_id || selectedBrandId))?.name || ""}
+                  form={form}
+                  onChange={handleFormChange}
+                  onSubmit={handleConnect}
+                  submitting={submitting}
+                  onOauth={handleOauthConnect}
+                  oauthBusy={oauthBusy}
+                />
+              </div>
+            </section>
+          </div>
+        )}
 
         <DeleteSourceModal
           open={Boolean(pendingDelete)}

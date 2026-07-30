@@ -95,7 +95,7 @@ export function Login() {
   async function handleSubmit(event) {
     event.preventDefault();
     if (!username.trim() || !password.trim()) {
-      setError("Email (yoki login) va parolni to'ldiring.");
+      setError("Login va parolni to'ldiring.");
       return;
     }
     setLoading(true);
@@ -206,14 +206,17 @@ export function Login() {
             transition={reduceMotion ? { duration: 0 } : { delay: 0.36, duration: 0.5, ease: easeOut }}
           >
             <label className="field">
-              <span>Email yoki login</span>
+              <span>Login</span>
               <div className="inputWithIcon">
                 <User size={17} aria-hidden />
                 <input
                   className="input"
+                  type="text"
+                  inputMode="text"
                   value={username}
                   onChange={(event) => setUsername(event.target.value)}
                   autoComplete="username"
+                  placeholder="email yoki istalgan qiymat"
                 />
               </div>
             </label>

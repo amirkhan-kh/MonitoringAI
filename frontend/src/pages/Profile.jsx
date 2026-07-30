@@ -360,13 +360,15 @@ function BrandUnlockModal({ brand, onCancel, onUnlocked }) {
         ) : null}
         {error ? <div className="errorBanner">{error}</div> : null}
         <label className="field">
-          <span>{t("Login (email)")}</span>
+          <span>{t("Login")}</span>
           <input
             className="input"
-            type="email"
+            type="text"
+            inputMode="text"
             autoComplete="username"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            placeholder={t("email yoki istalgan qiymat")}
             required
           />
         </label>

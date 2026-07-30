@@ -8,13 +8,14 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
 class LoginRequest(BaseModel):
-    # Email or legacy admin username
+    # Email or free-form login / legacy admin username
     username: str
     password: str
 
 
 class RegisterRequest(BaseModel):
-    email: str
+    # Email or free-form login (stored in users.email)
+    email: str = Field(min_length=1, max_length=320)
     password: str = Field(min_length=8, max_length=128)
     full_name: str | None = None
     organization_name: str = Field(min_length=1, max_length=255)

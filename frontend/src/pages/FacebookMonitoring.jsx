@@ -5,10 +5,7 @@ import {
   Brain,
   Check,
   Copy,
-  Eye,
-  EyeOff,
   Facebook,
-  HelpCircle,
   KeyRound,
   Plus,
   RefreshCw,
@@ -17,9 +14,11 @@ import {
   Sparkles,
   Trash2,
   Webhook,
+  X,
 } from "lucide-react";
 import { clearApiCache, endpoints, readSelectedBrandId, resolveSelectedBrandId, saveSelectedBrandId } from "../api/client";
 import DeleteSourceModal from "../components/DeleteSourceModal";
+import { MetaConnectForm } from "../components/MetaConnectForm";
 import { MonitoringInsights } from "../components/MonitoringInsights";
 import { MentionsAnalysisPanels } from "../components/RecentMentions";
 import { PageHeader } from "../components/PageHeader";
@@ -72,7 +71,6 @@ export function FacebookMonitoring() {
   const [form, setForm] = useState(emptyForm);
   const [demo, setDemo] = useState({ brand_id: "", author: "", text: "" });
   const [demoSubmitting, setDemoSubmitting] = useState(false);
-  const [showToken, setShowToken] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -80,6 +78,7 @@ export function FacebookMonitoring() {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [copied, setCopied] = useState("");
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const brandRef = useRef("");
   const refreshTimer = useRef(null);
 
@@ -141,6 +140,15 @@ export function FacebookMonitoring() {
   }, [selectedBrandId, loadData]);
 
   useEffect(() => {
+    if (!isAddModalOpen) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") setIsAddModalOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isAddModalOpen]);
+
+  useEffect(() => {
     const source = endpoints.eventsStream();
     const onEvent = (event) => {
       try {
@@ -174,6 +182,25 @@ export function FacebookMonitoring() {
     [summary],
   );
 
+  function handleOpenAdd() {
+    setForm((current) => ({
+      ...emptyForm,
+      brand_id: current.brand_id || selectedBrandId || brands[0]?.id || "",
+    }));
+    setError("");
+    setIsAddModalOpen(true);
+  }
+
+  function handleFormChange(next) {
+    const brandId = next.brand_id || "";
+    if (brandId && brandId !== selectedBrandId) {
+      const saved = saveSelectedBrandId(brandId);
+      brandRef.current = saved;
+      setSelectedBrandId(saved);
+    }
+    setForm(next);
+  }
+
   const handleConnect = async (event) => {
     event.preventDefault();
     if (!form.brand_id) {
@@ -195,6 +222,7 @@ export function FacebookMonitoring() {
         monitoring_mode: form.monitoring_mode,
       });
       setForm({ ...emptyForm, brand_id: form.brand_id });
+      setIsAddModalOpen(false);
       setNotice(`Ulandi: ${created.page_name || created.page_id}. Kommentlar yig'ila boshlaydi.`);
       await loadData(brandRef.current);
     } catch (err) {
@@ -309,139 +337,77 @@ export function FacebookMonitoring() {
 
         <section className="monitoringWorkspace">
           <section className="recentSection">
-            <div className="sectionHeader">
+            <div className="sectionHeader metaConnectSectionHeader">
               <div>
-                <span className="eyebrow">Ulangan sahifalar</span>
-                <h2>Facebook Page</h2>
+                <span className="eyebrow">Facebook API</span>
+                <h2>Yangi sahifa ulash</h2>
               </div>
-            </div>
-
-            <form className="loginForm" onSubmit={handleConnect} style={{ marginBottom: 18 }}>
-              <label className="field">
-                <span>Facebook Page nomi</span>
-                <input
-                  className="input"
-                  value={form.page_name}
-                  onChange={(e) => setForm({ ...form, page_name: e.target.value })}
-                  autoComplete="off"
-                />
-              </label>
-              <label className="field">
-                <span>Access token</span>
-                <div className="tokenInputWrap">
-                  <input
-                    className="input"
-                    type={showToken ? "text" : "password"}
-                    value={form.access_token}
-                    onChange={(e) => setForm({ ...form, access_token: e.target.value })}
-                    autoComplete="off"
-                  />
-                  <button
-                    type="button"
-                    className="eyeBtn"
-                    onClick={() => setShowToken((v) => !v)}
-                    title={showToken ? "Yashirish" : "Ko'rsatish"}
-                  >
-                    {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </label>
-              <label className="field">
-                <span>Brand</span>
-                <select
-                  className="input select"
-                  value={form.brand_id}
-                  onChange={(e) => {
-                    const brandId = saveSelectedBrandId(e.target.value);
-                    brandRef.current = brandId;
-                    setSelectedBrandId(brandId);
-                    setForm({ ...form, brand_id: brandId });
-                  }}
-                  required
-                >
-                  <option value="">{translateUiText("Brand tanlang")}</option>
-                  {brands.map((b) => (
-                    <option key={b.id} value={b.id}>{b.name}</option>
-                  ))}
-                </select>
-              </label>
-              <button className="button primary fullButton" type="submit" disabled={submitting}>
+              <button className="button primary addSourceButton" type="button" onClick={handleOpenAdd}>
                 <Plus size={17} />
-                <span>{submitting ? "Ulanmoqda..." : "Sahifani ulash"}</span>
+                <span>Qo'shish</span>
               </button>
-            </form>
-
-            <div className="igGuide">
-              <div className="igGuideHead">
-                <HelpCircle size={15} />
-                <strong>
-                  {form.page_name.trim()
-                    ? `"${form.page_name.trim()}" sahifasi tokenini olish`
-                    : "Bu sahifa tokenini qayerdan olaman?"}
-                </strong>
-              </div>
-              <div className="igGuideBody">
-                <p className="igGuideNote">
-                  O'z <strong>ishonchli Meta Business</strong> akkauntingizdan Page token olinadi. Own/test sahifada sinab ko'rish mumkin,
-                  lekin keng production comment oqimi uchun Meta permission/App Review talab qilinishi mumkin.
-                </p>
-                <ol>
-                  <li>
-                    <a href="https://business.facebook.com/settings" target="_blank" rel="noreferrer">business.facebook.com/settings</a>
-                    {" "}→ chapdan <strong>Users → System users</strong> → <strong>Add</strong> (yangi system user).
-                  </li>
-                  <li>System user → <strong>Assign assets</strong> → Facebook Page'ni tanlang (Full control).</li>
-                  <li>
-                    <strong>Generate new token</strong> → App'ni tanlang → ruxsatlar:
-                    {" "}<code>pages_show_list</code>, <code>pages_read_engagement</code>,
-                    {" "}<code>pages_read_user_content</code>, <code>pages_manage_metadata</code>.
-                  </li>
-                  <li>
-                    Tokenni nusxalab yuqoridagi <strong>Access token</strong> ga joylang → <strong>Sahifani ulash</strong>.
-                    Sahifa avtomatik aniqlanadi.
-                  </li>
-                </ol>
-                <p className="igGuideNote">
-                  Token hali yo'qmi? Pastdagi <strong>Demo AI tahlil</strong> orqali tizimni hoziroq sinab ko'ring.
-                </p>
-              </div>
             </div>
 
-            <div className="sourceList">
-              {visibleSources.length === 0 && <div className="emptyState">Hali sahifa ulanmagan</div>}
-              {visibleSources.map((source) => (
-                <div className="igAccountRow" key={source.id}>
-                  <div className="sourceIcon"><Facebook size={18} /></div>
-                  <div className="sourceBody">
-                    <strong>
-                      {source.page_name || source.page_id}{" "}
-                      <span className={`tokenBadge ${source.token_status}`}>
-                        {source.token_status === "active"
-                          ? "faol"
-                          : source.token_status === "invalid"
-                          ? "yaroqsiz"
-                          : "?"}
-                      </span>
-                    </strong>
-                    <span className="sourceMeta">
-                      {source.monitoring_mode === "all_messages" ? "Barcha kommentlar" : "Faqat mos"} ·{" "}
-                      {source.webhook_subscribed ? "webhook ✓" : "poller (60s)"}
-                      {source.token_status === "invalid" && source.status_detail
-                        ? ` · ${source.status_detail.slice(0, 40)}`
-                        : ""}
-                    </span>
-                  </div>
-                  <button className="iconButton" type="button" title="Tekshirish" onClick={() => handleValidate(source.id)}>
-                    <RefreshCw size={15} />
-                  </button>
-                  <button className="iconButton" type="button" title="Token yangilash" onClick={() => handleSwapToken(source.id)}>
-                    <KeyRound size={15} />
-                  </button>
-                  <button className="iconButton danger" type="button" title="Sahifa va unga tegishli barcha ma'lumotlarni o'chirish" onClick={() => handleDelete(source)}>
-                    <Trash2 size={16} />
-                  </button>
+            <div className="connectedAccountsPanel">
+              <div className="connectedAccountsHead">
+                <div>
+                  <span className="eyebrow">Ulangan sahifalar</span>
+                  <h3>Facebook Page</h3>
                 </div>
-              ))}
+                <span className="accountCountBadge">{visibleSources.length}</span>
+              </div>
+
+              <div className="sourceList">
+                {visibleSources.length === 0 && (
+                  <div className="emptyState connectedAccountsEmpty">
+                    <Facebook size={22} />
+                    <strong>Hali sahifa ulanmagan</strong>
+                    <span>«Qo'shish» tugmasi orqali Page nomi va token kiriting yoki qo'llanmani ko'ring.</span>
+                    <button className="button primary" type="button" onClick={handleOpenAdd}>
+                      <Plus size={16} />
+                      <span>Sahifa ulash</span>
+                    </button>
+                  </div>
+                )}
+                {visibleSources.map((source) => (
+                  <div className="igAccountRow" key={source.id}>
+                    <div className="sourceIcon"><Facebook size={18} /></div>
+                    <div className="sourceBody">
+                      <strong>
+                        {source.page_name || source.page_id}{" "}
+                        <span className={`tokenBadge ${source.token_status}`}>
+                          {source.token_status === "active"
+                            ? "faol"
+                            : source.token_status === "invalid"
+                            ? "yaroqsiz"
+                            : "?"}
+                        </span>
+                      </strong>
+                      <span className="sourceMeta">
+                        {source.monitoring_mode === "all_messages" ? "Barcha kommentlar" : "Faqat mos"} ·{" "}
+                        {source.webhook_subscribed ? "webhook ✓" : "poller (60s)"}
+                        {source.token_status === "invalid" && source.status_detail
+                          ? ` · ${source.status_detail.slice(0, 40)}`
+                          : ""}
+                      </span>
+                    </div>
+                    <div className="accountActionGroup">
+                      <button className="accountActionButton" type="button" onClick={() => handleValidate(source.id)}>
+                        <RefreshCw size={14} />
+                        <span>Tekshirish</span>
+                      </button>
+                      <button className="accountActionButton" type="button" onClick={() => handleSwapToken(source.id)}>
+                        <KeyRound size={14} />
+                        <span>Token yangilash</span>
+                      </button>
+                      <button className="accountActionButton danger" type="button" onClick={() => handleDelete(source)}>
+                        <Trash2 size={14} />
+                        <span>O‘chirish</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <form className="demoCard" onSubmit={handleDemo}>
@@ -587,6 +553,40 @@ export function FacebookMonitoring() {
           loading={loading}
           platformLabel="Facebook"
         />
+
+        {isAddModalOpen && (
+          <div className="modalOverlay" role="presentation" onMouseDown={() => setIsAddModalOpen(false)}>
+            <section
+              className="modalPanel"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="add-facebook-source-title"
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="modalHeader">
+                <div>
+                  <h2 id="add-facebook-source-title">Facebook Page ulash</h2>
+                  <p>Page nomi va access tokenni kiriting. Qo‘llanma telefon simulyatorida ko‘rsatiladi.</p>
+                </div>
+                <button className="iconButton" type="button" aria-label="Yopish" onClick={() => setIsAddModalOpen(false)}>
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="modalContent">
+                <MetaConnectForm
+                  platform="facebook"
+                  brands={brands}
+                  selectedBrandId={selectedBrandId}
+                  selectedBrandName={brands.find((brand) => brand.id === (form.brand_id || selectedBrandId))?.name || ""}
+                  form={form}
+                  onChange={handleFormChange}
+                  onSubmit={handleConnect}
+                  submitting={submitting}
+                />
+              </div>
+            </section>
+          </div>
+        )}
 
         <DeleteSourceModal
           open={Boolean(pendingDelete)}

@@ -103,7 +103,7 @@ export function Register() {
   async function handleSubmit(event) {
     event.preventDefault();
     if (!email.trim() || !password.trim() || !orgName.trim()) {
-      setError("Email, parol va tashkilot nomini to'ldiring.");
+      setError("Login, parol va tashkilot nomini to'ldiring.");
       return;
     }
     if (password.length < 8) {
@@ -224,15 +224,17 @@ export function Register() {
             transition={reduceMotion ? { duration: 0 } : { delay: 0.36, duration: 0.5, ease: easeOut }}
           >
             <label className="field">
-              <span>Email</span>
+              <span>Login</span>
               <div className="inputWithIcon">
                 <Mail size={17} aria-hidden />
                 <input
                   className="input"
-                  type="email"
-                  autoComplete="email"
+                  type="text"
+                  inputMode="text"
+                  autoComplete="username"
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
+                  placeholder="email yoki istalgan qiymat"
                   required
                 />
               </div>

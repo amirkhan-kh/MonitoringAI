@@ -7613,6 +7613,385 @@ button {
   }
 }
 
+/* --- Meta (Instagram / Facebook) connect guide scenes ----------------- */
+.metaGuideAppBar.instagram > svg { color: #e1306c; }
+.metaGuideAppBar.facebook > svg { color: #1877f2; }
+
+.metaGuideAvatar.instagram {
+  background: linear-gradient(145deg, #f9ce34, #ee2a7b 55%, #6228d7);
+}
+
+.metaGuideAvatar.facebook {
+  background: linear-gradient(145deg, #4b9bff, #1877f2);
+  font-size: 12px;
+  text-transform: lowercase;
+}
+
+.metaGuideHighlight {
+  position: relative;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(238, 42, 123, 0.14);
+  color: #c13584;
+}
+
+.metaGuidePhone.facebook .metaGuideHighlight {
+  background: rgba(24, 119, 242, 0.14);
+  color: #1877f2;
+}
+
+.metaGuideBadge {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  color: #64748b;
+  font-size: 8.5px;
+  font-weight: 700;
+}
+
+.metaGuideIgHome,
+.metaGuideIgProfile,
+.metaGuideFbPages,
+.metaGuideFbPageDetail,
+.metaGuideDev {
+  display: grid;
+  gap: 8px;
+  height: 100%;
+}
+
+.metaGuideIgStories {
+  display: flex;
+  gap: 8px;
+}
+
+.metaGuideIgStory {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+  width: 42px;
+}
+
+.metaGuideIgStory i {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 2px solid #ee2a7b;
+  background: linear-gradient(145deg, #fde68a, #fbcfe8);
+}
+
+.metaGuideIgStory em {
+  color: #64748b;
+  font-size: 8px;
+  font-style: normal;
+}
+
+.metaGuideIgPost {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+.metaGuideIgPost strong {
+  font-size: 10px;
+}
+
+.metaGuideIgPostBody {
+  display: block;
+  height: 86px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #fce7f3, #e0e7ff);
+}
+
+.metaGuideIgTabBar {
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  margin-top: auto;
+  padding: 8px 4px 2px;
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
+  background: #fff;
+  border-radius: 0 0 12px 12px;
+}
+
+.metaGuideIgTabBar span {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: #cbd5e1;
+}
+
+.metaGuideIgTabBar span.active {
+  background: linear-gradient(145deg, #f9ce34, #ee2a7b);
+  box-shadow: 0 0 0 3px rgba(238, 42, 123, 0.18);
+}
+
+.metaGuideIgProfileHead {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 6px;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.metaGuideIgAvatar {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 999px;
+  background: linear-gradient(145deg, #f9ce34, #ee2a7b 55%, #6228d7);
+}
+
+.metaGuideIgProfileHead strong {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.metaGuideIgProfileHead em {
+  display: block;
+  color: #94a3b8;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.metaGuideIgStats {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 4px;
+  font-size: 9.5px;
+  color: #64748b;
+}
+
+.metaGuideIgStats b {
+  display: block;
+  color: #0f172a;
+  font-size: 11px;
+}
+
+.metaGuideIgGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+}
+
+.metaGuideIgGrid i {
+  display: block;
+  aspect-ratio: 1;
+  border-radius: 3px;
+  background: linear-gradient(145deg, #fce7f3, #e2e8f0);
+}
+
+.metaGuideDevTop {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: #fff;
+  color: #64748b;
+  font-size: 8.5px;
+  font-weight: 600;
+}
+
+.metaGuideDevBody {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.metaGuideDevField {
+  display: grid;
+  gap: 3px;
+}
+
+.metaGuideDevField > span {
+  color: #94a3b8;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metaGuideDevField > em {
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: #f1f5f9;
+  color: #0f172a;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.metaGuideDevField > em.mono {
+  position: relative;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+}
+
+.metaGuideDevField.token.active > em {
+  background: rgba(42, 171, 238, 0.16);
+}
+
+.metaGuidePerms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.metaGuidePerms span {
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.1);
+  color: #4f46e5;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.metaGuideGenerate {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: linear-gradient(145deg, #f9ce34, #ee2a7b 55%, #6228d7);
+  color: #fff;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 800;
+  pointer-events: none;
+  transition: transform 0.15s var(--ease-smooth), filter 0.15s var(--ease-smooth);
+}
+
+.metaGuideGenerate.fb {
+  background: linear-gradient(145deg, #4b9bff, #1877f2);
+}
+
+.metaGuideGenerate.active {
+  transform: scale(0.97);
+  filter: brightness(1.08);
+}
+
+.metaGuideFbPageRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border-radius: 10px;
+  background: #fff;
+  transition: background 0.2s var(--ease-smooth), transform 0.2s var(--ease-smooth);
+}
+
+.metaGuideFbPageRow.tapped {
+  background: rgba(24, 119, 242, 0.12);
+  transform: scale(0.99);
+}
+
+.metaGuideFbPageRow strong {
+  display: block;
+  font-size: 11px;
+}
+
+.metaGuideFbPageRow em {
+  color: #94a3b8;
+  font-size: 9px;
+  font-style: normal;
+}
+
+.metaGuideFbPageIcon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: #1877f2;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.metaGuideFbPageIcon.large {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  font-size: 20px;
+}
+
+.metaGuideFbCover {
+  display: block;
+  height: 72px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #93c5fd, #1877f2);
+}
+
+.metaGuideFbPageHead {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: -18px;
+  padding: 0 6px;
+}
+
+.metaGuideFbPageHead strong {
+  position: relative;
+  display: inline-flex;
+  font-size: 12px;
+}
+
+.metaGuideFbPageHead em {
+  display: block;
+  color: #94a3b8;
+  font-size: 9.5px;
+  font-style: normal;
+}
+
+.metaGuideFbMeta {
+  display: flex;
+  gap: 10px;
+  padding: 6px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.metaConnectSectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connectedAccountsEmpty {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  text-align: center;
+  padding: 28px 16px;
+}
+
+.connectedAccountsEmpty .button {
+  margin-top: 6px;
+}
+
+.metaConnectOauth {
+  margin-top: 4px;
+}
+
+.metaConnectForm .telegramConnectorInputs {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 /* Inputs inside the connector cards sit on a tinted surface, so they read as filled
    wells rather than outlined boxes; focus is carried by a soft ring alone. */
 .telegramConnectorInputCard .input {

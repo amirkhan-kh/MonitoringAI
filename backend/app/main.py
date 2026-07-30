@@ -134,7 +134,6 @@ from app.services.auth import (
     authenticate_user,
     decode_token,
     hash_password,
-    is_valid_email,
     issue_session_token,
     normalize_email,
     primary_membership,
@@ -495,13 +494,16 @@ def assert_user_brand(session: Session, request: Request, brand_id: uuid.UUID) -
 @app.post("/auth/register")
 def auth_register(payload: RegisterRequest, session: DbSession) -> dict[str, object]:
     settings = get_settings()
+    # Login identifier: email or any free-form value (stored in users.email).
     email = normalize_email(payload.email)
-    if not is_valid_email(email):
-        raise HTTPException(status_code=400, detail="Email formati noto'g'ri")
+    if not email or " " in email:
+        raise HTTPException(status_code=400, detail="Login bo'sh yoki bo'sh joyli bo'lishi mumkin emas")
+    if len(email) > 320:
+        raise HTTPException(status_code=400, detail="Login juda uzun")
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Parol kamida 8 ta belgi bo'lishi kerak")
     if session.query(User).filter(User.email == email).first():
-        raise HTTPException(status_code=409, detail="Bu email allaqachon ro'yxatdan o'tgan")
+        raise HTTPException(status_code=409, detail="Bu login allaqachon ro'yxatdan o'tgan")
 
     user = User(
         email=email,
@@ -2834,14 +2836,12 @@ def unlock_brand_workspace(
         # Legacy brand without owner — allow super admin through without client password.
         return BrandUnlockResponse(brand_id=brand.id, owner_email=None, unlocked=True)
 
-    email = normalize_email(payload.email)
     bad_creds = {
         "uz": "Brand egasining login/paroli noto'g'ri",
         "en": "Brand owner login/password is incorrect",
         "ru": "Неверный логин/пароль владельца бренда",
     }[lang]
-    if email != normalize_email(owner.email):
-        raise HTTPException(status_code=401, detail=bad_creds)
+    # Accept email or any free-form login that resolves to the brand owner.
     user = authenticate_user(session, get_settings(), payload.email, payload.password)
     if user is None or user.id != owner.id:
         raise HTTPException(status_code=401, detail=bad_creds)
