@@ -3,10 +3,11 @@ import {
   EyeOff,
   Instagram,
   Facebook,
-  PlayCircle,
+  Play,
   Plus,
   ShieldAlert,
   CheckCircle2,
+  Clapperboard,
 } from "lucide-react";
 import { useState } from "react";
 import MetaConnectGuideModal from "./MetaConnectGuideModal.jsx";
@@ -34,14 +35,16 @@ export function MetaConnectForm({
   const [validationError, setValidationError] = useState("");
 
   const identityLabel = isInstagram ? "Instagram username" : "Facebook Page nomi";
-  const identityPlaceholder = isInstagram ? "brand_nomi yoki @brand_nomi" : "Brand Page";
   const identityHint = isInstagram
     ? "Ixtiyoriy. Token to'g'ri bo'lsa profil avtomatik aniqlanadi."
     : "Ixtiyoriy. Token to'g'ri bo'lsa sahifa avtomatik aniqlanadi.";
   const submitLabel = isInstagram ? "Akkauntni ulash" : "Sahifani ulash";
-  const guideLinkLabel = isInstagram
-    ? "Username va token olish qo'llanmasini ko'rish"
-    : "Page va token olish qo'llanmasini ko'rish";
+  const guideTitle = isInstagram
+    ? "Username va tokenni qayerdan olishni bilmayapsizmi?"
+    : "Page va tokenni qayerdan olishni bilmayapsizmi?";
+  const guideBody = isInstagram
+    ? "2 ta qisqa video: Instagram profilidan username va Meta Developers'dan access token qanday olinadi."
+    : "2 ta qisqa video: Facebook Page nomi va Business Manager'dan access token qanday olinadi.";
 
   function handleField(key, value) {
     onChange?.({ ...form, [key]: value });
@@ -69,7 +72,7 @@ export function MetaConnectForm({
 
   return (
     <>
-      <form className="sourceForm telegramConnectionForm metaConnectForm" onSubmit={handleSubmit}>
+      <form className={`sourceForm telegramConnectionForm metaConnectForm ${isInstagram ? "instagram" : "facebook"}`} onSubmit={handleSubmit}>
         <div className={`telegramSelectedBrand full ${form.brand_id || selectedBrandId ? "ready" : "missing"}`}>
           {form.brand_id || selectedBrandId ? <CheckCircle2 size={17} /> : <ShieldAlert size={17} />}
           <div>
@@ -81,6 +84,31 @@ export function MetaConnectForm({
                 || selectedBrandId
                 || "Brand tanlanmagan"}
             </strong>
+          </div>
+        </div>
+
+        {/* Prominent guide CTA first — so users never miss the phone-simulator videos */}
+        <div className={`metaConnectGuideCard full ${isInstagram ? "instagram" : "facebook"}`}>
+          <div className="metaConnectGuideCardMedia" aria-hidden="true">
+            <span className="metaConnectGuidePlayRing">
+              <Play size={22} fill="currentColor" />
+            </span>
+            <span className="metaConnectGuideBadge">
+              <Clapperboard size={12} />
+              2 video
+            </span>
+          </div>
+          <div className="metaConnectGuideCardBody">
+            <strong>{guideTitle}</strong>
+            <p>{guideBody}</p>
+            <button
+              className="metaConnectGuideButton"
+              type="button"
+              onClick={() => setGuideOpen(true)}
+            >
+              <Play size={16} fill="currentColor" aria-hidden="true" />
+              <span>Video qo‘llanmani ochish</span>
+            </button>
           </div>
         </div>
 
@@ -116,7 +144,6 @@ export function MetaConnectForm({
                 className="input"
                 value={isInstagram ? (form.username || "") : (form.page_name || "")}
                 onChange={(event) => handleField(isInstagram ? "username" : "page_name", event.target.value)}
-                placeholder={identityPlaceholder}
                 autoComplete="off"
                 spellCheck="false"
               />
@@ -131,7 +158,6 @@ export function MetaConnectForm({
                   type={showToken ? "text" : "password"}
                   value={form.access_token || ""}
                   onChange={(event) => handleField("access_token", event.target.value)}
-                  placeholder={isInstagram ? "IGQVJ… yoki EAAG…" : "EAAG…"}
                   autoComplete="off"
                   spellCheck="false"
                 />
@@ -144,13 +170,17 @@ export function MetaConnectForm({
                   {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              <p className="fieldHint">Token faqat serverga yuboriladi; brauzer xotirasida saqlanmaydi.</p>
+              <p className="fieldHint">
+                Token faqat serverga yuboriladi.{" "}
+                <button
+                  className="metaConnectInlineGuide"
+                  type="button"
+                  onClick={() => setGuideOpen(true)}
+                >
+                  Token qayerdan olinadi? Video ko‘rish
+                </button>
+              </p>
             </label>
-
-            <button className="telegramBotGuideLink" type="button" onClick={() => setGuideOpen(true)}>
-              <PlayCircle size={16} aria-hidden="true" />
-              <span>{guideLinkLabel}</span>
-            </button>
           </section>
         </div>
 
